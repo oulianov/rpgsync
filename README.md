@@ -76,42 +76,34 @@ cd /path/to/MyGame
 rpgsync
 ```
 
-The first time, it writes the scripts into `/path/to/MyGame/Scripts` (one
-file per map, plus the database in `database/`) and sets that folder up as a
-small Python project. Open the `Scripts` folder in your editor (VS Code,
-PyCharm, Zed...) and select its `.venv` as the Python interpreter.
-
-Leave it running while you work: every save on either side is synced within
-a second, and each sync is logged with what changed and how long it took.
-Stop it with Ctrl+C. It works from the `Scripts` folder too, or from anywhere
-with the game folder as argument: `rpgsync /path/to/MyGame`.
+-  The first time, it writes the scripts into `/path/to/MyGame/Scripts` and sets that folder up as a small Python project. 
+- Open the `Scripts` folder in your editor and select its `.venv` as the Python interpreter.
+- Leave `rpgsync` running while you work. Every save on either side is synced within a second.
 
 Before writing a script into the game, rpgsync runs the same checks as the
-[automated tests](#automated-tests): the script must compile, and its events
-must only use commands your engine supports. Problems are reported with
-their line number and the game file is left untouched until you fix them.
-
-**The game is only written once the scripts are valid.**
+[automated tests](#automated-tests).:
+- The script must compile, and its events must only use commands your engine supports. 
+- Problems are reported with their line number and the game file is left untouched until you fix them.
+- **The game files are only written once the scripts are valid.**
 
 ### Will this break my project?
 
-rpgsync is built so that it should not, and so that you can always go back:
+rpgsync is built so that **it should not**. If anything, you can always go back.
 
 - **Invalid scripts are never written.** A typo, a wrong value or a
   RPG Maker 2003 command in a 2000 game stops at the checks above.
 - **Every overwritten file is backed up** (game files and scripts) in
   `Scripts/.rpgsync/history/`, the last 50 syncs. `rpgsync clean`
   deletes them once you no longer need them.
-- **Only what you changed is written.** Editing one event rewrites that
-  event; the rest of the file (tiles, other events, unknown data from
-  patches) is kept.
-- **Nothing is lost on conflicts.** If the same event changed on both sides,
+- Only what you changed is written.
+- If the same event changed on both sides,
   the editor's version is kept and your script is saved next to it as
   `MapXXXX.conflict-<time>.py`.
 - **The RPG Maker editor does not reload files by itself.** Save in the
   editor before editing the same map's script, and reopen the project in
   the editor after script changes; otherwise its next save overwrites them.
-- Using git on the game folder is still a good idea.
+
+Using git on the game folder and doing backups is still a good idea.
 
 ## Recommended: add EasyRPG Player
 
@@ -126,26 +118,6 @@ changes: start the game, play, quit, edit, start again.
 - F12 returns to the title screen, so you can reload changed maps without
   restarting.
 
-## Playing with DynRPG
-
-[DynRPG](https://www.rewking.com/dynrpg/) patches RPG_RT.exe to load plugins
-(`DynPlugins/*.dll`), driven by event comments such as
-`@write_text "id", 10, 20, "Hello"`. On Windows the patched RPG_RT runs them
-as usual. On macOS and Linux use EasyRPG Player, which emulates the most
-common plugins:
-
-- **DynTextPlugin** (`write_text`, `append_line`, `append_text`,
-  `change_text`, `change_position`, `remove_text`, `remove_all`)
-- **DynParams** (`dynparams_add_param`, `dynparams_overwrite_next`, ...):
-  needs an EasyRPG Player build that includes
-  [this change](https://github.com/oulianov/Player) until it is merged
-  upstream; build it with the steps of EasyRPG's
-  [BUILDING.md](https://github.com/EasyRPG/Player/blob/master/docs/BUILDING.md).
-
-Plugins that only change rendering (e.g. `system_opengl` shaders) are not
-needed. EasyRPG logs `Unsupported DynRPG function: ...` for anything it
-cannot run.
-
 ## Advanced workflows
 
 ### Push and pull changes manually
@@ -159,9 +131,9 @@ rpgsync pull     # game -> scripts (regenerate the scripts)
 rpgsync push     # scripts -> game
 ```
 
-Each command works on the game of the current folder, or on the game or
-`Scripts` folder given as argument. `--map N` limits a command to one map, `pull --force` overwrites
-scripts that have unsynced edits.
+- Each command works on the game of the current folder, or on the game or `Scripts` folder given as argument. 
+- `--map N` limits a command to one map
+- `pull --force` overwrites scripts that have unsynced edits.
 
 ### Automated tests
 
