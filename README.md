@@ -1,0 +1,226 @@
+# rpgsync
+
+A python twin of your RPG Maker 2000/2003 game.
+
+**rpgsync** turns the events of your game into readable Python scripts, and keeps both sides in sync while you work.
+
+- Save a script and the game is updated
+- Save in the RPG Maker editor and the script is updated. 
+
+Edit events in your favourite editor, with autocompletion, type checking, search and git.
+
+
+## Code example
+
+```python
+@event(10, "Jeremy", x=15, y=38)
+def linky():
+    @page(when=variables[102] == 1, sprite=("heroes1", 1), layer="same")
+    def page_1():
+        # Greetings (this comment is stored in the game)
+        text(r"\n[3] : Bonjour, je suis \c[2]Jeremy\c[0].")
+        this.move(move_up * 3, face_player, frequency=8)
+        ulysse.move(move_up * 2)  # another event of this map, by name
+        if party.gold >= 100:
+            match show_choices("Payer", "Partir"):
+                case "Payer":
+                    party.gold -= 100
+                    items[3].count += 1
+                case "Partir":
+                    return
+        else:
+            text("Reviens avec de l'or.")
+        variables[102] += 1
+
+
+@event(11, "Ulysse", x=10, y=42)
+def ulysse(): # The other event!
+    @page(sprite=("heroes1", 0), layer="same")
+    def page_1():
+        pass
+```
+
+Every command, option and value is typed and documented in
+[`rpgsync/dsl.py`](rpgsync/dsl.py): your editor shows the docs on hover and
+flags wrong values (a misspelled direction, a sprite index above 7, ...).
+
+## Getting started
+
+### 1. Install uv
+
+rpgsync uses [uv](https://docs.astral.sh/uv/) to manage Python:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+(Windows: `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`)
+
+### 2. Get rpgsync
+
+```bash
+git clone https://github.com/oulianov/rpgsync.git
+cd rpgsync
+uv tool install --editable .
+```
+
+This puts the `rpgsync` command on your PATH. (Without installing, you can
+run every command below from the `rpgsync` folder as `uvx --from . rpgsync ...`.)
+
+### 3. Start auto-sync
+
+Run rpgsync in your game folder (the one containing `RPG_RT.ldb`):
+
+```bash
+cd /path/to/MyGame
+rpgsync
+```
+
+The first time, it writes the scripts into `/path/to/MyGame/Scripts` (one
+file per map, plus the database in `database/`) and sets that folder up as a
+small Python project. Open the `Scripts` folder in your editor (VS Code,
+PyCharm, Zed...) and select its `.venv` as the Python interpreter.
+
+Leave it running while you work: every save on either side is synced within
+a second, and each sync is logged with what changed and how long it took.
+Stop it with Ctrl+C. It works from the `Scripts` folder too, or from anywhere
+with the game folder as argument: `rpgsync /path/to/MyGame`.
+
+Before writing a script into the game, rpgsync runs the same checks as the
+[automated tests](#automated-tests): the script must compile, and its events
+must only use commands your engine supports. Problems are reported with
+their line number and the game file is left untouched until you fix them.
+
+**The game is only written once the scripts are valid.**
+
+### Will this break my project?
+
+rpgsync is built so that it should not, and so that you can always go back:
+
+- **Invalid scripts are never written.** A typo, a wrong value or a
+  RPG Maker 2003 command in a 2000 game stops at the checks above.
+- **Every overwritten file is backed up** (game files and scripts) in
+  `Scripts/.rpgsync/history/`, the last 50 syncs. `rpgsync clean`
+  deletes them once you no longer need them.
+- **Only what you changed is written.** Editing one event rewrites that
+  event; the rest of the file (tiles, other events, unknown data from
+  patches) is kept.
+- **Nothing is lost on conflicts.** If the same event changed on both sides,
+  the editor's version is kept and your script is saved next to it as
+  `MapXXXX.conflict-<time>.py`.
+- **The RPG Maker editor does not reload files by itself.** Save in the
+  editor before editing the same map's script, and reopen the project in
+  the editor after script changes; otherwise its next save overwrites them.
+- Using git on the game folder is still a good idea.
+
+## Recommended: add EasyRPG Player
+
+[EasyRPG Player](https://easyrpg.org/player/) runs RPG Maker 2000/2003 games
+on Windows, macOS, Linux and more, and is the quickest way to test your
+changes: start the game, play, quit, edit, start again.
+
+- Download: https://easyrpg.org/player/downloads/
+- Run a game: `easyrpg-player --project-path /path/to/MyGame --window`
+- Useful options: `--test-play` (debug mode, F9 menu), `--new-game`,
+  `--start-map-id N --start-position X Y` (start right where you work).
+- F12 returns to the title screen, so you can reload changed maps without
+  restarting.
+
+## Playing with DynRPG
+
+[DynRPG](https://www.rewking.com/dynrpg/) patches RPG_RT.exe to load plugins
+(`DynPlugins/*.dll`), driven by event comments such as
+`@write_text "id", 10, 20, "Hello"`. On Windows the patched RPG_RT runs them
+as usual. On macOS and Linux use EasyRPG Player, which emulates the most
+common plugins:
+
+- **DynTextPlugin** (`write_text`, `append_line`, `append_text`,
+  `change_text`, `change_position`, `remove_text`, `remove_all`)
+- **DynParams** (`dynparams_add_param`, `dynparams_overwrite_next`, ...):
+  needs an EasyRPG Player build that includes
+  [this change](https://github.com/oulianov/Player) until it is merged
+  upstream; build it with the steps of EasyRPG's
+  [BUILDING.md](https://github.com/EasyRPG/Player/blob/master/docs/BUILDING.md).
+
+Plugins that only change rendering (e.g. `system_opengl` shaders) are not
+needed. EasyRPG logs `Unsupported DynRPG function: ...` for anything it
+cannot run.
+
+## Advanced workflows
+
+### Push and pull changes manually
+
+Instead of the live auto-sync:
+
+```bash
+rpgsync status   # what is pending, on which side (git-style)
+rpgsync check    # compile and check every script, write nothing
+rpgsync pull     # game -> scripts (regenerate the scripts)
+rpgsync push     # scripts -> game
+```
+
+Each command works on the game of the current folder, or on the game or
+`Scripts` folder given as argument. `--map N` limits a command to one map, `pull --force` overwrites
+scripts that have unsynced edits.
+
+### Automated tests
+
+The `Scripts` folder comes with tests in `Scripts/tests/`. Keep them: the
+first two are also run by rpgsync itself, and **changes only go from a
+script into the game if they pass**. A failing script is reported and the
+game file stays as it was.
+
+```bash
+cd /path/to/MyGame/Scripts
+rpgsync check
+```
+
+### Database and Common Events
+
+The database (`RPG_RT.ldb`): heroes, classes, skills, items, enemies,
+troops, states, variables, switches, common events... is written to
+`Scripts/database/`. 
+
+Common events are in `database/common_events.py`, as `@common_event`
+functions of the `CommonEvents` class.
+
+### Variables, switches and events by name
+
+Variables and switches are attributes of `database/variables.py` and
+`database/switches.py`:
+
+```python
+class Variables(VariableTable):
+    class Config:
+        size = 400  # slots in the editor
+
+    deroulement_du_scenario = Variable(102, "Déroulement du scénario")
+```
+
+Event scripts import them and use them by name. Events of the same map are used by their function name:
+
+```python
+from database.common_events import common_events
+from database.switches import switches
+from database.variables import variables
+
+alex_re.move(move_down * 2)                  # events[2] on this map
+if switches.night_mode:                      # switches[12]
+    variables.deroulement_du_scenario += 1   # variables[102]
+    common_events.tombee_de_la_nuit()        # common_events[12]()
+```
+
+- **The numeric forms still work:** `events[2]`, `variables[102]`, `common_events[12]()`.
+- **Use your IDE to rename variable names:** On VSCode, right click and use "Rename Symbol"
+
+### DynRPG commands in scripts
+
+- DynRPG comments become function calls on `dyn`
+- Variable tokens such as`V152` are written `V[152]`:
+
+```python
+dyn.dynparams_add_param(2, V[152])  # @dynparams_add_param 2, V152
+dyn.dynparams_overwrite_next()
+dyn.change_text("desc-indice", r"\I[\v[153]]", 0)
+```
+

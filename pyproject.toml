@@ -1,0 +1,42 @@
+[project]
+name = "rpgsync"
+version = "0.1.0"
+description = "A python twin of your RPG Maker 2000/2003 game"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.14.0",
+    "rich>=15.0.0",
+    "ruff>=0.16.10",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+rpgsync = "rpgsync.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-n auto"  # pytest-xdist: one worker per CPU
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.16.10",
+    "ty>=0.0.85",
+]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["rpgsync/dbschema.py", "rpgsync/db.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "UP031", "B008", "B905", "E741"]

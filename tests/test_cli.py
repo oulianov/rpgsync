@@ -1,0 +1,167 @@
+"""The command line: first run, `status`, finding the project, timing, consoles."""
+
+import re
+import sys
+
+import pytest
+from typer.testing import CliRunner
+
+from rpgsync import cli
+from rpgsync.lcf import LcfFile
+
+runner = CliRunner()
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _cli(*args, ok=True, runner=runner, env=None):
+    env = {"FORCE_COLOR": None, "TTY_COMPATIBLE": None, "RPGSYNC_ASCII": None, **(env or {})}
+    r = runner.invoke(cli.app, [str(a) for a in args], env=env)
+    out = ANSI.sub("", r.output)
+    if ok:
+        assert r.exit_code == 0, out
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _no_uv_sync(monkeypatch):
+    monkeypatch.setattr(cli.shutil, "which", lambda *_: None)  # no `uv sync` in the scripts folder
+
+
+@pytest.fixture
+def project(exported2003):
+    """The 2003 test game, scripts exported and in sync."""
+    return exported2003
+
+
+def _edit(path, old, new):
+    text = path.read_text(encoding="utf-8")
+    assert old in text
+    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def test_first_run_sets_up_the_scripts_folder(game2003):
+    out = _cli("pull", game2003)
+    scripts = game2003 / "Scripts"
+    for name in ("pyproject.toml", "tests/test_scripts.py", "Map0001.py", "database/variables.py"):
+        assert (scripts / name).exists(), name
+    assert "Scripts folder ready: %s" % scripts in out
+    assert "wrote" not in _cli("pull", game2003)  # set up once
+
+
+def test_status_clean(project):
+    out = _cli("status", project)
+    assert out.startswith("On %s (RPG Maker 2003)" % project.name)
+    assert "game:    %s" % project in out
+    assert "\u2705 All files are synced" in out
+
+
+def test_status_script_change(project):
+    _edit(project / "Scripts" / "Map0001.py", "variables.variable_0001 = 9999999", "variables[1] = 1234567")
+    out = _cli("status", project)
+    assert "Changes in scripts" in out and "Changes in the game" not in out
+    line = next(ln for ln in out.splitlines() if "Map0001.py" in ln)
+    assert re.search(r"modified:\s+Map0001\.py\s+\+1 -1\s+event 9 changed$", line), line
+    # --map filters the units
+    assert "All files are synced" in _cli("status", project, "--map", "2")
+
+
+def test_status_compile_error(project):
+    _edit(project / "Scripts" / "Map0001.py", "variables.variable_0001 = 9999999", 'variables[1] =+ "x"')
+    out = _cli("status", project)
+    assert "Scripts with errors" in out
+    assert re.search(r"^\s+Map0001\.py:\d+: .*unsupported value", out, re.M), out
+
+
+def test_status_game_change(project):
+    f = LcfFile.load(project / "Map0001.lmu")
+    next(it for it in f.root.get("events") if it.id == 9).struct.set("x", 11)
+    f.save(project / "Map0001.lmu")
+    out = _cli("status", project)
+    assert "Changes in the game (`rpgsync pull` updates the scripts):" in out
+    assert re.search(r"modified:\s+Map0001\.lmu\s+\+1 -1\s+event 9 changed", out), out
+    assert "Changes in scripts" not in out
+
+
+def test_status_not_exported(project):
+    (project / "Scripts" / "Map0002.py").unlink()
+    out = _cli("status", project)
+    assert re.search(r"Not exported yet.*\n\s+Map0002\.py$", out, re.M), out
+
+
+@pytest.mark.parametrize("sub", ["", "Scripts", "Scripts/database"])
+def test_project_from_current_directory(project, monkeypatch, sub):
+    monkeypatch.chdir(project / sub)
+    assert _cli("status").startswith("On %s (RPG Maker 2003)" % project.name)
+
+
+def test_project_from_a_scripts_folder_elsewhere(game2003, tmp_path, monkeypatch):
+    from rpgsync.project import Project
+    from rpgsync.scaffold import init_scripts_project
+
+    init_scripts_project(Project(str(game2003), str(tmp_path / "ext")))  # [tool.rpgsync] game = "../..."
+    monkeypatch.chdir(tmp_path / "ext")
+    out = _cli("status")
+    assert "scripts: %s" % (tmp_path / "ext") in out and "game:    %s" % game2003 in out
+
+
+def test_no_project_here(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    r = runner.invoke(cli.app, ["status"])
+    assert r.exit_code == 2 and "no RPG Maker game at" in r.output and "Run rpgsync inside your game folder" in r.output
+
+
+def test_bare_rpgsync_without_project_prints_help(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["rpgsync"])
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert e.value.code == 2
+    captured = capsys.readouterr()
+    assert "Usage" in captured.out and "status" in captured.out
+    assert "no RPG Maker game at" in captured.err
+
+
+def test_removed_commands_are_gone():
+    for command in ("init", "list", "forget", "sync"):
+        assert command not in cli.COMMANDS
+
+
+def test_push_logs_timing(project):
+    _edit(project / "Scripts" / "Map0001.py", "variables.variable_0001 = 9999999", "variables[1] = 1234567")
+    out = _cli("push", project, "--map", "1")
+    assert re.search(r"Map0001: Map0001\.py -> Map0001\.lmu: changed event 9 \(\d+\.\d\d s\)$", out, re.M), out
+
+
+EMOJIS = [emoji for emoji, _ in cli.MARKERS.values()]
+
+
+@pytest.fixture
+def accented(exported2003, tmp_path):
+    """The test game in a folder with accented and Japanese characters."""
+    return exported2003.rename(tmp_path / "Jeu été ゲーム")
+
+
+def test_accented_names_print_fine(accented):
+    out = _cli("status", accented)
+    assert out.startswith("On Jeu été ゲーム (RPG Maker 2003)")
+    assert "\u2705 All files are synced" in out
+
+
+def test_legacy_console_gets_ascii_and_no_crash(accented):
+    """A Windows console in cp1252: no emoji, no UnicodeEncodeError on Japanese text."""
+    cp1252 = CliRunner(charset="cp1252")
+    out = _cli("status", accented, runner=cp1252)
+    assert out.startswith("On Jeu été ??? (RPG Maker 2003)"), out
+    assert "[ok] All files are synced" in out
+    _edit(accented / "Scripts" / "Map0001.py", "variables.variable_0001 = 9999999", "variables[1] = 1234567")
+    out = _cli("status", accented, runner=cp1252)
+    assert "[s] Changes in scripts" in out
+    out += _cli("push", accented, "--map", "1", runner=cp1252)
+    assert re.search(r"^\[g\] \[\d\d:\d\d:\d\d\] Map0001: Map0001\.py -> Map0001\.lmu: changed event 9", out, re.M)
+    assert not any(emoji in out for emoji in EMOJIS)
+    assert all(ord(ch) < 0x100 for ch in out)
+
+
+def test_ascii_markers_can_be_forced(accented):
+    out = _cli("status", accented, env={"RPGSYNC_ASCII": "1"})
+    assert "[ok] All files are synced" in out and not any(emoji in out for emoji in EMOJIS)
