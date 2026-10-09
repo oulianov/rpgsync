@@ -213,7 +213,11 @@ class DatabaseUnit(Unit):
 
         root = LcfFile.parse(data).root
         text = database.export_tables(
-            root, self.project.context(), keep={self.table: keep}, skip_width=line_length(self.project.script_dir)
+            root,
+            self.project.context(),
+            keep={self.table: keep},
+            skip_width=line_length(self.project.script_dir),
+            tables=[self.table],  # this unit's table only
         )[self.table]
         return self.formatted(text)
 
@@ -299,8 +303,7 @@ class State:
     def __init__(self, project: Project):
         self.project = project
         self.path = os.path.join(project.state_dir, "state.json")
-        self.base_dir = os.path.join(project.state_dir, "base")
-        os.makedirs(self.base_dir, exist_ok=True)
+        self.base_dir = os.path.join(project.state_dir, "base")  # created on the first record
         try:
             with open(self.path) as f:
                 self.data = json.load(f)
@@ -317,6 +320,7 @@ class State:
             "format": FORMAT,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        self.project.ensure_state_dir()
         base = os.path.join(self.base_dir, unit.name + ".py")
         os.makedirs(os.path.dirname(base), exist_ok=True)
         with open(base, "w", encoding="utf-8") as f:
@@ -331,6 +335,7 @@ class State:
             return None
 
     def save(self) -> None:
+        self.project.ensure_state_dir()
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self.data, f, indent=1, sort_keys=True)
@@ -593,14 +598,20 @@ class Syncer:
         return out, conflicts
 
     # -- watch ----------------------------------------------------------------
-    def watch(self, interval: float = 0.5, announce: bool = True) -> None:
+    def watch(self, interval: float = 0.5, announce: bool = True, first_pass: bool = True) -> None:
         """Sync every unit, then each one whose files change, until interrupted.
-        announce=False: the caller prints its own "watching ..." line."""
+        announce=False: the caller prints its own "Watching ..." line;
+        first_pass=False: the caller already synced every unit."""
         if announce:
-            self.log("watching %s (scripts in %s) - Ctrl+C to stop" % (self.project.game_dir, self.project.script_dir))
+            self.log("Watching %s" % self.project.game_dir)
+            self.log("Every edit will be synced between python files and game files.")
+            self.log("Ctrl+C to stop")
         seen: dict[str, tuple] = {}
         pending: dict[str, tuple] = {}
-        first = True
+        first = first_pass
+        if not first_pass:
+            for unit in self.units():
+                seen[unit.name] = (_stat(unit.bin_path), _stat(unit.py_path))
         while True:
             units = self.units()
             for unit in units:

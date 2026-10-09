@@ -47,13 +47,14 @@ class Project:
             raise SystemExit("%s is not an RPG Maker 2000/2003 project (no RPG_RT.ldb)" % self.game_dir)
         self.script_dir = os.path.abspath(script_dir or os.path.join(self.game_dir, "Scripts"))
         self.state_dir = os.path.join(self.script_dir, CONFIG_DIR)
-        os.makedirs(self.state_dir, exist_ok=True)
+        # nothing is written until the first sync: reading a game never creates its scripts folder
+        self._pending_config: dict | None = None
         cfg = self._load_config()
         self.encoding = encoding or cfg.get("encoding") or self.detect_encoding()
         "x".encode(self.encoding)  # validate codec name early
         if cfg.get("encoding") != self.encoding:
             cfg["encoding"] = self.encoding
-            self._save_config(cfg)
+            self._store_config(cfg)
         self._ctx: Ctx | None = None
         self._ldb_stat: tuple[int, int] | None = None
         self._handles_key: tuple | None = None
@@ -89,15 +90,32 @@ class Project:
 
     # -- config ----------------------------------------------------------------
     def _load_config(self) -> dict:
+        if self._pending_config is not None:  # not written yet (no sync so far)
+            return dict(self._pending_config)
         try:
             with open(os.path.join(self.state_dir, "config.json")) as f:
                 return json.load(f)
         except (OSError, ValueError):
             return {}
 
+    def _store_config(self, cfg: dict) -> None:
+        """Save the config, or keep it in memory until the first sync creates the state folder."""
+        if os.path.isdir(self.state_dir):
+            self._save_config(cfg)
+        else:
+            self._pending_config = dict(cfg)
+
     def _save_config(self, cfg: dict) -> None:
+        os.makedirs(self.state_dir, exist_ok=True)
         with open(os.path.join(self.state_dir, "config.json"), "w") as f:
             json.dump(cfg, f, indent=2)
+
+    def ensure_state_dir(self) -> None:
+        """Create the sync state folder (first write), with the config detected so far."""
+        os.makedirs(self.state_dir, exist_ok=True)
+        if self._pending_config is not None:
+            self._save_config(self._pending_config)
+            self._pending_config = None
 
     # -- encoding ----------------------------------------------------------------
     def detect_encoding(self) -> str:
@@ -193,7 +211,7 @@ class Project:
             from .script import detect_choice_sep
 
             cfg["choice_separator"] = detect_choice_sep(self.map_paths().values())
-            self._save_config(cfg)
+            self._store_config(cfg)
         return cfg["choice_separator"]
 
     def map_names(self) -> dict[int, str]:

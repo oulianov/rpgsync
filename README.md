@@ -220,3 +220,7 @@ changes: start the game, play, quit, edit, start again.
   `--start-map-id N --start-position X Y` (start right where you work).
 - F12 returns to the title screen, so you can reload changed maps without
   restarting.
+
+## License
+
+MIT, 2026: see [LICENSE](LICENSE). Source: https://github.com/oulianov/rpgsync

@@ -17,6 +17,7 @@ exact same commands; anything else falls back to the generic ``cmd(...)``.
 from __future__ import annotations
 
 import ast
+import bisect
 import io
 import keyword
 import re
@@ -457,6 +458,7 @@ class CommentIndex:
                 if not self.lines[line - 1][:col].strip():
                     text = tok.string[1:]
                     self.items.append([line, col, text[1:] if text.startswith(" ") else text, False])
+        self.item_lines = [item[0] for item in self.items]  # sorted: tokens come in order
 
     def region_end(self, after: int, col: int) -> int:
         """First code line after `after` that is indented less than `col`."""
@@ -472,9 +474,12 @@ class CommentIndex:
         """Comment commands for unclaimed comments on lines lo < line < hi."""
         out: list[Command] = []
         last = None
-        for item in self.items:
+        for i in range(bisect.bisect_right(self.item_lines, lo), len(self.items)):
+            item = self.items[i]
             line, c, text, claimed = item
-            if claimed or not lo < line < hi or c < col:
+            if line >= hi:
+                break
+            if claimed or c < col:
                 continue
             item[3] = True
             same_group = last is not None and line == last[0] + 1 and c == last[1]

@@ -30,6 +30,7 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from .compat import check_specs, load_rules, target_engine
@@ -52,6 +53,7 @@ ProjectArg = Annotated[
 ]
 MapOpt = Annotated[list[int] | None, typer.Option("--map", help="Only this map id (repeatable).")]
 NoCommonOpt = Annotated[bool, typer.Option("--no-common", help="Skip database/common_events.py.")]
+YesOpt = Annotated[bool, typer.Option("--yes", "-y", help="First run: set the game up without asking.")]
 
 ENGINES = {"2k": "RPG Maker 2000", "2k3": "RPG Maker 2003"}
 
@@ -64,18 +66,31 @@ ENGINES = {"2k": "RPG Maker 2000", "2k3": "RPG Maker 2003"}
 # console cannot show emojis (Windows cmd.exe with cp437/cp850/cp1252...)
 MARKERS = {
     "ok": ("\u2705", "[ok]"),  # check mark
-    "script": ("\U0001f4dd", "[s]"),  # memo: a script was written / changed
-    "game": ("\U0001f3ae", "[g]"),  # video game: a game file was written / changed
+    "script": ("\U0001f40d", "[s]"),  # snake: a Python script was written / changed
+    "game": ("\U0001f5d2\ufe0f", "[g]"),  # spiral notepad: a game file was written / changed
     "merge": ("\U0001f500", "[~]"),  # twisted arrows
     "conflict": ("\u26a0\ufe0f", "[!]"),  # warning
     "error": ("\u274c", "[x]"),  # cross mark
     "info": ("\u2139\ufe0f", "[i]"),  # information
-    "watch": ("\U0001f440", "[*]"),  # eyes
+    "watch": ("\U0001f501", "[*]"),  # repeat: watching
     "new": ("\u2728", "[+]"),  # sparkles
     "file": ("\U0001f4c4", "[+]"),  # page
     "delete": ("\U0001f5d1\ufe0f", "[-]"),  # wastebasket
     "stop": ("\U0001f44b", "[.]"),  # waving hand
 }
+
+# shown the first time rpgsync runs on a game: colored block letters (ANSI escapes,
+# parsed by rich, so they go away with NO_COLOR or when the output is not a terminal)
+BANNER = [
+    "\x1b[0;91;41m░▒▒\x1b[0;31m▄\x1b[0;33m▓▄\x1b[0;37m \x1b[0;91;41m░▒▒░\x1b[0;33m▓▄\x1b[0;37m \x1b[0;31m▄\x1b[0;91;41m▒▓\x1b[0;91m█\x1b[0;91;41m▒░\x1b[0;37m \x1b[0;31m▄\x1b[0;91;41m▄▀▄\x1b[0;31m▄\x1b[0;37m  \x1b[0;31m█\x1b[0;91;41m▒\x1b[0;31m▌▐\x1b[0;91;41m▒░\x1b[0;37m \x1b[0;91;41m░▒▒░\x1b[0;33m▓▄\x1b[0;37m \x1b[0;31m▄\x1b[0;91;41m▄▀▄\x1b[0;31m▄\x1b[0;37m \x1b[0m",
+    "\x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;33;41m▓\x1b[0;33m▓\x1b[0;37m \x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;33;41m▓\x1b[0;33m▓\x1b[0;37m \x1b[0;91;41m▓\x1b[0;91;43m▓\x1b[0;31m▌▐\x1b[0;91;41m░\x1b[0;33m█\x1b[0;37m \x1b[0;91;41m▒▓\x1b[0;31m▌▐\x1b[0;91;41m▓▄\x1b[0;37m \x1b[0;91;41m▓\x1b[0;91;43m▓\x1b[0;31m▌▐\x1b[0;91;41m░\x1b[0;33m█\x1b[0;37m \x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;33;41m▓\x1b[0;33m▓\x1b[0;37m \x1b[0;91;41m▒▓\x1b[0;31m▌▐\x1b[0;91;41m▓▄\x1b[0m",
+    "\x1b[0;33m▒▒\x1b[0;31m▌\x1b[0;37m    \x1b[0;33m▒▒\x1b[0;31m▌▐\x1b[0;33m▓▓\x1b[0;37m \x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;33m▓▓\x1b[0;37m \x1b[0;31m▀\x1b[0;91m▀\x1b[0;91;41m▀\x1b[0;91m▄▄\x1b[0;31m▄\x1b[0;37m \x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;33m▓▓\x1b[0;37m \x1b[0;33m▒▒\x1b[0;31m▌▐\x1b[0;33m▓▓\x1b[0;37m \x1b[0;91;41m░▒\x1b[0;31m▌\x1b[0;37m   \x1b[0m",
+    "\x1b[0;33m░░\x1b[0;31m▌\x1b[0;37m    \x1b[0;33m░░\x1b[0;31m▌▐\x1b[0;33m▒▒\x1b[0;37m \x1b[0;33m░▒\x1b[0;31m▌▐\x1b[0;33m▒▒\x1b[0;37m \x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;91;41m░\x1b[0;33m█\x1b[0;37m \x1b[0;33m░▒\x1b[0;31m▌▐\x1b[0;33m▒▒\x1b[0;37m \x1b[0;33m░░\x1b[0;31m▌▐\x1b[0;33m▒▒\x1b[0;37m \x1b[0;33m▓\x1b[0;91;41m░\x1b[0;31m▌▐\x1b[0;91;41m░\x1b[0;33m█\x1b[0m",
+    "\x1b[0;90m░▒▌\x1b[0;37m    \x1b[0;90m▓▓▌██▀\x1b[0;37m  \x1b[0;90m▀▀▐██\x1b[0;37m \x1b[0;31m▀█\x1b[0;90;41m░▓▒\x1b[0;90m▀\x1b[0;37m  \x1b[0;90m▀▀▐██\x1b[0;37m \x1b[0;90m░▒▌▐██\x1b[0;37m  \x1b[0;31m▀\x1b[0;90;41m░▓▒\x1b[0;90m▀\x1b[0m",
+    "\x1b[0;37m       \x1b[0;90m▒▓\x1b[0;37m     \x1b[0;90m▒█▄█▓▀\x1b[0;37m        \x1b[0;90m▒█▄█▓▀\x1b[0;37m              \x1b[0m",
+]
+
+REPOSITORY = "https://github.com/oulianov/rpgsync"
 
 # file names in sync messages, shown in cyan
 FILE_NAMES = r"[\w./\\-]+\.(?:py|lmu|ldb)\b"
@@ -133,6 +148,22 @@ class UI:
 
     def echo(self, line: str) -> None:
         self.console.print(Text(line))
+
+    def bullet(self, *parts: str | Text | tuple[str, str]) -> None:
+        self.print("  \u2022 " if self.fancy else "  - ", *parts)
+
+    def banner(self) -> None:
+        """The rpgsync title, one color per line, and what it does."""
+        self.echo("")
+        for line in BANNER:
+            self.console.print(Text.from_ansi(line))
+        self.print(("a Python twin of your RPG Maker 2000/2003 game", "italic dim"))
+        self.print(
+            (REPOSITORY, "underline cyan"),
+            (" \u00b7 " if self.fancy else " - ", "dim"),
+            ("MIT License, 2026", "dim"),
+        )
+        self.echo("")
 
     def report(self, r: Result) -> None:
         """A sync result as a log line: marker, time, unit, message, duration."""
@@ -221,17 +252,55 @@ def _open(project: str | None) -> CliSyncer:
     return CliSyncer(Project(loc.game, loc.scripts))
 
 
-def _set_up(syncer: CliSyncer) -> None:
-    """First run on a game: make its scripts folder a small Python project
-    (pyproject.toml, tests, editor settings) and install it with uv."""
-    if os.path.exists(os.path.join(syncer.project.script_dir, "pyproject.toml")):
-        return
-    ui = syncer.ui
-    for path in init_scripts_project(syncer.project):
-        ui.print("wrote ", (path, "cyan"), kind="file")
+def _interactive() -> bool:
+    """Can we ask a question (a terminal on stdin)?"""
+    return sys.stdin.isatty()
+
+
+def _needs_set_up(syncer: CliSyncer) -> bool:
+    return not os.path.exists(os.path.join(syncer.project.script_dir, "pyproject.toml"))
+
+
+def _set_up(syncer: CliSyncer, yes: bool) -> None:
+    """First run on a game: say what will happen, ask, then make its scripts folder
+    a small Python project (pyproject.toml, tests, editor settings) installed with uv."""
+    ui, project = syncer.ui, syncer.project
+    maps = sum(u.kind == "map" for u in syncer.units())
+    engine = ENGINES.get(project.context().engine, project.context().engine)
+    scripts = os.path.relpath(project.script_dir, os.path.dirname(project.game_dir))
+    ui.banner()
+    ui.print(
+        (os.path.basename(project.game_dir), "bold bright_white"),
+        (" (%s, %d maps)" % (engine, maps), "dim"),
+        " is not synced with rpgsync yet.",
+        kind="info",
+    )
+    ui.print(("Setting it up will:", "bold"))
+    ui.bullet(
+        ("create ", "bold green"),
+        (scripts, "cyan"),
+        ": your maps, database and common events as Python scripts, with tests",
+    )
+    ui.bullet(("install ", "bold green"), "the scripts' Python environment with ", ("uv", "cyan"))
+    ui.bullet(("leave the game files as they are", "bold yellow"), ": only your edits to the scripts are written back")
+    if not yes:
+        if not _interactive():
+            raise _fail("not set up: run again with -y to set this game up")
+        question = "Set up rpgsync for this game?"
+        if ui.console.color_system is not None:
+            question = typer.style(question, bold=True)
+        if not typer.confirm(question, default=True):
+            raise typer.Exit(1)
+    ui.echo("")
+    written = init_scripts_project(project)
+    ui.print(
+        "created %s (%s)" % (scripts, ", ".join(os.path.relpath(p, project.script_dir) for p in written)),
+        kind="file",
+    )
     if shutil.which("uv"):
-        subprocess.run(["uv", "sync", "--quiet"], cwd=syncer.project.script_dir, check=False)
-    ui.print(("Scripts folder ready: ", "bold green"), (syncer.project.script_dir, "cyan"), kind="ok")
+        with ui.console.status("Installing the scripts' Python environment (uv sync)..."):
+            subprocess.run(["uv", "sync", "--quiet"], cwd=project.script_dir, check=False)
+    ui.echo("")
 
 
 def _units(syncer: Syncer, maps: list[int] | None, no_common: bool) -> Iterator[Unit]:
@@ -243,22 +312,59 @@ def _units(syncer: Syncer, maps: list[int] | None, no_common: bool) -> Iterator[
         yield u
 
 
-def _run(syncer: CliSyncer, units, prefer: str | None) -> None:
-    failed = unchanged = reported = 0
-    for u in units:
-        start = time.perf_counter()
-        r = syncer.sync(u, prefer)
-        r.seconds = time.perf_counter() - start
-        if r.action in ("export", "import") and r.message.endswith(": no changes"):
-            unchanged += 1  # rewritten identically: one summary line for all of them
-            continue
-        syncer.report(r)
-        reported += 1
-        failed += r.action in ("error", "conflict")
+def _sync_all(syncer: CliSyncer, units: list[Unit], prefer: str | None, initial: bool = False) -> int:
+    """Sync units under a progress bar; return how many failed.  initial: the first
+    export of a new project, summed up in one line instead of one line per script."""
+    ui = syncer.ui
+    failed = unchanged = reported = written = 0
+    begin = time.perf_counter()
+    columns = (
+        TextColumn("{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("{task.fields[unit]}"),
+        TimeElapsedColumn(),
+    )
+    title = "Initial sync (game -> scripts)" if initial else "Syncing"
+    # the initial sync's bar stays on screen; later ones vanish once done
+    with Progress(*columns, console=ui.console, transient=not initial, disable=not ui.console.is_terminal) as progress:
+        task = progress.add_task(title, total=len(units), unit="")
+        for u in units:
+            progress.update(task, unit=u.name)
+            start = time.perf_counter()
+            r = syncer.sync(u, prefer)
+            r.seconds = time.perf_counter() - start
+            progress.advance(task)
+            if r.action in ("export", "import") and r.message.endswith(": no changes"):
+                unchanged += 1  # rewritten identically: one summary line for all of them
+                continue
+            if initial and r.action == "export":
+                written += 1
+                continue
+            syncer.report(r)
+            reported += 1
+            failed += r.action in ("error", "conflict")
+    if initial:
+        took = time.perf_counter() - begin
+        if ui.console.is_terminal:
+            ui.echo("")  # after the bar
+        ui.print(
+            ("Initial sync done: ", "bold green"),
+            "%d scripts written in %s" % (written, _duration(took)),
+            kind="ok",
+        )
     if unchanged:
         files = "%d %sfile%s" % (unchanged, "other " if reported else "", "s" * (unchanged > 1))
-        syncer.ui.print(("%s already up to date" % files, "dim"))
-    if failed:
+        ui.print(("%s already up to date" % files, "dim"))
+    return failed
+
+
+def _duration(seconds: float) -> str:
+    return "%.1f s" % seconds if seconds < 60 else "%d min %02d s" % divmod(round(seconds), 60)
+
+
+def _run(syncer: CliSyncer, units, prefer: str | None, initial: bool = False) -> None:
+    if _sync_all(syncer, list(units), prefer, initial):
         raise typer.Exit(1)
 
 
@@ -445,22 +551,34 @@ def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
 def watch(
     project: ProjectArg = None,
     interval: Annotated[float, typer.Option(help="Poll interval in seconds.")] = 0.5,
+    yes: YesOpt = False,
 ):
     """Keep the game and its scripts in sync until Ctrl+C (also: `rpgsync [FOLDER]`).
     The first time, the scripts are written and their folder is set up."""
     syncer = _open(project)
-    _set_up(syncer)
     ui = syncer.ui
-    ui.print(
-        "watching ",
-        (syncer.project.game_dir, "cyan"),
-        " (scripts in ",
-        (syncer.project.script_dir, "cyan"),
-        ") - Ctrl+C to stop",
-        kind="watch",
-    )
+    initial = _needs_set_up(syncer)
+    if initial:
+        _set_up(syncer, yes)
+    _sync_all(syncer, syncer.units(), None, initial)
+    if initial:
+        rel = os.path.relpath(syncer.project.script_dir, os.path.dirname(syncer.project.game_dir))
+        ui.echo("")
+        ui.print(("Next:", "bold"))
+        ui.bullet(("edit ", "bold green"), "the scripts in ", (rel, "cyan"), ": saving one writes it into the game")
+        ui.bullet(("edit ", "bold green"), "in RPG Maker as usual: your changes update the scripts")
+        ui.bullet(
+            ("rpgsync status", "bold cyan"),
+            " lists what changed, ",
+            ("rpgsync check", "bold cyan"),
+            " runs the engine and type checks",
+        )
+        ui.echo("")
+    ui.print("Watching ", (syncer.project.game_dir, "cyan"), kind="watch")
+    ui.echo("Every edit will be synced between python files and game files.")
+    ui.echo("Ctrl+C to stop")
     try:
-        syncer.watch(interval, announce=False)
+        syncer.watch(interval, announce=False, first_pass=False)
     except KeyboardInterrupt:
         ui.print("stopped", kind="stop")
 
@@ -470,11 +588,14 @@ def pull(
     map: MapOpt = None,
     no_common: NoCommonOpt = False,
     force: Annotated[bool, typer.Option("--force", help="Overwrite scripts that have unsynced edits.")] = False,
+    yes: YesOpt = False,
 ):
     """Game -> scripts: regenerate the scripts from the game files."""
     syncer = _open(project)
-    _set_up(syncer)
-    _run(syncer, _units(syncer, map, no_common), "game" if force else None)
+    initial = _needs_set_up(syncer)
+    if initial:
+        _set_up(syncer, yes)
+    _run(syncer, _units(syncer, map, no_common), "game" if force else None, initial)
 
 
 def push(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt = False):

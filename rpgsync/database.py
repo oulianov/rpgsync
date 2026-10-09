@@ -740,15 +740,16 @@ def export_tables(
     target: str = "RPG_RT.ldb",
     keep: dict[str, dict[int, str]] | None = None,
     skip_width: int | None = None,
+    tables: list[str] | None = None,
 ) -> dict[str, str]:
-    """Table name -> file text, for every exported table present in `db`.
-    `keep`: per table, the attribute names to reuse."""
+    """Table name -> file text, for every exported table present in `db`
+    (or only `tables`).  `keep`: per table, the attribute names to reuse."""
     return {
         name: render_table(
             name, table_entries_from_bin(db, name, ctx), target, len(db.get(name)), (keep or {}).get(name), skip_width
         )
         for name in TABLES
-        if has_table(db, name)
+        if has_table(db, name) and (tables is None or name in tables)
     }
 
 

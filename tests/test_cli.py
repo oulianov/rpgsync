@@ -40,12 +40,26 @@ def _edit(path, old, new):
 
 
 def test_first_run_sets_up_the_scripts_folder(game2003):
-    out = _cli("pull", game2003)
+    out = _cli("pull", "-y", game2003)
     scripts = game2003 / "Scripts"
     for name in ("pyproject.toml", "tests/test_scripts.py", "Map0001.py", "database/variables.py"):
         assert (scripts / name).exists(), name
-    assert "Scripts folder ready: %s" % scripts in out
-    assert "wrote" not in _cli("pull", game2003)  # set up once
+    assert "is not synced with rpgsync yet" in out and "leave the game files as they are" in out
+    assert "created %s/Scripts (pyproject.toml" % game2003.name in out
+    assert re.search(r"Initial sync done: \d+ scripts written in", out)
+    assert "wrote Scripts/Map0001.py" not in out  # one summary line, not one per script
+    again = _cli("pull", game2003)  # set up once: no question the second time
+    assert "not synced with rpgsync yet" not in again and "Initial sync" not in again
+
+
+def test_first_run_asks_first(game2003, monkeypatch):
+    out = _cli("pull", game2003, ok=False)  # no terminal to answer, no -y
+    assert "run again with -y" in out
+    assert not (game2003 / "Scripts").exists()  # nothing written before the answer
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    r = runner.invoke(cli.app, ["pull", str(game2003)], input="n\n")
+    assert "Set up rpgsync for this game? [Y/n]" in r.output
+    assert r.exit_code == 1 and not (game2003 / "Scripts").exists()
 
 
 def test_status_clean(project):
