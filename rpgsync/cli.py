@@ -11,6 +11,15 @@ rpgsync clean          # delete the backups of overwritten files
 Every command works on the game of the current folder (the folder holding
 RPG_RT.ldb, its Scripts folder, or any folder inside them), or on the game
 or scripts folder given as argument.
+
+With the RPG Maker 2000/2003 editor: rpgsync pull, edit the Python files,
+rpgsync push, then open the editor and keep editing there. Keep the editor
+closed while you edit the Python files: it keeps its own copy of the game in
+memory and ignores them.
+
+With the EasyRPG Editor (https://github.com/oulianov/Editor): turn on its
+rpgsync mode (Settings). It reloads what changes on disk and shows it as well
+as it can, so both can stay open while rpgsync runs.
 """
 
 from __future__ import annotations
@@ -38,8 +47,19 @@ from .project import Project
 from .scaffold import init_scripts_project
 from .sync import Result, ScriptError, Syncer, Unit, read_bytes, sha
 
+EDITORS_HELP = (
+    "With the RPG Maker 2000/2003 editor: [bold]rpgsync pull[/bold], edit the Python files, "
+    "[bold]rpgsync push[/bold], then open the editor and keep editing there. "
+    "Keep the editor closed while you edit the Python files: it keeps its own copy "
+    "of the game in memory and ignores your Python edits.\n\n"
+    "With the EasyRPG Editor (https://github.com/oulianov/Editor): make sure its "
+    "[bold]rpgsync mode[/bold] is on (Settings). It reloads the changes made on disk "
+    "and shows them as well as it can, so it can stay open while rpgsync runs."
+)
+
 app = typer.Typer(
     help="A python twin of your RPG Maker 2000/2003 game.",
+    epilog=EDITORS_HELP,
     no_args_is_help=True,
     add_completion=False,
 )
@@ -555,7 +575,10 @@ def watch(
     yes: YesOpt = False,
 ):
     """Keep the game and its scripts in sync until Ctrl+C (also: `rpgsync [FOLDER]`).
-    The first time, the scripts are written and their folder is set up."""
+    The first time, the scripts are written and their folder is set up.
+
+    For the EasyRPG Editor with its rpgsync mode on, which reloads what changes on disk.
+    With the RPG Maker 2000/2003 editor, keep it closed while you edit the scripts."""
     syncer = _open(project)
     ui = syncer.ui
     initial = _needs_set_up(syncer)
@@ -567,7 +590,17 @@ def watch(
         ui.echo("")
         ui.print(("Next:", "bold"))
         ui.bullet(("edit ", "bold green"), "the scripts in ", (rel, "cyan"), ": saving one writes it into the game")
-        ui.bullet(("edit ", "bold green"), "in RPG Maker as usual: your changes update the scripts")
+        ui.bullet(
+            ("Default RPG Maker 2000/2003 editor: ", "bold"),
+            "keep it closed while you edit the scripts (it keeps its own copy of the game "
+            "and ignores them), then open it and keep editing there",
+        )
+        ui.bullet(
+            ("EasyRPG Editor: ", "bold"),
+            "turn on its ",
+            ("rpgsync mode", "bold"),
+            " (Settings): it reloads what changes on disk, so it can stay open",
+        )
         ui.bullet(
             ("rpgsync status", "bold cyan"),
             " lists what changed, ",
@@ -591,7 +624,9 @@ def pull(
     force: Annotated[bool, typer.Option("--force", help="Overwrite scripts that have unsynced edits.")] = False,
     yes: YesOpt = False,
 ):
-    """Game -> scripts: regenerate the scripts from the game files."""
+    """Game -> scripts: regenerate the scripts from the game files.
+
+    With the RPG Maker 2000/2003 editor: save and close it first."""
     syncer = _open(project)
     initial = _needs_set_up(syncer)
     if initial:
@@ -600,7 +635,9 @@ def pull(
 
 
 def push(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt = False):
-    """Scripts -> game: write the scripts into the game files."""
+    """Scripts -> game: write the scripts into the game files.
+
+    With the RPG Maker 2000/2003 editor: open it after the push, so it reads them."""
     syncer = _open(project)
     _run(syncer, _units(syncer, map, no_common), "script")
 

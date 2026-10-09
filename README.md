@@ -90,22 +90,31 @@ Run rpgsync in your game folder (the one containing `RPG_RT.ldb`):
 cd /path/to/MyGame
 rpgsync
 ```
-Open the `Scripts` folder in your editor and select its `.venv` as the Python interpreter.
+Open the `Scripts` folder in your editor and select its `.venv` as the Python interpreter. You're seeing your Python clone!
+
+### 4. Choose your editor workflow
+
+**With the default RPG Maker 2000/2003 editor**: the best workflow is
+
+```bash
+rpgsync pull     # game -> scripts
+# edit the Python files
+rpgsync push     # scripts -> game
+```
+
+then open the editor and keep editing there.
 
 > [!WARNING]
-> **Close RPG Maker 2000/2003 while you edit the Python files.**
-> The RPG Maker editor keeps the whole project in memory and never reloads it
-> from disk. While it is open it does not show your script changes, and its
-> next save (saving a map, the database, or simply quitting) writes its old
-> copy back over them.
+> **Keep the RPG Maker editor closed while you edit the Python files.**
+> The editor keeps its own copy of your game in memory and ignores your Python
+> edits: its next save (a map, the database, or quitting) writes that copy back
+> over them.
 
-Work on one side at a time:
-
-1. Editing in RPG Maker: save your work there, then close it (or at least
-   save before touching the scripts of the same map or database).
-2. Editing the scripts: keep RPG Maker closed. rpgsync writes the game files
-   as you save.
-3. Back to RPG Maker: reopen the project so it loads the new files.
+**With the [EasyRPG Editor](https://github.com/oulianov/Editor)**: make sure its
+**rpgsync mode** is on (Settings). The Editor reloads the changes made on disk
+and shows them as well as it can, so it can stay open while `rpgsync` runs.
+When both sides change the same game, it merges what each changed and only
+asks when the same entry changed on both sides.
 
 ### Will this break my project?
 
@@ -121,7 +130,7 @@ rpgsync is built so that **it should not**. If anything, you can always go back.
   the editor's version is kept and your script is saved next to it as
   `MapXXXX.conflict-<time>.py`.
 - The RPG Maker editor does not reload files by itself: close it while you
-  edit the scripts (see the [warning above](#3-start-auto-sync)).
+  edit the scripts (see [Choose your editor workflow](#4-choose-your-editor-workflow)).
 
 Using git on the game folder and doing backups is still a good idea.
 
