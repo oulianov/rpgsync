@@ -165,7 +165,9 @@ class Project:
                     keep = read_identifiers(f.read())
             except OSError:
                 keep = {}
-            out[table] = identifiers(table, ctx.names.get(table, {}), keep)
+            # entries of the file count too: a new variable is usable before it reaches the game
+            names = {**{n: attr for n, attr in keep.items()}, **ctx.names.get(table, {})}
+            out[table] = identifiers(table, names, keep)
         out["common_events"] = self._common_event_names()
         return out
 
@@ -181,7 +183,8 @@ class Project:
         except OSError:
             keep = {}
         assert self._ctx is not None
-        return common_event_names(_ce_names(LcfFile.load(self.ldb_path).root, self._ctx), keep)
+        names = {**{n: fname for n, fname in keep.items()}, **_ce_names(LcfFile.load(self.ldb_path).root, self._ctx)}
+        return common_event_names(names, keep)
 
     def choice_separator(self) -> str | None:
         """Detected once per game, then kept in .rpgsync/config.json."""
