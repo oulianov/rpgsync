@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import bisect
+import functools
 import io
 import keyword
 import re
@@ -1131,9 +1132,10 @@ def _dsl_import(ctx: Ctx) -> str:
     return DSL_IMPORT
 
 
+@functools.lru_cache(maxsize=4)  # a sync reads the same (large) script more than once
 def read_function_names(text: str, decorator: str = "common_event") -> dict[int, str]:
     """id -> function name of the @common_event functions of a script (to keep
-    the names when it is rewritten)."""
+    the names when it is rewritten).  Don't modify the returned dict."""
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -1467,11 +1469,15 @@ def _decompile_common_events(db: Struct, ctx: Ctx, target: str) -> str:
 
 def _ce_names(db: Struct, ctx: Ctx) -> dict[int, str]:
     """id -> editor name of the used common events."""
-    return {
-        item.id: ctx.dec(item.struct.get("name"))
-        for item in db.get("commonevents")
-        if not is_empty_common_event(_ce_spec(item))
-    }
+    return {item.id: ctx.dec(item.struct.get("name")) for item in db.get("commonevents") if not _unused_slot(item)}
+
+
+def _unused_slot(item: ArrayItem) -> bool:
+    """is_empty_common_event, cheap fields first: a named event's commands are never decoded."""
+    ce = item.struct
+    if ce.get("name") or ce.get("trigger") != 5 or ce.get("switch_flag"):
+        return False
+    return not list(ce.get("event_commands"))
 
 
 def compile_common_events_source(src: str, ctx: Ctx, filename: str = "<script>") -> list:

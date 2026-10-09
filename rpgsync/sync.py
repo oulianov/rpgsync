@@ -82,6 +82,7 @@ class Unit:
 
     def __init__(self, project: Project):
         self.project = project
+        self._bin_specs: tuple[bytes, list] | None = None
 
     # implemented by subclasses
     def decompile(self, data: bytes) -> str: ...
@@ -93,9 +94,16 @@ class Unit:
         """Hash of the part of the game file this unit covers."""
         return sha(data)
 
+    def bin_specs(self, data: bytes) -> list:
+        """specs_from_bin, remembered for the same game data (a sync reads them more
+        than once, and decoding every command of a big database is slow)."""
+        if self._bin_specs is None or self._bin_specs[0] is not data:
+            self._bin_specs = (data, self.specs_from_bin(data))
+        return self._bin_specs[1]
+
     def existing_ids(self, data: bytes) -> list[int]:
         """Ids a new entry must not take."""
-        return [s.id for s in self.specs_from_bin(data)]
+        return [s.id for s in self.bin_specs(data)]
 
     format_problem: str | None = None  # why the last generated script could not be formatted
 
@@ -424,7 +432,7 @@ class Syncer:
         already uses patch commands can still be edited."""
         if unit.kind not in ("map", "common"):
             return []  # database entries have no event commands
-        unchanged = [s.key() for s in unit.specs_from_bin(data)]
+        unchanged = [s.key() for s in unit.bin_specs(data)]
         changed = [s for s in specs if s.key() not in unchanged]
         if not changed:
             return []
@@ -506,7 +514,7 @@ class Syncer:
 
         if st is None and prefer is None:
             # Never synced: only adopt the pair if it already agrees.
-            if [s.key() for s in specs] == [s.key() for s in unit.specs_from_bin(data)]:
+            if [s.key() for s in specs] == [s.key() for s in unit.bin_specs(data)]:
                 self.state.record(unit, data, text)
                 return Result(unit=unit.name, action="none", message="already in sync")
             return Result(
@@ -578,7 +586,7 @@ class Syncer:
         except CompileError:
             base = {}
         mine = {s.id: s for s in script_specs}
-        theirs = {s.id: s for s in unit.specs_from_bin(data)}
+        theirs = {s.id: s for s in unit.bin_specs(data)}
 
         def k(spec):
             return None if spec is None else spec.key()
