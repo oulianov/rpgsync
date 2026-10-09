@@ -157,7 +157,7 @@ untouched until you fix it.
 | Test | What it checks | Also gates the sync |
 | --- | --- | --- |
 | `test_script_compiles` | every script compiles into valid game data | yes |
-| `test_engine_compatibility` | no RPG Maker 2003-only command in a 2000 game, no patch command (DynRPG, Maniac, EasyRPG) unless declared | yes |
+| `test_engine_compatibility` | no RPG Maker 2003-only command in a 2000 game, no patch command (DynRPG, Maniac, EasyRPG) unless declared, no DynParams comment that breaks the game | yes |
 | `test_message_width` | example, commented out: message rows fit the window (50 characters, 38 with a face, 4 rows) | no |
 | `test_types` | ty finds no wrong value (misspelled direction, trigger...) | no: run `uv run pytest` or `rpgsync check` |
 

@@ -33,7 +33,7 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
-from .compat import check_specs, load_rules, target_engine
+from .compat import check_specs, check_warnings, load_rules, target_engine
 from .project import Project
 from .scaffold import init_scripts_project
 from .sync import Result, ScriptError, Syncer, Unit, read_bytes, sha
@@ -70,6 +70,7 @@ MARKERS = {
     "game": ("\U0001f5d2\ufe0f", "[g]"),  # spiral notepad: a game file was written / changed
     "merge": ("\U0001f500", "[~]"),  # twisted arrows
     "conflict": ("\u26a0\ufe0f", "[!]"),  # warning
+    "warning": ("\u26a0\ufe0f", "[!]"),
     "error": ("\u274c", "[x]"),  # cross mark
     "info": ("\u2139\ufe0f", "[i]"),  # information
     "watch": ("\U0001f501", "[*]"),  # repeat: watching
@@ -656,7 +657,7 @@ def check(
     ui, err = syncer.ui, UI(err=True)
     engine = target_engine(syncer.project.script_dir, syncer.project.context().engine)
     declared, allow = load_rules(syncer.project.script_dir)
-    errors = 0
+    errors = warnings = 0
     for u in _units(syncer, map, no_common):
         if not os.path.exists(u.py_path):
             continue
@@ -671,13 +672,17 @@ def check(
         for problem in check_specs(specs, engine, patches or declared, allow):
             err.print((u.py_path, "cyan"), ": ", (problem, "red"), kind="error")
             errors += 1
+        for problem in check_warnings(specs, engine, patches or declared, allow):
+            err.print((u.py_path, "cyan"), ": ", (problem, "yellow"), kind="warning")
+            warnings += 1
     if not no_types:
         errors += _check_types(syncer.project.script_dir, ui, err)
+    warned = ("%d warning(s)" % warnings, "bold yellow") if warnings else None
     if errors:
-        ui.print(("%d problem(s)" % errors, "bold red"), kind="error")
+        ui.print(("%d problem(s)" % errors, "bold red"), *([", ", warned] if warned else []), kind="error")
         raise typer.Exit(1)
     what = "compile and fit the engine" + (" and pass the type check" if not no_types else "")
-    ui.print(("All scripts %s" % what, "bold green"), kind="ok")
+    ui.print(("All scripts %s" % what, "bold green"), *([" (", warned, ")"] if warned else []), kind="ok")
 
 
 def _ty(script_dir: str) -> str | None:

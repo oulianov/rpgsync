@@ -1053,6 +1053,36 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
 
 _DYN_NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
 _DYN_TOKEN = re.compile(r"^([NnVv]+)(\d+)$")
+_DYN_STRING = re.compile(r'^"((?:[^"]|"")*)"$')  # a " inside a string is written ""
+
+
+def _dyn_token_src(prefix: str, n: int) -> str:
+    """``V12`` -> ``variables.name``, ``N3`` -> ``actors[3].name``; other spellings stay ``v[12]``."""
+    if prefix == "V":
+        return var_src(n)
+    if prefix == "VV":
+        return "variables[%s]" % var_src(n)
+    if prefix == "N":
+        return "actors[%d].name" % n
+    if prefix == "NV":
+        return "actors[%s].name" % var_src(n)
+    return "%s[%d]" % (prefix, n)
+
+
+def _dyn_token(v) -> str | None:
+    """DynRPG token of a script value: ``variables.x`` -> ``V12``, ``actors[3].name`` -> ``N3``."""
+    if isinstance(v, DynToken):
+        return "%s%d" % (v.prefix, v.number)
+    if var_index(v) is not None:
+        return "V%d" % v.index
+    if is_ref(v, "variables") and var_index(v.index) is not None:
+        return "VV%d" % v.index.index
+    if isinstance(v, Attr) and v.name == "name" and is_ref(v.obj, "actors"):
+        if int_index(v.obj, "actors") is not None:
+            return "N%d" % v.obj.index
+        if var_index(v.obj.index) is not None:
+            return "NV%d" % v.obj.index.index
+    return None
 
 
 def _split_dyn_args(text: str) -> list[str] | None:
@@ -1085,13 +1115,13 @@ def dynrpg_src(line: str) -> str | None:
         if args is None or ", ".join(args) != rest:
             return None
         for a in args:
-            if len(a) >= 2 and a[0] == a[-1] == '"' and '"' not in a[1:-1]:
-                args_src.append(pystr(a[1:-1]))
+            if _DYN_STRING.match(a):
+                args_src.append(pystr(_DYN_STRING.match(a).group(1).replace('""', '"')))
             elif _DYN_NUMBER.match(a) and (a.count(".") == 0 or repr(float(a)) == a):
                 args_src.append(a)
             elif _DYN_TOKEN.match(a) and DYN_PREFIX.match(_DYN_TOKEN.match(a).group(1)):
                 t = _DYN_TOKEN.match(a)
-                args_src.append("%s[%d]" % (t.group(1), int(t.group(2))))
+                args_src.append(_dyn_token_src(t.group(1), int(t.group(2))))
             else:
                 return None
     return "dyn.%s(%s)" % (name, ", ".join(args_src))
@@ -1101,19 +1131,18 @@ def dynrpg_text(call: Call) -> str:
     if call.kwargs:
         raise _err("DynRPG calls take positional arguments only", call)
     parts = []
+    kinds = "numbers, strings, variables[...] or actors[...].name"
     for a in call.args:
         if isinstance(a, str):
-            if '"' in a:
-                raise _err("DynRPG strings cannot contain double quotes", call)
-            parts.append('"%s"' % a)
+            parts.append('"%s"' % a.replace('"', '""'))
         elif isinstance(a, bool):
-            raise _err("DynRPG arguments are numbers, strings or V[id] tokens", call)
+            raise _err("DynRPG arguments are %s" % kinds, call)
         elif isinstance(a, (int, float)):
             parts.append(repr(a) if isinstance(a, float) else str(a))
-        elif isinstance(a, DynToken):
-            parts.append("%s%d" % (a.prefix, a.number))
+        elif _dyn_token(a) is not None:
+            parts.append(_dyn_token(a))
         else:
-            raise _err("DynRPG arguments are numbers, strings or V[id] tokens (got %s)" % show(a), call)
+            raise _err("DynRPG arguments are %s (got %s)" % (kinds, show(a)), call)
     return "@" + call.name + (" " + ", ".join(parts) if parts else "")
 
 

@@ -20,9 +20,13 @@ allow_commands = [2055]       # single extra command codes, allowed anyway
 
 - **`patches`** allows a patch's commands: without it, `rpgsync check`, the
   generated tests and the sync refuse them (the game file is not written).
+  DynRPG calls are the exception: without the patch they are plain comments,
+  so `rpgsync check` only warns.
 - **`allow_commands`** allows single command codes, e.g. one EasyRPG command,
   without allowing the whole patch.
-- **`engine = "2000"`** on a 2003 game keeps it compatible with RPG Maker 2000.
+- **`engine = "2000"`** on a 2003 game keeps it compatible with RPG Maker 2000:
+  a command that only exists in 2003 is an error, a 2003 parameter of a
+  command 2000 has is a warning (RPG Maker 2000 ignores it).
 
 rpgsync detects:
 
@@ -44,13 +48,46 @@ Key Patch), and reads the same `[Patch]` section of `EasyRPG.ini` otherwise:
 Plugins (`DynPlugins/*.dll`) called from events through comments that start
 with `@`.
 
-- **In scripts:** `@name args` becomes `dyn.name(args)`; variable tokens such as
-  `V152` are written `V[152]`:
+- **In scripts:** `@name args` becomes `dyn.name(args)`. Tokens are written
+  like the rest of the scripts: `V152` is `variables.name` (or `variables[152]`),
+  `VV3` is `variables[variables.name]`, `N3` is `actors[3].name` and `NV3` is
+  `actors[variables.name].name`. Other spellings keep their form (`v[150]`).
+  A `"` inside a string is written `""` in the comment:
 
   ```python
-  dyn.dynparams_add_param(2, V[152])  # @dynparams_add_param 2, V152
+  dyn.dynparams_add_param(2, variables.clue_switch)  # @dynparams_add_param 2, V152
   dyn.change_text("desc-indice", r"\I[\v[153]]", 0)
+  dyn.write_text("id", 10, 20, 'He said "hi"')      # @write_text "id", 10, 20, "He said ""hi"""
   ```
+
+- **DynParams hints:** each `dyn.dynparams_add_param(...)` gets a hint naming
+  the parameter it overwrites, and `dyn.dynparams_overwrite_next()` the command
+  it rewrites:
+
+  ```python
+  dyn.dynparams_add_param(2, variables.clue_switch)  # → ConditionalBranch: switch
+  dyn.dynparams_overwrite_next()  # → ConditionalBranch
+  if switches.relm:
+  ```
+
+  A hint is only written when the rewritten command is in the same block.
+
+- **DynParams checks** (`rpgsync check`). An **error** breaks the game in
+  RPG_RT; like the other compatibility problems, it fails `rpgsync check` and
+  the generated tests, and stops the sync from writing the event into the
+  game. A **warning** does not break the game: `rpgsync check` shows it and
+  still succeeds.
+
+  | Problem | Level | In RPG_RT |
+  |---|---|---|
+  | A parameter the target command does not have (`add_param 9` on a Wait) | error | DynParams writes outside the command: crash or corrupted memory |
+  | A parameter index below 1 | error | same |
+  | A message line outside 1-4, a choice below 1 | error | DynParams shows an error box |
+  | An unknown `@dynparams_...` command (a typo) | warning | ignored |
+  | `dyn.dynparams_overwrite_next()` with no command after it in its block | warning | rewrites whatever runs next (an else, the next command after the block) |
+  | Parameters with no `dynparams_overwrite_next()` after them | warning | never applied |
+  | More message lines or choices than the target has | warning | the extra ones are not shown |
+  | Message lines or choices for another kind of command | warning | they do not change it |
 
 - **Any plugin works**: rpgsync doesn't know plugins, so every call becomes
   `dyn.name(...)`, whether a plugin exists for it or not.
@@ -58,7 +95,9 @@ with `@`.
   is: `comment("@call easyrpg_add, 1, 10")`.
 - **Plugins that hook the engine** without event calls (battle plugins,
   graphics plugins configured by `.ini` files) don't appear in scripts.
-- **`check`:** needs `"dynrpg"` in `patches`.
+- **`check`:** without `"dynrpg"` in `patches`, each call is a warning: RPG_RT
+  runs it as a plain comment. With `"easyrpg"`, `dyn.easyrpg_...()` calls are
+  fine: EasyRPG Player runs `@easyrpg_` comments without DynRPG.
 - **EasyRPG Player** emulates a few plugins (DynText, DynParams, its own
   `easyrpg_*` functions). Other calls log `Unsupported DynRPG function` and do
   nothing; engine plugins are ignored.

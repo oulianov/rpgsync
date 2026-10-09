@@ -86,7 +86,7 @@ Speed = Literal[1, 2, 3, 4, 5, 6]
 Frequency = Literal[1, 2, 3, 4, 5, 6, 7, 8]
 """How often an event acts: 1 = rarely ... 8 = continuously.  It affects
 moving, turning and waiting, not graphic changes."""
-SpriteIndex = Literal[0, 1, 2, 3, 4, 5, 6, 7]
+SpriteIndex = Literal[0, 1, 2, 3, 4, 5, 6, 7] | int  # int: a value the editor cannot set
 """Which of the 8 characters of a CharSet image (288x256), counted left to
 right, top to bottom, from 0 at the top left::
 
@@ -108,58 +108,74 @@ in parallel; autorun/parallel common events need their condition switch ON."""
 MessagePosition = Literal["top", "middle", "bottom"]
 Vehicle = Literal["boat", "ship", "airship"]
 CancelOption = Literal[1, 2, 3, 4]
-Digits = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9]  # 8-9: Maniac Patch
-Transition = Literal[
-    "default",
-    "fade",
-    "random_blocks",
-    "random_blocks_down",
-    "random_blocks_up",
-    "blinds",
-    "vertical_stripes",
-    "horizontal_stripes",
-    "border_to_center",
-    "center_to_border",
-    "scroll_up",
-    "scroll_down",
-    "scroll_left",
-    "scroll_right",
-    "vertical_split",
-    "horizontal_split",
-    "cross_split",
-    "zoom",
-    "mosaic",
-    "ripple",
-    "instant",
-    "none",
-]
+Digits = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9] | int  # 8-9: Maniac Patch; int: a value the editor cannot set
+Transition = (
+    Literal[
+        "default",
+        "fade",
+        "random_blocks",
+        "random_blocks_down",
+        "random_blocks_up",
+        "blinds",
+        "vertical_stripes",
+        "horizontal_stripes",
+        "border_to_center",
+        "center_to_border",
+        "scroll_up",
+        "scroll_down",
+        "scroll_left",
+        "scroll_right",
+        "vertical_split",
+        "horizontal_split",
+        "cross_split",
+        "zoom",
+        "mosaic",
+        "ripple",
+        "instant",
+        "none",
+    ]
+    | int
+)  # int: a value the editor cannot set
 """Screen transition; ``"default"`` uses the one set in the database
 (System tab) or with set_transition()."""
-TransitionKind = Literal[
-    "teleport_erase", "teleport_show", "battle_start_erase", "battle_start_show", "battle_end_erase", "battle_end_show"
-]
+TransitionKind = (
+    Literal[
+        "teleport_erase",
+        "teleport_show",
+        "battle_start_erase",
+        "battle_start_show",
+        "battle_end_erase",
+        "battle_end_show",
+    ]
+    | int
+)  # int: a value the editor cannot set
 WeatherKind = Literal["none", "rain", "snow", "fog", "sandstorm"]
 Strength = Literal["weak", "medium", "strong"]
 FlashMode = Literal["once", "begin", "end"]
 """``"once"`` flashes/shakes once; ``"begin"`` repeats until ``"end"`` (2003)."""
-PictureEffect = Literal["none", "rotation", "wave"]
+PictureEffect = Literal["none", "rotation", "wave"] | int  # int: a value the editor cannot set
 Stat = Literal["max_hp", "max_sp", "attack", "defense", "spirit", "agility"]
 EquipSlot = Literal["weapon", "shield", "armor", "helmet", "accessory", "all"]
-BgmContext = Literal["battle", "victory", "inn", "boat", "ship", "airship", "game_over"]
-SeContext = Literal[
-    "cursor",
-    "decision",
-    "cancel",
-    "buzzer",
-    "battle_start",
-    "escape",
-    "enemy_attack",
-    "enemy_damaged",
-    "ally_damaged",
-    "evade",
-    "enemy_dies",
-    "item",
-]
+BgmContext = (
+    Literal["battle", "victory", "inn", "boat", "ship", "airship", "game_over"] | int
+)  # int: a value the editor cannot set
+SeContext = (
+    Literal[
+        "cursor",
+        "decision",
+        "cancel",
+        "buzzer",
+        "battle_start",
+        "escape",
+        "enemy_attack",
+        "enemy_damaged",
+        "ally_damaged",
+        "evade",
+        "enemy_dies",
+        "item",
+    ]
+    | int
+)  # int: a value the editor cannot set
 SkillMode = Literal["keep", "replace", "add"]
 StatMode = Literal["keep", "halve", "level1", "current_level"]
 
@@ -898,7 +914,8 @@ class _DynTokenPrefix:
 
 class DynRPG:
     """DynRPG plugin calls, stored as "@function args" comments:
-    ``dyn.change_text("id", r"\\v[1]", 0)``, ``dyn.dynparams_add_param(2, V[152])``."""
+    ``dyn.change_text("id", r"\\v[1]", 0)``, ``dyn.dynparams_add_param(2, variables.clue)``.
+    Arguments are numbers, strings, ``variables[...]``, ``actors[...].name`` or tokens like ``v[12]``."""
 
     def __getattr__(self, function: str) -> Callable[..., None]: ...
 
@@ -1652,7 +1669,7 @@ def remove_battle_command(actor: ActorTarget, command: int, *, extra: Extra = ()
 
 
 def enter_hero_name(
-    actor: int, charset: int | None = None, use_current_name: bool | None = None, *, extra: Extra = ()
+    actor: int | None, charset: int | None = None, use_current_name: bool | None = None, *, extra: Extra = ()
 ) -> None:
     """Open the name entry screen.
 
@@ -1729,7 +1746,7 @@ def toggle_vehicle(*, extra: Extra = ()) -> None:
 
 
 def set_vehicle_location(
-    vehicle: Literal["party", "boat", "ship", "airship"],
+    vehicle: Literal["party", "boat", "ship", "airship"] | int,  # int: a value the editor cannot set
     map: Number,
     x: Number,
     y: Number,

@@ -21,7 +21,7 @@ import os
 import tomllib
 from collections.abc import Iterable, Sequence
 
-from . import maniac
+from . import dynparams, maniac
 from .commands import CODE_NAMES
 from .lcf import Command
 
@@ -73,40 +73,73 @@ def describe(code: int) -> str:
     return "%s (%d)" % (CODE_NAMES.get(code, "command"), code)
 
 
-def check_commands(
+def command_problems(
     cmds: Sequence[Command], engine: str, patches: Iterable[str] = (), allow: Iterable[int] = ()
-) -> list[str]:
-    """Problems of a command list for the given engine ("2k" or "2k3")."""
+) -> list[dynparams.Problem]:
+    """Problems of a command list for the given engine ("2k" or "2k3"): errors
+    break the game in RPG_RT, warnings do not."""
     patches, allow = set(patches), set(allow)
     problems = []
+
+    def add(error: bool, message: str) -> None:
+        problems.append(dynparams.Problem(error=error, message=message))
+
     for c in cmds:
         code = c.code
         if code in allow:
             continue
         if code == 12410 and c.string.startswith(b"@") and "dynrpg" not in patches:
+            if "easyrpg" in patches and c.string.startswith(b"@easyrpg_"):
+                continue  # EasyRPG Player runs @easyrpg_ comments without DynRPG
             name = c.string[1:].split(b" ", 1)[0].decode("ascii", "replace")
-            problems.append('DynRPG command dyn.%s(): add "dynrpg" to [tool.rpgsync] patches' % name)
+            add(
+                False,
+                'DynRPG command dyn.%s() runs as a plain comment: add "dynrpg" to [tool.rpgsync] patches '
+                "if the game uses DynRPG" % name,
+            )
             continue
         if code not in CODE_NAMES:
             if code in maniac.CODES and "maniac" not in patches:
-                problems.append(
-                    'Maniac command maniac.%s(): add "maniac" to [tool.rpgsync] patches' % maniac.name_of(code)
-                )
+                add(True, 'Maniac command maniac.%s(): add "maniac" to [tool.rpgsync] patches' % maniac.name_of(code))
                 continue
             if not any(code in r for p, r in PATCH_RANGES.items() if p in patches):
                 patch = next((p for p, r in PATCH_RANGES.items() if code in r), None)
                 hint = ' (a %s command: add "%s" to [tool.rpgsync] patches)' % (patch, patch) if patch else ""
-                problems.append("unknown command %d%s" % (code, hint))
+                add(True, "unknown command %d%s" % (code, hint))
             continue
         if engine == "2k":
             if code in ONLY_2K3:
-                problems.append("%s only exists in RPG Maker 2003" % describe(code))
+                add(True, "%s only exists in RPG Maker 2003" % describe(code))
             elif code in MAX_PARAMS_2K and len(c.params) > MAX_PARAMS_2K[code]:
-                problems.append(
-                    "%s uses RPG Maker 2003 parameters (%d, 2000 has %d)"
-                    % (describe(code), len(c.params), MAX_PARAMS_2K[code])
+                add(
+                    False,
+                    "%s uses RPG Maker 2003 parameters (%d, 2000 has %d): RPG Maker 2000 ignores them"
+                    % (describe(code), len(c.params), MAX_PARAMS_2K[code]),
                 )
-    return problems
+    return problems + dynparams.problems(list(cmds))
+
+
+def check_commands(
+    cmds: Sequence[Command], engine: str, patches: Iterable[str] = (), allow: Iterable[int] = ()
+) -> list[str]:
+    """Problems of a command list that break the game in RPG_RT."""
+    return [p.message for p in command_problems(cmds, engine, patches, allow) if p.error]
+
+
+def check_warnings(specs: Sequence, engine: str, patches: Iterable[str] = (), allow: Iterable[int] = ()) -> list[str]:
+    """Problems that do not break the game (see check_specs for the ones that do)."""
+    out = []
+    for spec in specs:
+        if hasattr(spec, "pages"):
+            lists = [("event %d page %d" % (spec.id, n), page.commands) for n, page in enumerate(spec.pages, 1)]
+        elif hasattr(spec, "commands"):
+            lists = [("common event %d" % spec.id, spec.commands)]
+        else:
+            continue  # database entries have no event commands
+        for where, cmds in lists:
+            problems = command_problems(cmds, engine, patches, allow)
+            out += ["%s: %s" % (where, p.message) for p in problems if not p.error]
+    return list(dict.fromkeys(out))
 
 
 def check_page_condition(condition: dict, engine: str) -> list[str]:

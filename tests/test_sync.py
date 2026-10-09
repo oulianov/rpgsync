@@ -237,18 +237,18 @@ def test_dynrpg_and_engine_declared_in_pyproject(exported2003):
     line = next(ln for ln in open(unit.py_path).read().splitlines() if "variables.variable_0001 = 9999999" in ln)
     indent = line[: len(line) - len(line.lstrip())]
     _edit(unit.py_path, line, line + "\n" + indent + 'dyn.write_text("id", 10, 20, "Hello")')
-    r = syncer.sync(unit)
-    assert r.action == "error" and 'add "dynrpg"' in r.message
+    # without the patch, RPG_RT runs it as a plain comment: a warning of `rpgsync check`, not an error
+    assert syncer.sync(unit).action == "import"
     pyproject = os.path.join(syncer.project.script_dir, "pyproject.toml")
-    with open(pyproject, "w") as f:
-        f.write('[tool.rpgsync]\npatches = ["dynrpg"]\n')
-    assert syncer.sync(unit, "script").action == "import"
-    # a 2003 game can be held to RPG Maker 2000
-    _edit(unit.py_path, line, line + "\n" + indent + "wait(1.0, key=True)")
+    # a 2003 game can be held to RPG Maker 2000: a command it lacks stops the sync
+    _edit(unit.py_path, line, line + "\n" + indent + 'cmd("ExitGame")')
     with open(pyproject, "w") as f:
         f.write('[tool.rpgsync]\nengine = "2000"\npatches = ["dynrpg"]\n')
     r = syncer.sync(unit)
-    assert r.action == "error" and "RPG Maker 2003 parameters" in r.message, r.message
+    assert r.action == "error" and "only exists in RPG Maker 2003" in r.message, r.message
+    # 2003 parameters do not: RPG Maker 2000 ignores them
+    _edit(unit.py_path, indent + 'cmd("ExitGame")', indent + "wait(1.0, key=True)")
+    assert syncer.sync(unit).action == "import"
 
 
 def test_map_events_by_name(exported2003):

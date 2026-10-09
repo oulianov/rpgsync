@@ -29,6 +29,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from . import commands as K
+from . import dynparams as D
 from . import pyexpr as P
 from .commands import Call, Command, CompileError, Ctx, Raw, TableSize, render_call, size_stmt, split_size, table_length
 from .lcf import ArrayItem, CommandList, LcfFile, MoveCommand, Struct
@@ -236,6 +237,9 @@ def _emit_text(nodes, i, ctx, level, in_loop):
             src = P.dynrpg_src(lines[0])
             if src is not None:
                 out = [pad + src]
+                hint = D.hints([m.cmd for m in nodes], ctx).get(i) if src.startswith("dyn.dynparams_") else None
+                if hint is not None and _compiles_to(out, flatten(nodes[i:j]), ctx):
+                    return [pad + src + "  # " + hint], j - i
         elif all(_hash_safe(l) for l in lines) and not lines[0].startswith("@"):
             out = [pad + ("# " + l if l else "#") for l in lines]
         if out is not None and _compiles_to(out, flatten(nodes[i:j]), ctx):
