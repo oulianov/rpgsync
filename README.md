@@ -44,6 +44,14 @@ Every command, option and value is typed and documented in
 [`rpgsync/dsl.py`](rpgsync/dsl.py): your editor shows the docs on hover and
 flags wrong values (a misspelled direction, a sprite index above 7, ...).
 
+## Demo 
+
+A Doom-like 3d game in RPGMaker using only pictures of vertical slices. The tedious, repetitive event code has been automatically generated. 
+
+https://github.com/user-attachments/assets/9246ff34-b226-4ebc-b8a3-e55b3adcc5d5
+
+
+
 ## Getting started
 
 ### 1. Install uv
