@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
 import re
@@ -214,10 +215,22 @@ def rpgsync_source() -> str:
 
 
 def detect_patches(game_dir: str) -> list[str]:
-    """Patches the game visibly uses: DynRPG keeps its plugins in DynPlugins/."""
+    """Patches the game visibly uses: DynRPG keeps its plugins in DynPlugins/,
+    and EasyRPG.ini turns patches on in its [Patch] section (DynRPG=1, Maniac=1, EasyRPG=1)."""
     found = []
     if os.path.isdir(os.path.join(game_dir, "DynPlugins")):
         found.append("dynrpg")
+    ini = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        ini.read(os.path.join(game_dir, "EasyRPG.ini"), encoding="utf-8")
+    except (configparser.Error, UnicodeDecodeError):
+        return found
+    section = next((ini[s] for s in ini.sections() if s.lower() == "patch"), None)
+    if section is not None:
+        for key, patch in (("dynrpg", "dynrpg"), ("maniac", "maniac"), ("easyrpg", "easyrpg")):
+            value = section.get(key, "0").strip().lower()  # configparser keys are case-insensitive
+            if value not in ("0", "false", "no", "off", "") and patch not in found:
+                found.append(patch)
     return found
 
 

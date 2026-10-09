@@ -21,6 +21,7 @@ import os
 import tomllib
 from collections.abc import Iterable, Sequence
 
+from . import maniac
 from .commands import CODE_NAMES
 from .lcf import Command
 
@@ -87,6 +88,11 @@ def check_commands(
             problems.append('DynRPG command dyn.%s(): add "dynrpg" to [tool.rpgsync] patches' % name)
             continue
         if code not in CODE_NAMES:
+            if code in maniac.CODES and "maniac" not in patches:
+                problems.append(
+                    'Maniac command maniac.%s(): add "maniac" to [tool.rpgsync] patches' % maniac.name_of(code)
+                )
+                continue
             if not any(code in r for p, r in PATCH_RANGES.items() if p in patches):
                 patch = next((p for p, r in PATCH_RANGES.items() if code in r), None)
                 hint = ' (a %s command: add "%s" to [tool.rpgsync] patches)' % (patch, patch) if patch else ""

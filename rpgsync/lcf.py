@@ -640,6 +640,10 @@ class LcfFile(BaseModel):
         header = r.take(r.ber())
         if root_name is None:
             root_name = {b"LcfMapUnit": "Map", b"LcfDataBase": "Database", b"LcfMapTree": "TreeMap"}.get(header)
+        if root_name is None:
+            # "protected" games scramble the header so that the editor refuses them (the
+            # engine doesn't read it): same length, the data untouched.  Kept as is.
+            root_name = {10: "Map", 11: "Database"}.get(len(header)) if header.isalpha() else None
             if root_name is None:
                 raise LcfError("unsupported LCF file type %r" % header)
         if root_name == "TreeMap":

@@ -41,3 +41,17 @@ def test_pointer_limits_explained(source, message):
     lines = [source] + (["    pass"] if source.endswith(":") else [])
     with db_names(CTX), pytest.raises(CompileError, match=message):
         compile_body_src(lines, CTX)
+
+
+def test_message_line_holding_a_line_break():
+    """Lines pasted with a line break inside stay one line: text(..., split=False)."""
+    from rpgsync.lcf import Command
+
+    cmds = [Command(code=10110, string=b"one \nline"), Command(code=20110, string=b"two")]
+    with db_names(CTX):
+        lines, _ = body_lines(cmds, CTX, 0)
+        assert lines[-2].strip() == "split=False,"
+        back = compile_body_src(lines, CTX)
+    assert [(c.code, c.string) for c in back] == [(c.code, c.string) for c in cmds]
+    with db_names(CTX):
+        assert len(compile_body_src(['text("one\\ntwo")'], CTX)) == 2  # default: \n starts a line

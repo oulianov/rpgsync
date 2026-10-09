@@ -182,7 +182,7 @@ def test_engine_problems_block_the_write(exported2003):
     indent = line[: len(line) - len(line.lstrip())]
     _edit(unit.py_path, line, line + "\n" + indent + "cmd(3001, 0)")
     r = syncer.sync(unit)
-    assert r.action == "error" and "unknown command 3001" in r.message and "maniac" in r.message
+    assert r.action == "error" and "maniac.get_save_info()" in r.message and 'add "maniac"' in r.message
     assert open(unit.bin_path, "rb").read() == before
     # declaring the patch in the scripts' pyproject.toml lets it through
     with open(os.path.join(syncer.project.script_dir, "pyproject.toml"), "w") as f:

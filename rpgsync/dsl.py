@@ -108,7 +108,7 @@ in parallel; autorun/parallel common events need their condition switch ON."""
 MessagePosition = Literal["top", "middle", "bottom"]
 Vehicle = Literal["boat", "ship", "airship"]
 CancelOption = Literal[1, 2, 3, 4]
-Digits = Literal[1, 2, 3, 4, 5, 6, 7]
+Digits = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9]  # 8-9: Maniac Patch
 Transition = Literal[
     "default",
     "fade",
@@ -463,7 +463,9 @@ class Actor:
     def uses_command(self, command: int) -> Condition:
         """In ``battle_condition(...)``: the hero uses this battle command (2003)."""
 
-    def set_sprite(self, charset: str, index: int | None = None, transparent: bool | None = None) -> None:
+    def set_sprite(
+        self, charset: str, index: int | None = None, transparent: bool | None = None, *, extra: Extra = ()
+    ) -> None:
         """Change the hero's walking sprite.
 
         Args:
@@ -472,7 +474,7 @@ class Actor:
             transparent: draw the hero semi-transparent.
         """
 
-    def set_face(self, faceset: str, index: int | None = None) -> None:
+    def set_face(self, faceset: str, index: int | None = None, *, extra: Extra = ()) -> None:
         """Change the hero's face (used by messages and menus).
 
         Args:
@@ -674,7 +676,7 @@ class PlayerCharacter(Character):
 
 
 class VehicleCharacter(Character):
-    def set_sprite(self, charset: str, index: int | None = None) -> None:
+    def set_sprite(self, charset: str, index: int | None = None, *, extra: Extra = ()) -> None:
         """Change the vehicle's graphic (CharSet name and character 0-7)."""
 
 
@@ -736,13 +738,13 @@ class Enemy:
     def change_sp(self, amount: Number, extra: Extra = ()) -> None:
         """Change the enemy's SP (negative = lose)."""
 
-    def add_state(self, state: int) -> None:
+    def add_state(self, state: int, *, extra: Extra = ()) -> None:
         """Inflict a state on the enemy."""
 
-    def remove_state(self, state: int) -> None:
+    def remove_state(self, state: int, *, extra: Extra = ()) -> None:
         """Cure a state of the enemy."""
 
-    def show(self) -> None:
+    def show(self, *, extra: Extra = ()) -> None:
         """Make a hidden enemy appear."""
 
 
@@ -901,6 +903,361 @@ class DynRPG:
     def __getattr__(self, function: str) -> Callable[..., None]: ...
 
 
+ManiacValue = int | Value | Switch
+"""A Maniac value: a number, ``variables[n]``, ``variables[variables[n]]`` or
+``switches[n]`` (1 when ON)."""
+
+
+class ManiacPatch:
+    """Maniac Patch commands (add "maniac" to ``patches`` in pyproject.toml).
+
+    Every Maniac command is written ``maniac.name(...)``.  Commands with a
+    known layout take named arguments; any command can also be written with
+    its raw parameters as positional numbers: ``maniac.control_strings(0, 1, 2,
+    text="...")``.  rpgsync writes the raw form when a command's parameters
+    don't fit its named form."""
+
+    def get_save_info(
+        self,
+        *params: int,
+        slot: ManiacValue = 0,
+        leader_name: bool = False,
+        date: Variable = ...,
+        time: Variable = ...,
+        level: Variable = ...,
+        hp: Variable = ...,
+        name_string: int = 0,
+        face1: ManiacValue = 0,
+        face2: ManiacValue = 0,
+        face3: ManiacValue = 0,
+        face4: ManiacValue = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Read a save's title data: date (YYMMDD, 0 = no save), time (HHMMSS), first hero's level and HP; leader_name also copies the leader's name into string name_string; faces go into pictures face1-face4 (0 = none; the four share how they are given). (3001)"""
+
+    def save(
+        self,
+        *params: int,
+        slot: ManiacValue = 0,
+        result: Variable | None = None,
+        use_result: bool = True,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Save into a slot (1 and up); result gets 1 on success, 0 on failure. (3002)"""
+
+    def load(
+        self,
+        *params: int,
+        slot: ManiacValue = 0,
+        skip_check: bool = False,
+        no_blackout: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Load a slot; skip_check loads without checking the file first. (3003)"""
+
+    def end_load_process(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """End the dark state after a load (obsolete). (3004)"""
+
+    def get_mouse_position(
+        self, *params: int, x: Variable = ..., y: Variable = ..., extra: Extra = (), text: str = ""
+    ) -> None:
+        """The mouse position in 320 x 240 coordinates. (3005)"""
+
+    def set_mouse_position(
+        self, *params: int, x: ManiacValue = 0, y: ManiacValue = 0, extra: Extra = (), text: str = ""
+    ) -> None:
+        """Move the mouse (x and y share how they are given). (3006)"""
+
+    def show_string_picture(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Show a picture made of text (raw parameters; text is \\x01TEXT\\x01SYSTEM\\x01FONT). (3007)"""
+
+    def get_picture_info(
+        self,
+        *params: int,
+        info: Literal["original_size", "current_size", "target"] = "original_size",
+        origin: Literal["center", "top_left", "edges"] = "center",
+        picture: ManiacValue = 0,
+        x: Variable = ...,
+        y: Variable = ...,
+        width: Variable = ...,
+        height: Variable = ...,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Position and size of a picture: info original_size / current_size / target; origin center / top_left / edges (left, top, right, bottom). (3008)"""
+
+    def control_battle(
+        self,
+        *params: int,
+        hook: Literal["atb", "damage", "targeting", "state", "stat_change"] = "atb",
+        common_event: ManiacValue = 0,
+        first_var: Variable = ...,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Battle hooks: call common_event at each atb / damage / targeting / state / stat_change, values passed through variables from first_var. (3009)"""
+
+    def control_atb_gauge(
+        self,
+        *params: int,
+        target: Literal["actor", "member", "party", "enemy", "troop"] = "actor",
+        target_id: ManiacValue = 0,
+        op: Literal["set", "add", "sub"] = "set",
+        unit: Literal["value", "percent"] = "value",
+        value: ManiacValue = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Set, add to or subtract from an ATB gauge (0-300000, or percent). (3010)"""
+
+    def change_battle_command_ex(
+        self,
+        *params: int,
+        disable_row: bool = False,
+        no_fight: bool = False,
+        no_auto: bool = False,
+        no_escape: bool = False,
+        win: bool = False,
+        lose: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Battle commands: disable the row command, remove fight / auto / escape, add win / lose. (3011)"""
+
+    def get_battle_info(
+        self,
+        *params: int,
+        target: Literal["actor", "member", "party", "enemy", "troop"] = "actor",
+        info: int = 0,
+        target_id: ManiacValue = 0,
+        first_var: Variable = ...,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Battle information into variables from first_var. (3012)"""
+
+    def control_var_array(
+        self,
+        *params: int,
+        op: Literal[
+            "copy",
+            "swap",
+            "sort",
+            "sort_descending",
+            "shuffle",
+            "enumerate",
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "mod",
+            "or",
+            "and",
+            "xor",
+            "shl",
+            "shr",
+        ] = "copy",
+        a: ManiacValue = 0,
+        length: ManiacValue = 0,
+        b: ManiacValue = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Operate on variable arrays: a (length variables from id a) with b (ids are numbers, or variables[n] for an id read from a variable). (3013)"""
+
+    def key_input_proc_ex(
+        self,
+        *params: int,
+        op: Literal["keyboard", "keyboard_raw", "key", "joypad", "joypad_raw", "remap_joypad"] = "keyboard",
+        output: Variable = ...,
+        key: ManiacValue = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Keyboard / joypad state into variables (op key: one key, given by key code). (3014)"""
+
+    def rewrite_map(
+        self,
+        *params: int,
+        tiles_from_vars: bool = False,
+        layer: Literal["lower", "upper"] = "lower",
+        tile: ManiacValue = 0,
+        x: ManiacValue = 0,
+        y: ManiacValue = 0,
+        width: ManiacValue = 0,
+        height: ManiacValue = 0,
+        no_autotile: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Replace map tiles (until the map reloads); tiles_from_vars reads tile ids from variables starting at tile. (3015)"""
+
+    def control_global_save(
+        self,
+        *params: int,
+        op: Literal["open", "close", "save", "save_close", "load_values", "store_values"] = "open",
+        kind: Literal["switches", "variables"] = "switches",
+        game_id: ManiacValue = 0,
+        global_id: ManiacValue = 0,
+        count: ManiacValue = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Global save (Save.lgs) shared by every save: open, close, save, save_close, load_values / store_values switches or variables. (3016)"""
+
+    def change_picture_id(
+        self,
+        *params: int,
+        op: Literal["move", "swap", "slide"] = "move",
+        first: ManiacValue = 0,
+        count: ManiacValue = 0,
+        target: ManiacValue = 0,
+        ignore_out_of_range: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Renumber pictures: move, swap or slide count pictures from first. (3017)"""
+
+    def set_game_option(
+        self,
+        *params: int,
+        option: Literal[
+            "run_when_inactive",
+            "fps",
+            "picture_limit",
+            "frame_skip",
+            "mouse_messages",
+            "battle_origin",
+            "battle_animation_limit",
+            "face_size",
+        ] = "run_when_inactive",
+        value: ManiacValue = 0,
+        value2: int = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Game options: run_when_inactive, fps, picture_limit, frame_skip, mouse_messages, battle_origin, battle_animation_limit, face_size. (3018)"""
+
+    def call_command(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Run any event command (raw parameters). (3019)"""
+
+    def control_strings(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """String variables: assign, append, convert, search, split... (raw parameters). (3020)"""
+
+    def get_game_info(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Map, screen, tile, interpreter, face, BGM information into variables (raw parameters). (3021)"""
+
+    def edit_picture(
+        self,
+        *params: int,
+        picture: ManiacValue = 0,
+        x: ManiacValue = 0,
+        y: ManiacValue = 0,
+        width: ManiacValue = 0,
+        height: ManiacValue = 0,
+        first_var: ManiacValue = 0,
+        opaque: bool = False,
+        keep_area: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Write pixels (ARGB values from variables from first_var) into a picture. (3025)"""
+
+    def write_picture(
+        self,
+        *params: int,
+        name_from: Literal["text", "string", "string_ref"] = "text",
+        target: Literal["screen", "picture"] = "screen",
+        picture: ManiacValue = 0,
+        name_string: int = 0,
+        dynamic: bool = False,
+        opaque: bool = False,
+        filename: str = "",
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Save the screen or a picture as an image file. (3026)"""
+
+    def add_move_route(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Maniac command (3027)"""
+
+    def edit_tile(
+        self,
+        *params: int,
+        picture: ManiacValue = 0,
+        x: ManiacValue = 0,
+        y: ManiacValue = 0,
+        width: ManiacValue = 0,
+        height: ManiacValue = 0,
+        tile: ManiacValue = 0,
+        no_autotile: bool = False,
+        clear: bool = False,
+        tiles_from_vars: bool = False,
+        layer: Literal["lower", "upper"] = "lower",
+        tileset: ManiacValue = 0,
+        pattern: ManiacValue = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Draw map tiles onto a picture. (3028)"""
+
+    def control_text_processing(
+        self,
+        *params: int,
+        source: Literal["id", "variable", "variable_ref", "name", "string", "string_ref"] = "id",
+        on_marker: bool = False,
+        on_open: bool = False,
+        on_close: bool = False,
+        on_char: bool = False,
+        event: int = 0,
+        info_var: int = 0,
+        info_string: int = 0,
+        number_args: int = 0,
+        string_args: int = 0,
+        name: str = "",
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Call a common event on message events: on_marker (the \\e text marker), on_open, on_close, on_char. (3029)"""
+
+    def script(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Run a Maniac script (raw parameters; text is the first line). (3030)"""
+
+    def script_line(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """A following script line. (3031)"""
+
+    def zoom(
+        self,
+        *params: int,
+        x: ManiacValue = 0,
+        y: ManiacValue = 0,
+        scale: ManiacValue = 0,
+        duration: ManiacValue = 0,
+        layer: ManiacValue = 0,
+        wait: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Zoom the screen around x, y. (3032)"""
+
+    def console(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Text console (raw parameters). (3033)"""
+
+    def control_self_variable(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Control self variables, switches and strings (raw parameters). (3036)"""
+
+    def control_media_option(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Media options (raw parameters). (3038)"""
+
+    def __getattr__(self, command: str) -> Callable[..., None]:
+        """Other Maniac commands, by name (control_strings, show_string_picture,
+        command_3036, ...): raw parameters as positional numbers, text=..."""
+        ...
+
+
 # `variables` and `switches` come from the game's database/variables.py and
 # database/switches.py (classes of rpgsync.tables), which name them.
 items = Items()
@@ -921,6 +1278,7 @@ timer1 = Timer()
 timer2 = Timer()
 game = GameState()
 dyn = DynRPG()
+maniac = ManiacPatch()
 V = VV = VVV = v = vv = vvv = N = NV = NVV = n = nv = nvv = _DynTokenPrefix()
 started_by_action_key = Condition()
 """Condition: the event was started with the action key."""
@@ -945,7 +1303,8 @@ def input_number(digits: Digits) -> Value:
     ``variables[3] = input_number(digits=4)``
 
     Args:
-        digits: how many digits the player can type (1-6 in 2000, 1-7 in 2003).
+        digits: how many digits the player can type (1-6 in 2000, 1-7 in 2003,
+            up to 9 with the Maniac Patch).
     """
     return Value()
 
@@ -1118,8 +1477,10 @@ def route(*steps: MoveStep, repeat: bool = True, skippable: bool = False) -> Rou
 # ==========================================================================
 
 
-def text(*lines: str) -> None:
-    """Show Message: one argument per line, up to 4 lines per box.
+def text(*lines: str, split: bool = True) -> None:
+    """Show Message: one argument per line, up to 4 lines per box ("\\n" in an
+    argument starts a new line; with split=False each argument is exactly one
+    line, line breaks included).
 
     Message codes: \\c[n] colour (0-19, from the System graphic), \\s[n] text
     speed (1 fastest - 20 slowest), \\v[n] variable value, \\n[n] hero name,
@@ -1128,7 +1489,7 @@ def text(*lines: str) -> None:
     (r"...") so backslashes stay as typed."""
 
 
-def comment(*lines: str) -> None:
+def comment(*lines: str, split: bool = True) -> None:
     """An editor comment, kept in the game data.  A full-line ``# text`` in a
     script does the same; DynRPG plugin calls are written ``dyn.function(...)``."""
 
@@ -1200,15 +1561,15 @@ def change_level(actor: ActorTarget, amount: Number, message: bool = False) -> N
     """Change Level: ``change_level(party, 1, message=True)`` (negative lowers it)."""
 
 
-def change_stat(actor: ActorTarget, stat: Stat, amount: Number) -> None:
+def change_stat(actor: ActorTarget, stat: Stat, amount: Number, *, extra: Extra = ()) -> None:
     """Permanently change a base stat: ``change_stat(actors[1], "attack", 5)``."""
 
 
-def change_hp(actor: ActorTarget, amount: Number, lethal: bool | None = None) -> None:
+def change_hp(actor: ActorTarget, amount: Number, lethal: bool | None = None, *, extra: Extra = ()) -> None:
     """Change HP (negative = damage).  Damage stops at 1 HP unless ``lethal=True``."""
 
 
-def change_sp(actor: ActorTarget, amount: Number) -> None:
+def change_sp(actor: ActorTarget, amount: Number, *, extra: Extra = ()) -> None:
     """Change SP (negative = lose)."""
 
 
@@ -1216,27 +1577,27 @@ def full_heal(actor: ActorTarget) -> None:
     """Restore all HP and SP and cure all states."""
 
 
-def learn_skill(actor: ActorTarget, skill: Number) -> None:
+def learn_skill(actor: ActorTarget, skill: Number, *, extra: Extra = ()) -> None:
     """Teach a skill."""
 
 
-def forget_skill(actor: ActorTarget, skill: Number) -> None:
+def forget_skill(actor: ActorTarget, skill: Number, *, extra: Extra = ()) -> None:
     """Remove a skill."""
 
 
-def equip(actor: ActorTarget, item: Number) -> None:
+def equip(actor: ActorTarget, item: Number, *, extra: Extra = ()) -> None:
     """Equip an item (taken from the inventory)."""
 
 
-def unequip(actor: ActorTarget, slot: EquipSlot, p4: int | None = None) -> None:
+def unequip(actor: ActorTarget, slot: EquipSlot, p4: int | None = None, *, extra: Extra = ()) -> None:
     """Remove equipment from one slot or all of them."""
 
 
-def add_state(actor: ActorTarget, state: int) -> None:
+def add_state(actor: ActorTarget, state: int, *, extra: Extra = ()) -> None:
     """Inflict a state (dead, poison, sleep...)."""
 
 
-def remove_state(actor: ActorTarget, state: int) -> None:
+def remove_state(actor: ActorTarget, state: int, *, extra: Extra = ()) -> None:
     """Cure a state."""
 
 
@@ -1248,6 +1609,8 @@ def simulate_attack(
     variance: int | None = None,
     store_damage: Variable | None = None,
     use_store_damage: bool | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Simulated Attack: deal damage as if attacked by an invisible enemy
     (can cause a game over).
@@ -1266,6 +1629,8 @@ def change_class(
     skills: SkillMode | None = None,
     stats: StatMode | None = None,
     message: bool | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Change Class (2003): also changes base stats and battle commands.
 
@@ -1278,15 +1643,17 @@ def change_class(
     """
 
 
-def add_battle_command(actor: ActorTarget, command: int) -> None:
+def add_battle_command(actor: ActorTarget, command: int, *, extra: Extra = ()) -> None:
     """Add a battle command to the hero's menu (2003)."""
 
 
-def remove_battle_command(actor: ActorTarget, command: int) -> None:
+def remove_battle_command(actor: ActorTarget, command: int, *, extra: Extra = ()) -> None:
     """Remove a battle command (2003); command 0 removes all."""
 
 
-def enter_hero_name(actor: int, charset: int | None = None, use_current_name: bool | None = None) -> None:
+def enter_hero_name(
+    actor: int, charset: int | None = None, use_current_name: bool | None = None, *, extra: Extra = ()
+) -> None:
     """Open the name entry screen.
 
     Args:
@@ -1308,23 +1675,35 @@ def set_system_bgm(
     volume: int | None = None,
     tempo: int | None = None,
     balance: int | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Change a system music (battle, victory, inn, vehicles, game over)."""
 
 
 def set_system_se(
-    context: SeContext, name: str, volume: int | None = None, tempo: int | None = None, balance: int | None = None
+    context: SeContext,
+    name: str,
+    volume: int | None = None,
+    tempo: int | None = None,
+    balance: int | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Change a system sound effect (cursor, decision, ...)."""
 
 
 def set_system_graphics(
-    name: str, stretch: Literal["stretch", "tile"] | None = None, font: Literal["gothic", "mincho"] | None = None
+    name: str,
+    stretch: Literal["stretch", "tile"] | None = None,
+    font: Literal["gothic", "mincho"] | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Change the System graphic (windows, cursor, text colours)."""
 
 
-def set_transition(kind: TransitionKind, transition: Transition) -> None:
+def set_transition(kind: TransitionKind, transition: Transition, *, extra: Extra = ()) -> None:
     """Change a default screen transition (teleport, battle start/end)."""
 
 
@@ -1337,15 +1716,15 @@ def teleport(map: int, x: int, y: int, direction: TeleportDirection = "retain") 
     """Teleport the party to another map position."""
 
 
-def memorize_location(map: Variable, x: Variable, y: Variable) -> None:
+def memorize_location(map: Variable, x: Variable, y: Variable, *, extra: Extra = ()) -> None:
     """Store the party's map id and position in three variables."""
 
 
-def recall_location(map: Variable, x: Variable, y: Variable) -> None:
+def recall_location(map: Variable, x: Variable, y: Variable, *, extra: Extra = ()) -> None:
     """Teleport the party to a position stored with memorize_location()."""
 
 
-def toggle_vehicle() -> None:
+def toggle_vehicle(*, extra: Extra = ()) -> None:
     """Get on / off the vehicle the hero faces."""
 
 
@@ -1355,15 +1734,17 @@ def set_vehicle_location(
     x: Number,
     y: Number,
     direction: TeleportDirection | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Place a vehicle on a map (map, x and y: all numbers or all variables[id])."""
 
 
-def swap_events(first: Character, second: Character) -> None:
+def swap_events(first: Character, second: Character, *, extra: Extra = ()) -> None:
     """Swap the positions of two events of the map."""
 
 
-def set_tileset(chipset: int) -> None:
+def set_tileset(chipset: int, *, extra: Extra = ()) -> None:
     """Change the map's chipset (tileset)."""
 
 
@@ -1375,29 +1756,41 @@ def set_panorama(
     speed_x: int | None = None,
     auto_scroll_y: bool | None = None,
     speed_y: int | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Change the panorama (parallax background) of the map."""
 
 
-def set_encounter_rate(steps: int) -> None:
+def set_encounter_rate(steps: int, *, extra: Extra = ()) -> None:
     """Average number of steps between random battles (0 = none)."""
 
 
-def replace_tile(layer: Literal["lower", "upper"], old: int, new: int) -> None:
+def replace_tile(layer: Literal["lower", "upper"], old: int, new: int, *, extra: Extra = ()) -> None:
     """Replace every tile `old` by tile `new` on a layer of the map."""
 
 
-def add_teleport_target(map: int, x: int, y: int, switch: int | None = None, use_switch: bool | None = None) -> None:
+def add_teleport_target(
+    map: int, x: int, y: int, switch: int | None = None, use_switch: bool | None = None, *, extra: Extra = ()
+) -> None:
     """Add a destination for teleport skills (optionally turning a switch ON)."""
 
 
 def remove_teleport_target(
-    map: int, x: int | None = None, y: int | None = None, switch: int | None = None, use_switch: bool | None = None
+    map: int,
+    x: int | None = None,
+    y: int | None = None,
+    switch: int | None = None,
+    use_switch: bool | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Remove a teleport skill destination."""
 
 
-def set_escape_target(map: int, x: int, y: int, switch: int | None = None, use_switch: bool | None = None) -> None:
+def set_escape_target(
+    map: int, x: int, y: int, switch: int | None = None, use_switch: bool | None = None, *, extra: Extra = ()
+) -> None:
     """Set where escape skills lead (optionally turning a switch ON)."""
 
 
@@ -1557,23 +1950,23 @@ def open_main_menu() -> None:
     """Open the main menu."""
 
 
-def open_load_menu() -> None:
+def open_load_menu(*, extra: Extra = ()) -> None:
     """Open the load screen (2003)."""
 
 
-def exit_game() -> None:
+def exit_game(*, extra: Extra = ()) -> None:
     """Close the game (2003)."""
 
 
-def toggle_fullscreen() -> None:
+def toggle_fullscreen(*, extra: Extra = ()) -> None:
     """Switch between window and fullscreen (2003)."""
 
 
-def toggle_atb_mode() -> None:
+def toggle_atb_mode(*, extra: Extra = ()) -> None:
     """Switch the battle gauge between active and wait modes (2003)."""
 
 
-def open_video_options() -> None:
+def open_video_options(*, extra: Extra = ()) -> None:
     """Open the video / settings menu (2003; EasyRPG settings menu)."""
 
 
@@ -1643,29 +2036,35 @@ def inn(price: int, *, style: int | None = None, branches: bool | None = None, e
     return ""
 
 
-def set_battle_background(name: str) -> None:
+def set_battle_background(name: str, *, extra: Extra = ()) -> None:
     """Change the battle background (in battle)."""
 
 
-def show_battle_animation(animation: int, target: int, wait: bool | None = None, allies: bool | None = None) -> None:
+def show_battle_animation(
+    animation: int, target: int, wait: bool | None = None, allies: bool | None = None, *, extra: Extra = ()
+) -> None:
     """Show a battle animation on an enemy (in battle; 2003 can target allies)."""
 
 
-def end_battle() -> None:
+def end_battle(*, extra: Extra = ()) -> None:
     """End the current battle."""
 
 
-def battle_call_common_event(common_event: int) -> None:
+def battle_call_common_event(common_event: int, *, extra: Extra = ()) -> None:
     """Call a common event from a battle (2003)."""
 
 
 def force_flee(
-    who: Literal["party", "all_enemies", "enemy"], enemy: int | None = None, ignore_conditions: bool | None = None
+    who: Literal["party", "all_enemies", "enemy"],
+    enemy: int | None = None,
+    ignore_conditions: bool | None = None,
+    *,
+    extra: Extra = (),
 ) -> None:
     """Make the party or enemies flee (2003)."""
 
 
-def enable_combo(actor: int, command: int, times: int) -> None:
+def enable_combo(actor: int, command: int, times: int, *, extra: Extra = ()) -> None:
     """Let a hero use a battle command several times per turn (2003)."""
 
 

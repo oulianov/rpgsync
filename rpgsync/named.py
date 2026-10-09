@@ -81,7 +81,7 @@ VEHICLES = ["boat", "ship", "airship"]
 CHARACTERS = {10001: "player", 10002: "boat", 10003: "ship", 10004: "airship", 10005: "this"}
 
 # width (number of parameters) of each field kind
-WIDTH = {"xy": 3, "mxy": 4, "actor": 2, "value": 2, "optid": 2, "optvar": 2, "amount3": 2, "list": -1}
+WIDTH = {"xy": 3, "mxy": 4, "actor": 2, "value": 2, "optid": 2, "optvar": 2, "amount3": 2, "list": -1, "bits": 0}
 
 
 class Field(BaseModel):
@@ -93,11 +93,21 @@ class Field(BaseModel):
     # | char | var | const (hidden, must equal default) | optid / optvar (flag,id)
     # | amount3 (type 0 const / 1 var / 2 percent, value; signed) | branches (handler flag)
     # | list (all remaining parameters)
+    # | modes (hidden: Maniac's packed value selectors, 4 bits per vref field)
+    # | vref (a value given as a number, variables[n] or variables[variables[n]],
+    #   its selector in the `modes` field at `shift`)
+    # | bits (no parameter of its own: `bits` bits of the `modes` field at `shift`;
+    #   a bool for one bit, a name from `choices`, else a number)
     choices: list[str] = []
     positional: bool = False
     optional: bool = False  # may be absent (older editor versions)
     same_as: str | None = None  # default is the value of another field
     signed: str | None = None  # name of the sign field this value uses
+    modes: str | None = None  # vref: the modes field holding its selector
+    shift: int = 0  # vref: bit offset of its selector
+    forms: list[str] = ["const", "var", "ref", "switch"]  # vref: selector value -> form
+    bits: int = 1  # bits: how many
+    strict: bool = False  # enum: a value outside the choices doesn't fit (the raw form is used)
 
     def width(self) -> int:
         return WIDTH.get(self.kind, 1)
@@ -107,6 +117,8 @@ class Spec(BaseModel):
     code: int
     name: str
     target: str | None = None  # pictures | actors | enemies | char | vehicle: params[0]
+    namespace: str | None = None  # written namespace.name(...) (maniac), no target parameter
+    min_params: int | None = None  # later parameters may be absent (written only when present)
     string: str | None = None  # argument holding the command's string
     string_kw: bool = False  # string as keyword (omitted when empty)
     string_after: str | None = None  # positional string comes after this field
@@ -116,7 +128,7 @@ class Spec(BaseModel):
     # -- decoding ---------------------------------------------------------------
     def decode(self, c: Command, ctx: Ctx) -> str | None:
         p = list(c.params)
-        head = ""
+        head = self.namespace + "." if self.namespace else ""
         if self.target:
             if not p:
                 return None
@@ -128,9 +140,11 @@ class Spec(BaseModel):
             return None
         values: dict[str, Any] = {}
         raw: dict[str, int] = {}
+        start: dict[str, int] = {}  # parameter offset of each field
         pos = 0
         missing = None
         for f in self.fields:
+            start[f.name] = pos
             w = len(p) - pos if f.kind == "list" else f.width()
             if pos + w > len(p) or (f.kind == "list" and pos > len(p)):
                 missing = f.name
@@ -142,6 +156,8 @@ class Spec(BaseModel):
                 return None
             values[f.name] = v
             pos += w
+        if not self._modes_explained(raw):
+            return None
         tail = p[pos:]
         if tail and not self.extra:
             return None
@@ -154,7 +170,7 @@ class Spec(BaseModel):
             if f.name not in values:
                 continue
             v = values[f.name]
-            if f.kind in ("const", "sign"):
+            if f.kind in ("const", "sign", "modes"):
                 pass
             elif f.kind in ("xy", "mxy"):
                 names = ["map", "x", "y"] if f.kind == "mxy" else ["x", "y"]
@@ -171,17 +187,34 @@ class Spec(BaseModel):
                 kwargs.extend(["%s=%s" % (f.name, v[0]), "use_%s=False" % f.name])
             else:
                 default = values.get(f.same_as) if f.same_as else self._src(f, f.default)
-                if v != default or (f.optional and ctx.engine == "2k"):
+                beyond = self.min_params is not None and start[f.name] >= self.min_params and f.kind != "bits"
+                if v != default or (f.optional and ctx.engine == "2k") or beyond:
                     kwargs.append("%s=%s" % (f.name, v))
             if self.string_after == f.name and string_src is not None:
                 args.append(string_src)
         if string_src is not None and self.string_kw and string_src != '""':
             kwargs.append("%s=%s" % (self.string, string_src))
-        if missing is not None and not (ctx.engine == "2k" and self._field(missing).optional):
+        optional_tail = self.min_params is not None and pos >= self.min_params
+        if missing is not None and not (ctx.engine == "2k" and self._field(missing).optional) and not optional_tail:
             kwargs.append("%s=None" % missing)  # field absent in this (older) data
         if tail:
             kwargs.append("extra=(%s%s)" % (", ".join(str(x) for x in tail), "," if len(tail) == 1 else ""))
         return "%s%s(%s)" % (head, self.name, ", ".join(args + kwargs))
+
+    def _modes_explained(self, raw: dict[str, int]) -> bool:
+        """Every bit of a modes field belongs to a decoded vref (else the command can't round trip)."""
+        for m in self.fields:
+            if m.kind != "modes" or m.name not in raw:
+                continue
+            mask = 0
+            for f in self.fields:
+                if f.kind == "vref" and f.modes == m.name and f.name in raw:
+                    mask |= 0xF << f.shift
+                elif f.kind == "bits" and f.modes == m.name:
+                    mask |= ((1 << f.bits) - 1) << f.shift
+            if raw[m.name] & ~mask:
+                return False
+        return True
 
     def _field(self, name: str) -> Field:
         return next(f for f in self.fields if f.name == name)
@@ -197,6 +230,12 @@ class Spec(BaseModel):
 
     @staticmethod
     def _src(f: Field, value) -> str:
+        if f.kind == "bits":
+            if f.choices:
+                return pystr(value if isinstance(value, str) else f.choices[value])
+            if f.bits == 1:
+                return "True" if value else "False"
+            return str(value)
         if f.kind in ("enum", "enum_m1"):
             return pystr(value) if isinstance(value, str) else str(value)
         if f.kind in ("bool", "branches"):
@@ -220,9 +259,32 @@ class Spec(BaseModel):
             return repr(v / 1000)
         if k in ("enum", "enum_m1"):
             i = v + 1 if k == "enum_m1" else v
-            return pystr(f.choices[i]) if 0 <= i < len(f.choices) else str(v)
+            if not 0 <= i < len(f.choices):
+                return None if f.strict else str(v)
+            return pystr(f.choices[i])
         if k == "const":
             return "" if v == f.default else None
+        if k == "modes":
+            return ""
+        if k == "bits":
+            n = (raw[f.modes] >> f.shift) & ((1 << f.bits) - 1)
+            if f.choices:
+                return pystr(f.choices[n]) if n < len(f.choices) else None
+            if f.bits == 1:
+                return "True" if n else "False"
+            return str(n)
+        if k == "vref":
+            selector = (raw[f.modes] >> f.shift) & 0xF
+            form = f.forms[selector] if selector < len(f.forms) else None
+            if form == "const":
+                return str(v)
+            if form == "var":
+                return P.var_src(v)
+            if form == "ref":
+                return "variables[%s]" % P.var_src(v)
+            if form == "switch":
+                return P.sw_src(v)
+            return None
         if k == "sign":
             return "" if v in (0, 1) else None
         if k == "var":
@@ -274,7 +336,7 @@ class Spec(BaseModel):
         if self.string is not None and not self.string_kw and self.string_after is None:
             pos.append(self.string)
         for f in self.fields:
-            if f.kind in ("const", "sign"):
+            if f.kind in ("const", "sign", "modes"):
                 continue
             names = ["map", "x", "y"] if f.kind == "mxy" else ["x", "y"] if f.kind == "xy" else [f.name]
             (pos if f.positional else kw).extend(names)
@@ -293,16 +355,37 @@ class Spec(BaseModel):
         if self.target:
             params.append(self._target_id(call))
         enc: dict[str, int] = {}
-        signs: dict[str, int] = {}
+        signs: dict[str, int] = {}  # sign fields, and modes fields (Maniac value selectors)
+        shared: dict[tuple[str, int], tuple[str, int]] = {}  # selector slot -> (first field, selector)
         # signs come from the values they belong to
         for f in self.fields:
             if f.signed is not None and f.name in a.values:
                 signs[f.signed] = 1 if self._is_negative(a.get(f.name)) else 0
+            if f.kind == "vref" and f.modes:
+                form = self._vref_form(f, a.get(f.name, f.default), call) if f.name in a.values else f.forms[0]
+                selector = f.forms.index(form)
+                slot = (f.modes, f.shift)
+                if slot in shared and shared[slot][1] != selector:
+                    raise CompileError(
+                        "%s(): %s and %s share how they are given: both numbers, both variables[id]..."
+                        % (self.name, shared[slot][0], f.name),
+                        call.node,
+                    )
+                shared.setdefault(slot, (f.name, selector))
+                signs[f.modes] = signs.get(f.modes, 0) | (selector << f.shift)
+            if f.kind == "bits" and f.modes:
+                signs[f.modes] = signs.get(f.modes, 0) | (self._bits_value(f, a, call) << f.shift)
+        needed = self._needed_params(a) if self.min_params is not None else None
+        pos = 0
         for f in self.fields:
             absent = f.name in a.values and a.get(f.name) is None and f.kind not in ("optid", "optvar")
             if absent or (f.optional and ctx.engine == "2k" and f.name not in a.values):
                 break
-            params += self._enc_field(f, a, call, ctx, enc, signs)
+            if needed is not None and pos >= needed and f.kind != "bits":
+                break
+            out = self._enc_field(f, a, call, ctx, enc, signs)
+            pos += len(out)
+            params += out
         extra = a.get("extra")
         if extra is not None:
             if not (isinstance(extra, tuple) and all(isinstance(x, int) and not isinstance(x, bool) for x in extra)):
@@ -328,6 +411,68 @@ class Spec(BaseModel):
             raise CompileError("%s() is called on %s[id]" % (self.name, self.target), call.node)
         return n
 
+    def _bits_value(self, f: Field, a: Args, call: Call) -> int:
+        if f.name not in a.values:
+            d = f.default
+            return f.choices.index(d) if isinstance(d, str) else int(d)
+        v = a.get(f.name)
+        if f.choices and isinstance(v, str):
+            if v not in f.choices:
+                raise CompileError("%s(): %s must be one of %s" % (self.name, f.name, ", ".join(f.choices)), call.node)
+            return f.choices.index(v)
+        if isinstance(v, bool) or (isinstance(v, int) and 0 <= v < (1 << f.bits)):
+            return int(v)
+        raise CompileError("%s(): bad %s" % (self.name, f.name), call.node)
+
+    def _needed_params(self, a: Args) -> int:
+        """How many parameters to write: the required ones, then up to the last given field."""
+        needed = self.min_params or 0
+        pos = 0
+        for f in self.fields:
+            w = f.width() if f.kind != "list" else 0
+            given = f.name in a.values
+            if f.kind == "bits" and given:  # lives in its modes field
+                src = next(x for x in self.fields if x.name == f.modes)
+                needed = max(needed, self._offset(src) + 1)
+            elif given:
+                needed = max(needed, pos + w)
+            pos += w
+        return needed
+
+    def _offset(self, field: Field) -> int:
+        pos = 0
+        for f in self.fields:
+            if f is field:
+                return pos
+            pos += f.width() if f.kind != "list" else 0
+        raise KeyError(field.name)
+
+    def _vref_form(self, f: Field, v, call: Call) -> str:
+        """const / var / ref for a value: 5, variables[5] or variables[variables[5]]."""
+        from . import pyexpr as P
+
+        if P.is_int(v):
+            form = "const"
+        elif P.var_index(v) is not None:
+            form = "var"
+        elif isinstance(v, P.Ref) and v.coll == "variables" and P.var_index(v.index) is not None:
+            form = "ref"
+        elif isinstance(v, P.Ref) and v.coll == "switches" and P.is_int(v.index):
+            form = "switch"
+        else:
+            form = None
+        if form not in f.forms:
+            allowed = {
+                "const": "a number",
+                "var": "variables[id]",
+                "ref": "variables[variables[id]]",
+                "switch": "switches[id] (1 when ON)",
+            }
+            raise CompileError(
+                "%s(): %s is %s" % (self.name, f.name, " or ".join(allowed[x] for x in f.forms)), call.node
+            )
+        return form
+
     @staticmethod
     def _is_negative(v) -> bool:
         from . import pyexpr as P
@@ -346,6 +491,20 @@ class Spec(BaseModel):
             return [f.default]
         if k == "sign":
             return [signs.get(f.name, 0)]
+        if k == "modes":
+            return [signs.get(f.name, 0)]
+        if k == "bits":
+            return []
+        if k == "vref":
+            if not given:
+                return [int(f.default)]
+            form = self._vref_form(f, v, call)
+            if form == "const":
+                return [v]
+            if form == "switch":
+                return [v.index]
+            n = P.var_index(v) if form == "var" else P.var_index(v.index)
+            return [n]
         if k == "branches":
             return [int(a.bool(f.name, ctx.match_header)) if given else int(ctx.match_header)]
         if k in ("xy", "mxy"):
@@ -794,24 +953,45 @@ PAN = {0: "lock_screen", 1: "unlock_screen", 2: "pan_screen", 3: "reset_screen_p
 BY_CODE: dict[int, list[Spec]] = {}
 for _s in SPECS:
     BY_CODE.setdefault(_s.code, []).append(_s)
-FUNCTIONS: dict[str, Spec] = {s.name: s for s in SPECS if s.target is None}
+FUNCTIONS: dict[str, Spec] = {s.name: s for s in SPECS if s.target is None and s.namespace is None}
 METHODS: dict[tuple[str, str], Spec] = {(s.target, s.name): s for s in SPECS if s.target}
+
+# patch commands written namespace.name(...) (rpgsync.maniac registers its specs on import)
+NAMESPACED: dict[tuple[str, str], Spec] = {}
+
+
+def register(specs: list[Spec]) -> None:
+    for spec in specs:
+        BY_CODE.setdefault(spec.code, []).append(spec)
+        NAMESPACED[(spec.namespace or "", spec.name)] = spec
+
+
 MATCH_HEADERS = {10710: "start_battle", 10720: "open_shop", 10730: "inn"}
 
 
 def decode(c: Command, ctx: Ctx) -> str | None:
+    from . import maniac
+
     if c.code == 11060:
         return _decode_pan(c)
     for spec in BY_CODE.get(c.code, []):
         src = spec.decode(c, ctx)
         if src is not None:
             return src
-    return None
+    return maniac.decode_generic(c, ctx)  # any other Maniac command: by name, raw parameters
 
 
 def encode(call: Call, ctx: Ctx) -> Command | None:
+    from . import maniac
     from . import pyexpr as P
 
+    if isinstance(call.target, P.Sym) and call.target.name == maniac.NAMESPACE:
+        # named specs take keyword arguments only: positional numbers are the raw parameters
+        spec = NAMESPACED.get((maniac.NAMESPACE, call.name))
+        cmd = spec.encode(call, ctx) if spec and not call.args else maniac.encode_generic(call, ctx)
+        if cmd is None:
+            raise CompileError("unknown Maniac command %s.%s()" % (maniac.NAMESPACE, call.name), call.node)
+        return cmd
     if call.target is None:
         if call.name in PAN.values():
             return _encode_pan(call)

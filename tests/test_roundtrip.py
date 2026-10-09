@@ -32,6 +32,18 @@ def test_binary_roundtrip(game):
         assert f.to_bytes() == data, "re-encoding changed " + path
 
 
+def test_scrambled_header(game):
+    """Protected games replace the header (the editor refuses them, the engine doesn't care)."""
+    for name, fake in (("Map0001.lmu", b"NNVLLFIHPU"), ("RPG_RT.ldb", b"NNVLLFIHPUR")):
+        data = open(os.path.join(game, name), "rb").read()
+        real = data[1 : 1 + data[0]]
+        scrambled = bytes([len(fake)]) + fake + data[1 + len(real) :]
+        f = LcfFile.parse(scrambled)
+        assert f.header == fake and f.to_bytes() == scrambled
+        f.header = real
+        assert f.to_bytes() == data
+
+
 def test_map_script_roundtrip(game_map, tmp_path):
     game, path = game_map
     ctx = Project(game, script_dir=str(tmp_path)).context()

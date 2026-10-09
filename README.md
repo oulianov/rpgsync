@@ -52,6 +52,14 @@ https://github.com/user-attachments/assets/9246ff34-b226-4ebc-b8a3-e55b3adcc5d5
 
 
 
+## Compatibility
+
+rpgsync works with **RPG Maker 2000 and 2003** games, both in old versions (1.08) and Steam version (1.12a). It was tested on EasyRPG's test suites and on complete
+games. [Learn more.](Tested_Games.md).
+
+**Supported Patches:** Everything! DynRPG, Maniac Patch, EasyRPG commands, Power Mode 2003, Ineluki Key Patch... Patches with unknown commands are kept as raw. Patches that only change the engine don't matter for this module. 
+
+
 ## Getting started
 
 ### 1. Install uv
@@ -179,17 +187,26 @@ if switches.night_mode:                      # switches[12]
 - **The numeric forms still work:** `events[2]`, `variables[102]`, `common_events[12]()`.
 - **Use your IDE to rename variable names:** On VSCode, right click and use "Rename Symbol"
 
-### DynRPG commands in scripts
+### Patches
 
-- DynRPG comments become function calls on `dyn`
-- Variable tokens such as`V152` are written `V[152]`:
+rpgsync has advanced support for popular plugins DynRPG and Patch maniacs, so that the code is nice and clean.
 
-```python
-dyn.dynparams_add_param(2, V[152])  # @dynparams_add_param 2, V152
-dyn.dynparams_overwrite_next()
-dyn.change_text("desc-indice", r"\I[\v[153]]", 0)
+The first sync detects patches from the game (`DynPlugins/`,
+and the `[Patch]` section of `EasyRPG.ini`) and writes them into
+`Scripts/pyproject.toml`. 
+
+Edit them there if the detection is wrong:
+
+```toml
+[tool.rpgsync]
+engine = "2003"               # "2000" | "2003": the engine checks target
+patches = ["dynrpg"]          # "dynrpg" | "maniac" | "easyrpg"
+allow_commands = [2055]       # single extra command codes, allowed anyway
 ```
 
+EasyRPG Player reads the same `[Patch]` section of the game's `EasyRPG.ini`
+(e.g. `Maniac=1`, `DynRPG=1`, `PowerMode2003=1`) when it doesn't detect a patch
+by itself. See [Patches.md](Patches.md) for how each patch is handled.
 
 ## Recommended: add EasyRPG Player
 

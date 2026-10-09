@@ -226,8 +226,7 @@ def _emit_text(nodes, i, ctx, level, in_loop):
     while j < len(nodes) and nodes[j].body is None and nodes[j].cmd.code == cont and not nodes[j].cmd.params:
         lines.append(ctx.dec(nodes[j].cmd.string))
         j += 1
-    if any("\n" in l for l in lines):
-        return None
+    split = not any("\n" in l for l in lines)  # else a line holds a line break: split=False
     pad = INDENT * level
     if fname == "comment":
         out = None
@@ -239,6 +238,11 @@ def _emit_text(nodes, i, ctx, level, in_loop):
             out = [pad + ("# " + l if l else "#") for l in lines]
         if out is not None and _compiles_to(out, flatten(nodes[i:j]), ctx):
             return out, j - i
+    if not split:
+        return [pad + fname + "("] + [pad + INDENT + K.pystr(l) + "," for l in lines] + [
+            pad + INDENT + "split=False,",
+            pad + ")",
+        ], j - i
     if len(lines) == 1:
         return [pad + render_call(fname, lines)], 1
     return [pad + fname + "("] + [pad + INDENT + K.pystr(l) + "," for l in lines] + [pad + ")"], j - i
@@ -599,11 +603,17 @@ def _compile_stmt(stmt: ast.stmt, nxt: ast.stmt | None, ctx: Ctx, indent: int) -
         and stmt.value.func.id in ("text", "comment")
     ):
         call = evaluate(stmt.value)
-        if call.kwargs or not all(isinstance(a, str) for a in call.args):
-            raise CompileError("%s() only takes strings, one per line" % call.name, stmt)
+        split = call.kwargs.get("split", True)
+        if (
+            set(call.kwargs) - {"split"}
+            or not isinstance(split, bool)
+            or not all(isinstance(a, str) for a in call.args)
+        ):
+            raise CompileError("%s() only takes strings, one per line (and split=False)" % call.name, stmt)
         lines: list[str] = []
         for a in call.args:
-            lines.extend(a.split("\n"))
+            # "\n" starts a new line, unless split=False: a line holding a line break
+            lines.extend(a.split("\n") if split else [a])
         lines = lines or [""]
         first, cont = (10110, 20110) if call.name == "text" else (12410, 22410)
         return [C(first, string=ctx.enc(lines[0], stmt))] + [C(cont, string=ctx.enc(l, stmt)) for l in lines[1:]]
