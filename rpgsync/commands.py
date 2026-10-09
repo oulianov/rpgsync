@@ -466,7 +466,9 @@ def moves_to_src(moves: list[MoveCommand], ctx: Ctx) -> list[Raw]:
 
 def _move_src(m: MoveCommand, ctx: Ctx) -> list[Raw]:
     if m.code in (32, 33):
-        return [Raw(src=render_call(MOVES[m.code], [m.params[0]]))]
+        from .pyexpr import sw_src  # switches by name: switch_on(switches.door_open)
+
+        return [Raw(src="%s(%s)" % (MOVES[m.code], sw_src(m.params[0])))]
     if m.code == 34:
         return [Raw(src=render_call("change_graphic", [ctx.dec(m.string), m.params[0]]))]
     if m.code == 35:
@@ -493,7 +495,14 @@ def moves_from_values(values: Sequence[Any], ctx: Ctx, node=None) -> list[MoveCo
         elif isinstance(v, Call):
             if v.name in ("switch_on", "switch_off"):
                 a = Args(v, ["switch"])
-                out.append(MoveCommand(code=MOVES.index(v.name), params=[a.int("switch")]))
+                switch = a.get("switch")
+                if getattr(switch, "coll", None) == "switches" and isinstance(switch.index, int):
+                    switch = switch.index  # switches[12] / switches.door_open
+                elif not isinstance(switch, int) or isinstance(switch, bool):
+                    raise CompileError(
+                        "%s(): switch must be switches[id], switches.name or an id" % v.name, v.node or node
+                    )
+                out.append(MoveCommand(code=MOVES.index(v.name), params=[switch]))
             elif v.name == "change_graphic":
                 a = Args(v, ["charset", "index"])
                 out.append(MoveCommand(code=34, string=ctx.enc(a.str("charset"), v.node), params=[a.int("index")]))

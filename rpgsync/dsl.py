@@ -481,6 +481,113 @@ class MoveStep:
     def __mul__(self, count: int) -> MoveStep: ...
 
 
+# ==========================================================================
+# Move route steps
+# ==========================================================================
+
+move_up = MoveStep()
+"""Move one tile up."""
+move_right = MoveStep()
+"""Move one tile right."""
+move_down = MoveStep()
+"""Move one tile down."""
+move_left = MoveStep()
+"""Move one tile left."""
+move_up_right = MoveStep()
+"""Move one tile diagonally up-right."""
+move_down_right = MoveStep()
+"""Move one tile diagonally down-right."""
+move_down_left = MoveStep()
+"""Move one tile diagonally down-left."""
+move_up_left = MoveStep()
+"""Move one tile diagonally up-left."""
+move_random = MoveStep()
+"""Move one tile in a random direction."""
+move_toward_player = MoveStep()
+"""Move one tile toward the player."""
+move_away_from_player = MoveStep()
+"""Move one tile away from the player."""
+move_forward = MoveStep()
+"""Move one tile in the facing direction."""
+face_up = MoveStep()
+"""Turn to face up."""
+face_right = MoveStep()
+"""Turn to face right."""
+face_down = MoveStep()
+"""Turn to face down."""
+face_left = MoveStep()
+"""Turn to face left."""
+turn_right = MoveStep()
+"""Turn 90 degrees clockwise."""
+turn_left = MoveStep()
+"""Turn 90 degrees counterclockwise."""
+turn_around = MoveStep()
+"""Turn 180 degrees."""
+turn_random = MoveStep()
+"""Turn 90 degrees left or right at random."""
+face_random = MoveStep()
+"""Face a random direction."""
+face_player = MoveStep()
+"""Face the player."""
+face_away_from_player = MoveStep()
+"""Turn the back to the player."""
+pause = MoveStep()
+"""Wait one movement step."""
+jump_start = MoveStep()
+"""Start a jump: the following movement steps set where it lands."""
+jump_end = MoveStep()
+"""End a jump started with jump_start: land where the steps in between lead."""
+lock_facing = MoveStep()
+"""Keep the current facing direction while moving."""
+unlock_facing = MoveStep()
+"""Face the direction of movement again."""
+speed_up = MoveStep()
+"""Move one speed faster (speeds go from 1 to 6)."""
+speed_down = MoveStep()
+"""Move one speed slower."""
+frequency_up = MoveStep()
+"""Act more often (frequency goes from 1 to 8)."""
+frequency_down = MoveStep()
+"""Act less often."""
+phasing_on = MoveStep()
+"""Walk through everything."""
+phasing_off = MoveStep()
+"""Stop walking through everything."""
+stop_animation = MoveStep()
+"""Stop the walking animation."""
+start_animation = MoveStep()
+"""Animate the walking again."""
+transparency_up = MoveStep()
+"""One step more transparent (0 = opaque, 7 = most)."""
+transparency_down = MoveStep()
+"""One step less transparent."""
+
+
+def switch_on(switch: int | Switch) -> MoveStep:
+    """Move step: turn a switch ON: ``switch_on(switches.door_open)``."""
+    return MoveStep()
+
+
+def switch_off(switch: int | Switch) -> MoveStep:
+    """Move step: turn a switch OFF: ``switch_off(switches.door_open)``."""
+    return MoveStep()
+
+
+def change_graphic(charset: str, index: SpriteIndex) -> MoveStep:
+    """Move step: change the character's graphic to character ``index`` (0-7,
+    see SpriteIndex) of the CharSet image ``charset`` (file name without
+    extension)."""
+    return MoveStep()
+
+
+# play_se(name, volume, tempo, balance) is a move step too (see Audio).
+
+
+def move(code: int) -> MoveStep:
+    """Move step by its raw code (for codes rpgsync has no name for)."""
+    return MoveStep()
+
+
 class Character:
     """A character on the map: ``this``, ``player``, ``events[id]``, vehicles."""
 
@@ -1564,70 +1671,3 @@ def cmd(
     opens a block for commands that have one.  rpgsync uses it only for
     patch commands (Maniac, EasyRPG) and unusual data."""
     return nullcontext()
-
-
-# ==========================================================================
-# Move route steps
-# ==========================================================================
-
-move_up = MoveStep()
-move_right = MoveStep()
-move_down = MoveStep()
-move_left = MoveStep()
-move_up_right = MoveStep()
-move_down_right = MoveStep()
-move_down_left = MoveStep()
-move_up_left = MoveStep()
-move_random = MoveStep()
-move_toward_player = MoveStep()
-move_away_from_player = MoveStep()
-move_forward = MoveStep()
-face_up = MoveStep()
-face_right = MoveStep()
-face_down = MoveStep()
-face_left = MoveStep()
-turn_right = MoveStep()
-turn_left = MoveStep()
-turn_around = MoveStep()
-turn_random = MoveStep()
-face_random = MoveStep()
-face_player = MoveStep()
-face_away_from_player = MoveStep()
-pause = MoveStep()
-"""Wait one movement step."""
-jump_start = MoveStep()
-"""Start a jump: the following movement steps set where it lands."""
-jump_end = MoveStep()
-lock_facing = MoveStep()
-unlock_facing = MoveStep()
-speed_up = MoveStep()
-speed_down = MoveStep()
-frequency_up = MoveStep()
-frequency_down = MoveStep()
-phasing_on = MoveStep()
-"""Walk through everything."""
-phasing_off = MoveStep()
-stop_animation = MoveStep()
-start_animation = MoveStep()
-transparency_up = MoveStep()
-transparency_down = MoveStep()
-
-
-def switch_on(id: int) -> MoveStep:
-    """Move step: turn a switch ON."""
-    return MoveStep()
-
-
-def switch_off(id: int) -> MoveStep:
-    """Move step: turn a switch OFF."""
-    return MoveStep()
-
-
-def change_graphic(charset: str, index: SpriteIndex) -> MoveStep:
-    """Move step: change the character's graphic."""
-    return MoveStep()
-
-
-def move(code: int) -> MoveStep:
-    """Move step by raw code."""
-    return MoveStep()

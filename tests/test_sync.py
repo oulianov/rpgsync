@@ -329,3 +329,25 @@ def test_common_events_by_name(exported2003):
     _edit(unit.py_path, "common_events.%s()" % fname, "common_events.no_such_event()")
     r = syncer.sync(unit)
     assert r.action == "error" and "no common event named 'no_such_event'" in r.message
+
+
+def test_move_route_switch_steps_by_name(exported2003):
+    import re
+
+    syncer, unit = _setup(exported2003)
+    switches = open(os.path.join(syncer.project.script_dir, "database", "switches.py"), encoding="utf-8").read()
+    sid, attr = next((int(i), a) for a, i in re.findall(r"^    (\w+) = Switch\((\d+), ", switches, re.M))
+    line = next(ln for ln in open(unit.py_path).read().splitlines() if "variables.variable_0001 = 9999999" in ln)
+    indent = line[: len(line) - len(line.lstrip())]
+    step = "this.move(switch_on(switches.%s), switch_off(switches[%d]), switch_on(%d))" % (attr, sid, sid)
+    _edit(unit.py_path, line, line + "\n" + indent + step)
+    assert syncer.sync(unit).action == "import"
+    cmds = [c for pg in _events(unit.bin_path)[9].get("pages") for c in pg.struct.get("event_commands")]
+    from rpgsync.lcf import MoveCommand, write_move_commands
+
+    moves = [MoveCommand(code=32, params=[sid]), MoveCommand(code=33, params=[sid]), MoveCommand(code=32, params=[sid])]
+    assert any(c.code == 11330 and list(c.params[4:]) == list(write_move_commands(moves)) for c in cmds)
+    syncer.sync(unit, "game")  # regenerated: by name
+    expected = "this.move(switch_on(switches.%s),switch_off(switches.%s),switch_on(switches.%s)," % ((attr,) * 3)
+    text = re.sub(r"\s+|,(?=\s*\))", "", open(unit.py_path, encoding="utf-8").read())  # ruff may split the line
+    assert expected in text
