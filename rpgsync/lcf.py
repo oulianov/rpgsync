@@ -13,6 +13,7 @@ written back verbatim, and chunks unknown to the schema are kept as raw bytes.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -87,16 +88,45 @@ def ber_size(value: int) -> int:
 # --------------------------------------------------------------------------
 
 
-class Command(BaseModel):
-    """One line of an event script."""
+class Command:
+    """One line of an event script.
 
-    code: int
-    indent: int = 0
-    string: bytes = b""
-    params: list[int] = Field(default_factory=list)
+    A plain class rather than a pydantic model: a game holds tens of thousands of
+    commands (61,000 in the common events of one test game), and a pydantic
+    instance weighs about 700 bytes where this one weighs about 150."""
+
+    __slots__ = ("code", "indent", "string", "params")
+
+    def __init__(self, code: int, indent: int = 0, string: bytes = b"", params: Iterable[int] = ()):
+        self.code = code
+        self.indent = indent
+        self.string = string
+        self.params = list(params)
+
+    @classmethod
+    def decoded(cls, code: int, indent: int, string: bytes, params: list[int]) -> Command:
+        """A command straight from the file decoder: the params list is taken as is."""
+        c = cls.__new__(cls)
+        c.code, c.indent, c.string, c.params = code, indent, string, params
+        return c
 
     def key(self) -> tuple:
         return (self.code, self.indent, self.string, tuple(self.params))
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, Command):
+            return NotImplemented
+        return (
+            self.code == other.code
+            and self.indent == other.indent
+            and self.string == other.string
+            and self.params == other.params
+        )
+
+    __hash__ = None  # mutable, like the list of params
+
+    def __repr__(self) -> str:
+        return "Command(code=%d, indent=%d, string=%r, params=%r)" % (self.code, self.indent, self.string, self.params)
 
 
 def read_commands(data: bytes) -> tuple[list[Command], bytes]:
@@ -118,8 +148,7 @@ def read_commands(data: bytes) -> tuple[list[Command], bytes]:
         indent = r.ber()
         string = r.take(r.ber())
         params = [r.ber() for _ in range(r.ber())]
-        # trusted data straight from the parser: skip validation (hot path)
-        cmds.append(Command.model_construct(code=code, indent=indent, string=string, params=params))
+        cmds.append(Command.decoded(code, indent, string, params))
     return cmds, data[r.pos :]
 
 
@@ -431,6 +460,15 @@ class Struct:
         c = self._chunk(self._field(key)[0])
         if c is not None:
             c.dirty = True
+
+    def release(self) -> None:
+        """Forget the decoded values of unmodified chunks (their bytes stay): a big map
+        decodes into ~90 MB of objects, kept one event at a time this way.  A later
+        get() decodes again; a value returned before stays valid but detached."""
+        for c in self.chunks:
+            if c._decoded and c.raw is not None and not c.dirty and not _is_container_dirty(c._value):
+                c._value = None
+                c._decoded = False
 
     def __repr__(self):
         return "<Struct %s %s>" % (self.name, [hex(c.id) for c in self.chunks])

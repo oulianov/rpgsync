@@ -24,9 +24,11 @@ import keyword
 import re
 import tokenize
 import unicodedata
+from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from . import commands as K
 from . import dynparams as D
@@ -44,7 +46,9 @@ evaluate = P.evaluate
 
 
 class Node(BaseModel):
-    cmd: Command
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    cmd: SkipValidation[Command]
     body: list[Node] | None = None  # None for leaf commands
 
 
@@ -105,10 +109,19 @@ def _keys(cmds: list[Command], base: int) -> list[tuple]:
 # --------------------------------------------------------------------------
 
 
+# While true, each construct (a line, an if, a loop...) is rendered without compiling it
+# back: body_lines checks the whole list once instead, and renders it again with the
+# checks only when that fails.  Checking every construct costs one ast.parse per
+# command, more for nested blocks (an if checks its whole body).
+_TRUSTED: ContextVar[bool] = ContextVar("trusted_rendering", default=False)
+
+
 def _compiles_to(lines: list[str], expected: list[Command], ctx: Ctx) -> bool:
     """Do these script lines compile to exactly `expected` (relative indents)?"""
     if not expected:
         return False
+    if _TRUSTED.get():
+        return True  # checked all at once by body_lines
     try:
         got = compile_body_src(lines, ctx)
     except (CompileError, SyntaxError, ValueError, TypeError, IndexError):
@@ -133,11 +146,23 @@ def body_lines(cmds: list[Command], ctx: Ctx, depth: int) -> tuple[list[str], bo
     If the structured rendering does not compile back to the identical list,
     a flat ``raw`` rendering with explicit indents is returned instead."""
     try:
-        lines = _emit(build_tree(cmds), ctx, depth, False)
-        if compile_body_src(lines, ctx) == cmds:
-            return lines, True
+        tree = build_tree(cmds)
     except StructureError:
-        pass
+        tree = None
+    if tree is not None:
+        # first without checking each construct, then (if the whole list does not
+        # compile back identically) checking each one, which falls back where needed
+        for trusted in (True, False):
+            token = _TRUSTED.set(trusted)
+            try:
+                lines = _emit(tree, ctx, depth, False)
+            finally:
+                _TRUSTED.reset(token)
+            try:
+                if compile_body_src(lines, ctx) == cmds:
+                    return lines, True
+            except (CompileError, SyntaxError, ValueError, TypeError, IndexError):
+                pass  # a trusted rendering that does not even compile
     lines = [INDENT * depth + K.generic_src(c, ctx, with_indent=True) for c in cmds]
     return lines, False
 
@@ -804,14 +829,40 @@ PAGE_DEFAULTS = {
 }
 
 
-class PageSpec(BaseModel):
-    props: dict[str, Any]
-    commands: list[Command]
-    id: int | None = None
-    lineno: int | None = None
+class PageSpec:
+    """One event page: its properties (see page_props_from_struct) and commands.
+
+    A plain class rather than a pydantic model, like Command: a map can hold tens of
+    thousands of pages (28,800 in one TestGame map), and validating each one copied
+    its property dict (~750 bytes a page)."""
+
+    __slots__ = ("props", "commands", "id", "lineno")
+
+    def __init__(
+        self, props: dict[str, Any], commands: list[Command], id: int | None = None, lineno: int | None = None
+    ):
+        self.props = props
+        self.commands = commands
+        self.id = id
+        self.lineno = lineno
 
     def key(self):
         return (tuple(sorted((k, _hashable(v)) for k, v in self.props.items())), tuple(c.key() for c in self.commands))
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, PageSpec):
+            return NotImplemented
+        return (self.props, self.commands, self.id, self.lineno) == (
+            other.props,
+            other.commands,
+            other.id,
+            other.lineno,
+        )
+
+    __hash__ = None  # mutable, like its props
+
+    def __repr__(self) -> str:
+        return "PageSpec(props=%r, commands=<%d>, id=%r)" % (self.props, len(self.commands), self.id)
 
 
 def _hashable(v):
@@ -825,11 +876,13 @@ def _hashable(v):
 
 
 class EventSpec(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     id: int | None
     name: bytes
     x: int
     y: int
-    pages: list[PageSpec]
+    pages: SkipValidation[list[PageSpec]]  # a plain class, already checked: not copied nor re-validated
     lineno: int | None = None
 
     def key(self):
@@ -837,11 +890,13 @@ class EventSpec(BaseModel):
 
 
 class CommonEventSpec(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     id: int | None
     name: bytes
     trigger: int
     switch_id: int | None
-    commands: list[Command]
+    commands: SkipValidation[list[Command]]  # a plain class, already checked: not copied nor re-validated
     lineno: int | None = None
 
     def key(self):
@@ -915,6 +970,60 @@ def incremental_source(text: str, base: str, decorator: str, indent: str) -> tup
         if eid not in changed:
             part[a:b] = [""] * (b - a)
     return "\n".join(part), changed, [eid for eid in entries if eid not in changed]
+
+
+def differs_by_blank_lines_only(text: str, other: str, decorator: str, indent: str) -> bool:
+    """The same entries, and only blank lines differ outside them: a blank line between
+    two entries changes no event (ruff adding one must not cost compiling the whole
+    script).  Inside an entry a blank line can matter (it splits comments)."""
+    a, b = split_entries(text, decorator, indent), split_entries(other, decorator, indent)
+    if a is None or b is None:
+        return False
+    (lines, entries), (other_lines, other_entries) = a, b
+    if set(entries) != set(other_entries) or any(
+        lines[s:e] != other_lines[other_entries[eid][0] : other_entries[eid][1]] for eid, (s, e) in entries.items()
+    ):
+        return False
+    skeleton = [l for l in _skeleton(lines, entries) if l.strip()]
+    return skeleton == [l for l in _skeleton(other_lines, other_entries) if l.strip()]
+
+
+def parse_by_entries(src: str, filename: str, decorator: str, indent: str) -> tuple[ast.Module, Callable]:
+    """Parse a script one `@decorator(id, ...)` entry at a time.
+
+    Python's syntax tree weighs ~90 times the source (170 MB for a 2 MB script), so
+    the whole file is never parsed at once: the skeleton is parsed with each entry
+    replaced by a `pass` on its first line, and `entry(stmt)` parses an entry when
+    the compiler reaches its placeholder (its tree is dropped once compiled).  Line
+    and column numbers are those of the whole file.  -> (skeleton, entry) where entry
+    returns the statements an entry placeholder stands for, else [stmt].  Falls back
+    to parsing the whole file (same errors as ast.parse) when the entries cannot be
+    told apart reliably."""
+    found = split_entries(src, decorator, indent)
+    if found is not None and found[1]:
+        lines, entries = found
+        skeleton = list(lines)
+        starts = {}
+        for a, b in entries.values():
+            skeleton[a:b] = [indent + "pass"] + [""] * (b - a - 1)
+            starts[a + 1] = (a, b)  # line number of the placeholder
+        try:
+            tree = ast.parse("\n".join(skeleton), filename)
+
+            def entry(stmt: ast.stmt) -> list[ast.stmt]:
+                if not (isinstance(stmt, ast.Pass) and stmt.lineno in starts):
+                    return [stmt]
+                a, b = starts[stmt.lineno]
+                body = "\n".join(lines[a:b])
+                if not indent:
+                    return ast.parse("\n" * a + body, filename).body
+                # an entry inside a class: parsed in a class of its own on the line before
+                return ast.parse("\n" * (a - 1) + "class _:\n" + body, filename).body[0].body  # type: ignore[attr-defined]
+
+            return tree, entry
+        except SyntaxError:
+            pass  # not split where Python would: parse it whole for the real error
+    return ast.parse(src, filename), lambda stmt: [stmt]
 
 
 def page_props_from_struct(p: Struct) -> dict[str, Any]:
@@ -1206,9 +1315,30 @@ def _dsl_import(ctx: Ctx) -> str:
 
 
 @functools.lru_cache(maxsize=4)  # a sync reads the same (large) script more than once
+def _entry_function_names(text: str, decorator: str, indent: str) -> dict[int, str] | None:
+    """id -> function name read from the `def` lines of the entries, without parsing
+    the script (its syntax tree weighs ~90 times the text); None when they cannot be
+    read that way (an entry without a literal id...)."""
+    found = split_entries(text, decorator, indent)
+    if found is None:
+        return None
+    lines, entries = found
+    out = {}
+    for eid, (a, b) in entries.items():
+        m = next((re.match(r"\s*def (\w+)\(", l) for l in lines[a:b] if l.lstrip().startswith("def ")), None)
+        if m is None:
+            return None
+        out[eid] = m.group(1)
+    return out
+
+
 def read_function_names(text: str, decorator: str = "common_event") -> dict[int, str]:
     """id -> function name of the @common_event functions of a script (to keep
     the names when it is rewritten).  Don't modify the returned dict."""
+    for indent in (INDENT, ""):  # in the class, or at the top level (older files)
+        names = _entry_function_names(text, decorator, indent)
+        if names:
+            return names
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -1277,6 +1407,16 @@ def function_names(items: list[ArrayItem], ctx: Ctx, prefix: str) -> dict[int, s
 
 def decompile_map(m: Struct, ctx: Ctx, title: str, target: str) -> str:
     out = ['"""%s"""' % title.replace('"""', "'''"), HEADER_NOTE.format(target=target), _dsl_import(ctx)]
+    for lines in decompile_map_events(m, ctx).values():
+        out.append("")
+        out.append("")
+        out.extend(lines)
+    return "\n".join(out).rstrip() + "\n"
+
+
+def decompile_map_events(m: Struct, ctx: Ctx, ids: set[int] | None = None) -> dict[int, list[str]]:
+    """id -> script lines of the map's events (only of `ids` when given), in map order.
+    Each event is named and refers to the others exactly as in the whole script."""
     items = m.get("events")
     names = function_names(items, ctx, "ev")
     ctx.event_names = {
@@ -1286,15 +1426,16 @@ def decompile_map(m: Struct, ctx: Ctx, title: str, target: str) -> str:
     }
     # named events are referred to by their function name: haru.move(...)
     handles = {eid: names[eid] for eid in ctx.event_names if not names[eid].startswith("ev_")}
+    out = {}
     try:
         with P.map_events(names=handles, ids={name: eid for eid, name in handles.items()}), P.db_names(ctx):
             for item in items:
-                out.append("")
-                out.append("")
-                out.extend(decompile_event(item, ctx, names[item.id]))
+                if ids is None or item.id in ids:
+                    out[item.id] = decompile_event(item, ctx, names[item.id])
+                    item.struct.release()  # one event's decoded pages at a time
     finally:
         ctx.event_names = {}
-    return "\n".join(out).rstrip() + "\n"
+    return out
 
 
 def decompile_event(item: ArrayItem, ctx: Ctx, fname: str | None = None) -> list[str]:
@@ -1339,6 +1480,17 @@ def compile_map_source(src: str, ctx: Ctx, filename: str = "<script>", names_src
 
 def _event_function_ids(src: str) -> dict[str, int | None]:
     """Function name -> id of the @event functions of a map script."""
+    found = split_entries(src, "event", "")
+    if found is not None:  # every entry has a literal id: read the def lines only
+        lines, entries = found
+        out: dict[str, int | None] = {}
+        for eid, (a, b) in entries.items():
+            m = next((re.match(r"def (\w+)\(", l) for l in lines[a:b] if l.startswith("def ")), None)
+            if m is None:
+                break
+            out[m.group(1)] = eid
+        else:
+            return out
     try:
         tree = ast.parse(src)
     except SyntaxError:
@@ -1357,13 +1509,19 @@ def _event_function_ids(src: str) -> dict[str, int | None]:
 
 def _compile_map_source(src: str, ctx: Ctx, filename: str = "<script>") -> list[EventSpec]:
     try:
-        tree = ast.parse(src, filename)
+        tree, entry = parse_by_entries(src, filename, "event", "")
+        statements = (s for placeholder in tree.body for s in entry(placeholder))
+        events = _compile_map_statements(statements, src, ctx)
     except SyntaxError as e:
         raise CompileError("syntax error: %s" % e.msg, e) from None
+    return events
+
+
+def _compile_map_statements(statements: Iterable[ast.stmt], src: str, ctx: Ctx) -> list[EventSpec]:
     ctx.comments = CommentIndex(src)
     events: list[EventSpec] = []
     seen = {}
-    for stmt in tree.body:
+    for stmt in statements:
         if _is_header_stmt(stmt):
             continue
         if not isinstance(stmt, ast.FunctionDef):
@@ -1531,8 +1689,25 @@ def decompile_common_events(db: Struct, ctx: Ctx, target: str) -> str:
 def _decompile_common_events(db: Struct, ctx: Ctx, target: str) -> str:
     out = ['"""Common events"""', "", HEADER_NOTE.format(target=target), CE_IMPORT, "", ""]
     out += ["class CommonEvents(CommonEventTable):", *K.config_src(len(db.get("commonevents")), INDENT)]
+    for lines in _decompile_common_event_entries(db, ctx).values():
+        out.append("")
+        out.extend(lines)
+    out += ["", "", "common_events = CommonEvents()"]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def decompile_common_event_entries(db: Struct, ctx: Ctx, ids: set[int] | None = None) -> dict[int, list[str]]:
+    """id -> script lines of the used common events (only of `ids` when given), in order."""
+    with P.db_names(ctx):
+        return _decompile_common_event_entries(db, ctx, ids)
+
+
+def _decompile_common_event_entries(db: Struct, ctx: Ctx, ids: set[int] | None = None) -> dict[int, list[str]]:
     names = ctx.handles.get("common_events") or common_event_names(_ce_names(db, ctx))
+    out = {}
     for item in db.get("commonevents"):
+        if ids is not None and item.id not in ids:
+            continue
         if is_empty_common_event(_ce_spec(item)):
             continue  # unused slot; scripts only list used common events
         ce = item.struct
@@ -1542,12 +1717,12 @@ def _decompile_common_events(db: Struct, ctx: Ctx, target: str) -> str:
         body, structured = body_lines(list(ce.get("event_commands")), ctx, 2)
         if not structured:
             kw.append(("raw", True))
-        out.append("")
-        out.append(INDENT + "@" + render_call("common_event", [item.id, ctx.dec(ce.get("name"))], kw))
-        out.append(INDENT + "def %s():" % names[item.id])
-        out.extend(_body(body, INDENT * 2))
-    out += ["", "", "common_events = CommonEvents()"]
-    return "\n".join(out).rstrip() + "\n"
+        lines = [INDENT + "@" + render_call("common_event", [item.id, ctx.dec(ce.get("name"))], kw)]
+        lines.append(INDENT + "def %s():" % names[item.id])
+        lines.extend(_body(body, INDENT * 2))
+        out[item.id] = lines
+        item.struct.release()  # one common event's decoded commands at a time
+    return out
 
 
 def _ce_names(db: Struct, ctx: Ctx) -> dict[int, str]:
@@ -1570,9 +1745,13 @@ def compile_common_events_source(src: str, ctx: Ctx, filename: str = "<script>")
 
 def _compile_common_events_source(src: str, ctx: Ctx, filename: str = "<script>") -> list:
     try:
-        tree = ast.parse(src, filename)
+        tree, entry = parse_by_entries(src, filename, "common_event", INDENT)
+        return _compile_common_event_statements(tree, entry, src, ctx)
     except SyntaxError as e:
         raise CompileError("syntax error: %s" % e.msg, e) from None
+
+
+def _compile_common_event_statements(tree: ast.Module, entry: Callable, src: str, ctx: Ctx) -> list:
     ctx.comments = CommentIndex(src)
     out = []
     seen = {}
@@ -1590,8 +1769,8 @@ def _compile_common_events_source(src: str, ctx: Ctx, filename: str = "<script>"
                 raise CompileError(
                     "top level may only contain `class CommonEvents(...)` and `common_events = CommonEvents()`", stmt
                 )
-        body = [st for st in classes[0].body if not isinstance(st, ast.Pass)]
-    for stmt in body:
+        body = classes[0].body
+    for stmt in (s for placeholder in body for s in entry(placeholder) if not isinstance(s, ast.Pass)):
         if _is_header_stmt(stmt):
             continue
         table_size = size_stmt(stmt)

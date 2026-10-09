@@ -2,6 +2,8 @@
 
 import os
 
+import pytest
+
 from rpgsync.lcf import LcfFile
 from rpgsync.project import Project
 from rpgsync.sync import Syncer
@@ -371,6 +373,7 @@ def test_edit_during_a_sync_is_never_overwritten(exported2003):
     unit.decompile = slow_decompile
     st = syncer.state.get(unit)
     st["bin"] = "outdated"  # the game file counts as changed in the editor
+    st.pop("entries", None)  # and all its events: the whole script is regenerated
     r = syncer.sync(unit)
     assert r.retry and "changed during the sync" in r.message
     assert "variables[1] = 4242" in open(unit.py_path, encoding="utf-8").read()
@@ -400,3 +403,28 @@ def test_watch_survives_a_game_file_being_written(exported2003):
         f.write(whole)  # the save is done
     assert [u.name for u in syncer.units()] == names
     assert not syncer.sync(common).retry
+
+
+@pytest.mark.parametrize("kind", ["map", "common"])
+def test_game_edit_regenerates_only_the_changed_entry(exported2003, kind):
+    """An entry changed in the editor is regenerated alone, spliced into the script, and
+    the script is exactly what a full regeneration would write."""
+    from rpgsync.lcf import Command, CommandList
+
+    syncer = Syncer(Project(str(exported2003)), log=lambda *_: None)
+    unit = next(u for u in syncer.units() if u.kind == kind and getattr(u, "map_id", 1) == 1)
+    f = LcfFile.load(unit.bin_path)
+    items = f.root.get("events") if kind == "map" else f.root.get("commonevents")
+    item = next(it for it in items if it.struct.get("name"))
+    holder = item.struct.get("pages")[0].struct if kind == "map" else item.struct
+    holder.set("event_commands", CommandList([Command(11410, 0, b"", [7])] + list(holder.get("event_commands"))))
+    with open(unit.bin_path, "wb") as out:
+        out.write(f.to_bytes())
+
+    whole = unit.decompile
+    calls = []
+    unit.decompile = lambda d: calls.append(d) or whole(d)
+    r = syncer.sync(unit)
+    unit.decompile = whole
+    assert r.action == "export" and not calls  # only the changed entry was regenerated
+    assert open(unit.py_path, encoding="utf-8").read() == whole(open(unit.bin_path, "rb").read())

@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from . import script as S
 from .commands import CompileError, TableSize
 from .compat import check_specs, load_rules, target_engine
-from .lcf import LcfError, LcfFile
+from .lcf import LcfError, LcfFile, write_struct
 from .project import Project
 
 Log = Callable[[str], None]
@@ -126,16 +126,74 @@ class Unit:
 
     format_problem: str | None = None  # why the last generated script could not be formatted
 
+    # Scripts made of entries, `@event(id, ...)` or `@common_event(id, ...)` blocks, are
+    # regenerated and checked one entry at a time: a big script costs what its changed
+    # entries cost (Python's syntax tree of a whole 2 MB script weighs ~170 MB).
+    decorator: str | None = None
+    entry_indent = ""
+
+    def compile_part(self, src: str, whole: str) -> list:
+        """Specs of the entries left in `src` (the others blanked out of `whole`)."""
+        return self.compile(src)
+
+    def entry_hashes(self, data: bytes) -> dict[int, str] | None:
+        """id -> hash of each entry's game data (None: not a script of entries)."""
+        return None
+
+    def layout(self, data: bytes) -> str:
+        """Hash of what the text of an entry depends on besides the entry itself (the
+        names of the other entries, the database names...): while it is the same, an
+        unchanged entry is written the same."""
+        return ""
+
+    def entry_lines(self, data: bytes, ids: set[int]) -> dict[int, list[str]]:
+        """id -> unformatted script lines of these entries."""
+        raise NotImplementedError
+
+    def decompile_since(self, data: bytes, text: str | None, st: dict | None) -> str:
+        """The script for game data that changed since the last sync (`st`, when the
+        script `text` is still as that sync left it): only the changed entries are
+        regenerated, when nothing else changed; else the whole script."""
+        if self.decorator and text is not None and st and st.get("format") == FORMAT and st.get("entries"):
+            hashes = self.entry_hashes(data)
+            if (
+                hashes is not None
+                and st.get("layout") == self.layout(data)
+                and set(map(str, hashes)) == set(st["entries"])
+            ):
+                changed = {eid for eid, h in hashes.items() if st["entries"][str(eid)] != h}
+                if not changed:
+                    return text  # e.g. tiles edited: the events are as they were
+                found = S.split_entries(text, self.decorator, self.entry_indent)
+                if found is not None and set(found[1]) == set(hashes):
+                    lines, ranges = found
+                    new = self.entry_lines(data, changed)
+                    for eid in sorted(changed, key=lambda e: ranges[e][0], reverse=True):
+                        a, end = ranges[eid]
+                        while end > a and not lines[end - 1].strip():
+                            end -= 1  # the blank lines after an entry stay
+                        lines[a:end] = new[eid]
+                    return self.formatted("\n".join(lines))
+        return self.decompile(data)
+
     def formatted(self, text: str) -> str:
         """ruff-formatted text (with the scripts folder's ruff settings), if it
         compiles to exactly the same events."""
         from .fmt import format_source
 
-        reference = [s.key() for s in self.compile(text)]
-
         def same(t: str) -> bool:
             try:
-                return [s.key() for s in self.compile(t)] == reference
+                if self.decorator:
+                    # the same text outside the entries: compare the entries ruff changed
+                    new = S.incremental_source(t, text, self.decorator, self.entry_indent)
+                    old = S.incremental_source(text, t, self.decorator, self.entry_indent)
+                    if new is not None and old is not None:
+                        return [s.key() for s in self.compile_part(new[0], t)] == [
+                            s.key() for s in self.compile_part(old[0], text)
+                        ]
+                    if S.differs_by_blank_lines_only(t, text, self.decorator, self.entry_indent):
+                        return True
+                return [s.key() for s in self.compile(t)] == [s.key() for s in self.compile(text)]
             except CompileError:
                 return False
 
@@ -160,6 +218,7 @@ class Unit:
 
 class MapUnit(Unit):
     kind = "map"
+    decorator = "event"
 
     def __init__(self, project: Project, map_id: int, path: str):
         super().__init__(project)
@@ -173,12 +232,28 @@ class MapUnit(Unit):
         return "%s%s" % (self.name, " - " + name if name else "")
 
     def decompile(self, data):
-        f = LcfFile.parse(data)
-        text = S.decompile_map(f.root, self.project.context(), self.title(), os.path.basename(self.bin_path))
+        # the parsed map is not kept while formatting (decoded, a big map weighs ~90 MB)
+        text = S.decompile_map(
+            LcfFile.parse(data).root, self.project.context(), self.title(), os.path.basename(self.bin_path)
+        )
         return self.formatted(text)
 
     def compile(self, text):
         return S.compile_map_source(text, self.project.context(), self.py_path)
+
+    def compile_part(self, src, whole):
+        return S.compile_map_source(src, self.project.context(), self.py_path, names_src=whole)
+
+    def entry_hashes(self, data):
+        return {it.id: sha(write_struct(it.struct)) for it in LcfFile.parse(data).root.get("events")}
+
+    def layout(self, data):
+        # an event refers to the others by their names; the title heads the script
+        names = [(it.id, it.struct.get("name")) for it in LcfFile.parse(data).root.get("events")]
+        return _layout_sha(self.project, FORMAT, self.title(), names)
+
+    def entry_lines(self, data, ids):
+        return S.decompile_map_events(LcfFile.parse(data).root, self.project.context(), ids)
 
     def compile_incremental(self, text, base):
         part = S.incremental_source(text, base, "event", "")
@@ -205,6 +280,8 @@ class MapUnit(Unit):
 class CommonEventsUnit(Unit):
     kind = "common"
     name = "CommonEvents"
+    decorator = "common_event"
+    entry_indent = S.INDENT
 
     def __init__(self, project: Project):
         super().__init__(project)
@@ -217,6 +294,19 @@ class CommonEventsUnit(Unit):
 
     def compile(self, text):
         return S.compile_common_events_source(text, self.project.context(), self.py_path)
+
+    def entry_hashes(self, data):
+        items = LcfFile.parse(data).root.get("commonevents")
+        return {it.id: sha(write_struct(it.struct)) for it in items if not S._unused_slot(it)}
+
+    def layout(self, data):
+        # the table size heads the script; the function names come from all the names
+        items = LcfFile.parse(data).root.get("commonevents")
+        names = [(it.id, it.struct.get("name")) for it in items if not S._unused_slot(it)]
+        return _layout_sha(self.project, FORMAT, len(items), names)
+
+    def entry_lines(self, data, ids):
+        return S.decompile_common_event_entries(LcfFile.parse(data).root, self.project.context(), ids)
 
     def compile_incremental(self, text, base):
         part = S.incremental_source(text, base, "common_event", "    ")
@@ -321,6 +411,14 @@ class DatabaseUnit(Unit):
 FORMAT = 4
 
 
+def _layout_sha(project: Project, *key) -> str:
+    """Hash of `key` and of the names a script is written with (database names in hints,
+    variables / switches / common events by name...)."""
+    ctx = project.context()
+    names = sorted((k, sorted(v.items())) for k, v in ctx.names.items())
+    return sha(repr((key, project.context_signature(), names)).encode("utf-8"))
+
+
 def _chunk_sha(data: bytes | None, field: str) -> str:
     """Hash of one chunk of the database, so that each table (and the common
     events) only sees its own changes in the shared RPG_RT.ldb."""
@@ -380,6 +478,10 @@ class State:
             "format": FORMAT,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+        hashes = unit.entry_hashes(bin_data)
+        if hashes is not None:  # to regenerate only the entries the game changes next
+            self.data[unit.name]["entries"] = {str(eid): h for eid, h in hashes.items()}
+            self.data[unit.name]["layout"] = unit.layout(bin_data)
         self.project.ensure_state_dir()
         base = os.path.join(self.base_dir, unit.name + ".py")
         os.makedirs(os.path.dirname(base), exist_ok=True)
@@ -563,7 +665,7 @@ class Syncer:
                 message="regenerated %s in the new rpgsync layout" % os.path.basename(unit.py_path),
             )
         if bin_changed and not py_changed:
-            new_text = unit.decompile(data)
+            new_text = unit.decompile_since(data, text, st)
             self.write_script(unit, new_text, raw)
             self.state.record(unit, data, new_text)
             self._failed.pop(unit.name, None)
