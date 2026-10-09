@@ -361,7 +361,17 @@ class VariableRange:
 
 class Variables:
     """All game variables: ``variables[5]``, ``variables[1:11]`` (1 to 10),
-    ``variables[variables[3]]`` (the variable whose id is stored in variable 3)."""
+    ``variables[variables[3]]`` (the variable whose id is stored in variable 3).
+
+    Pointers (arrays, tables)::
+
+        variables.ptr = variables.slot
+        variables.ptr += 2001                    # the array starts at 2001
+        variables.hp = variables[variables.ptr]  # read
+        variables[variables.ptr] += 10           # write
+
+    A branch can't test ``variables[variables.ptr]`` directly: copy it into a
+    variable first.  There is no maths inside ``[]``: move the pointer instead."""
 
     @overload
     def __getitem__(self, key: int | Variable) -> Variable: ...
@@ -388,7 +398,8 @@ class SwitchRange:
 
 class Switches:
     """All game switches: ``switches[5]``, ``switches[1:11]`` (1 to 10),
-    ``switches[variables[3]]`` (the switch whose id is in variable 3)."""
+    ``switches[variables[3]]`` (the switch whose id is in variable 3: it can
+    be set, but RPG Maker can't test it)."""
 
     @overload
     def __getitem__(self, key: int | Variable) -> Switch: ...

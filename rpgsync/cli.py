@@ -243,14 +243,21 @@ def _units(syncer: Syncer, maps: list[int] | None, no_common: bool) -> Iterator[
         yield u
 
 
-def _run(syncer: Syncer, units, prefer: str | None) -> None:
-    failed = 0
+def _run(syncer: CliSyncer, units, prefer: str | None) -> None:
+    failed = unchanged = reported = 0
     for u in units:
         start = time.perf_counter()
         r = syncer.sync(u, prefer)
         r.seconds = time.perf_counter() - start
+        if r.action in ("export", "import") and r.message.endswith(": no changes"):
+            unchanged += 1  # rewritten identically: one summary line for all of them
+            continue
         syncer.report(r)
+        reported += 1
         failed += r.action in ("error", "conflict")
+    if unchanged:
+        files = "%d %sfile%s" % (unchanged, "other " if reported else "", "s" * (unchanged > 1))
+        syncer.ui.print(("%s already up to date" % files, "dim"))
     if failed:
         raise typer.Exit(1)
 

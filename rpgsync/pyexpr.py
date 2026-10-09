@@ -157,6 +157,12 @@ def evaluate(node: ast.AST):
             if s.step is not None or s.lower is None or s.upper is None:
                 raise CompileError("ranges are written [first:last+1], e.g. variables[1:11]", node)
             index = Range(start=evaluate(s.lower), stop=evaluate(s.upper))
+        elif isinstance(s, ast.BinOp) and node.value.id in ("variables", "switches"):
+            raise CompileError(
+                "RPG Maker can't compute an id inside []: compute it in a variable first, "
+                "e.g. `variables.ptr += 1` then %s[variables.ptr]" % node.value.id,
+                node,
+            )
         else:
             index = evaluate(s)
         return Ref(coll=node.value.id, index=index, node=node)
@@ -235,6 +241,13 @@ def _err(msg, v=None, node=None):
 
 def is_ref(v, coll: str) -> bool:
     return isinstance(v, Ref) and v.coll == coll
+
+
+def _pointer_ref(v):
+    """``variables[variables.x]`` / ``switches[variables[3]]``: an access through a pointer, else None."""
+    if isinstance(v, Ref) and v.coll in ("variables", "switches") and is_ref(v.index, "variables"):
+        return v
+    return None
 
 
 def int_index(v, coll: str) -> int | None:
@@ -550,7 +563,8 @@ def condition_val(v, ctx: Ctx) -> tuple[list[int], bytes]:
                 return [1, left.index, 0, right, COMPARE.index(op)], b""
             if var_index(right) is not None:
                 return [1, left.index, 1, right.index, COMPARE.index(op)], b""
-            raise _err("compare a variable with a number or another variables[id]", v)
+            if _pointer_ref(right) is None:
+                raise _err("compare a variable with a number or another variables[id]", v)
         if isinstance(left, Attr):
             o, name = left.obj, left.name
             sym = o.name if isinstance(o, Sym) else None
@@ -587,6 +601,20 @@ def condition_val(v, ctx: Ctx) -> tuple[list[int], bytes]:
         return list(v.args), b""
     if isinstance(v, And):
         raise _err("a branch can only test one condition; nest ifs instead of using 'and'", v)
+    tested = [v.left, v.right] if isinstance(v, Cmp) else [v.value if isinstance(v, Not) else v]
+    pointer = next((p for p in map(_pointer_ref, tested) if p is not None), None)
+    if pointer is not None and pointer.coll == "variables":
+        raise _err(
+            "a branch can't test %s: RPG Maker branches only test a fixed variable. "
+            "Copy it first: `variables.tmp = %s` then test variables.tmp" % (show(pointer), show(pointer)),
+            v,
+        )
+    if pointer is not None:
+        raise _err(
+            "RPG Maker can't read %s: a switch can be set through a pointer, never read. "
+            "Keep flags you index in variables (0 / 1) instead" % show(pointer),
+            v,
+        )
     raise _err(
         "unsupported condition %s. Examples: switches[1], not switches[1], variables[1] >= 10, "
         "variables[1] == variables[2], party.gold >= 100, items[3] in party, actors[1] in party, "

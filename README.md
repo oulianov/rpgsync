@@ -171,6 +171,30 @@ if switches.night_mode:                      # switches[12]
 - **The numeric forms still work:** `events[2]`, `variables[102]`, `common_events[12]()`.
 - **Use your IDE to rename variable names:** On VSCode, right click and use "Rename Symbol"
 
+### Pointers: a variable id stored in a variable
+
+`variables[variables.ptr]` is the variable whose id is in `variables.ptr`.
+Use it for arrays and lookup tables:
+
+```python
+variables.ptr = variables.slot            # slot 0, 1, 2...
+variables.ptr += 2001                     # the array starts at variable 2001
+variables.hp = variables[variables.ptr]   # read
+variables[variables.ptr] = 100            # write
+variables[variables.ptr] -= variables.damage
+switches[variables.ptr] = True            # switches too (set only)
+```
+
+RPG Maker has limits here, and rpgsync tells you when you hit one:
+
+- **Branches test fixed variables only:** copy first,
+  `variables.tmp = variables[variables.ptr]`, then `if variables.tmp == 0:`.
+- **No maths inside `[]`:** move the pointer first (`variables.ptr += 1`).
+- **Switches can be set through a pointer, never read:** keep indexed flags
+  in variables (0 / 1).
+- **Pictures, events and the rest take fixed ids:** only variables and
+  switches can be reached through a pointer.
+
 ### DynRPG commands in scripts
 
 - DynRPG comments become function calls on `dyn`
