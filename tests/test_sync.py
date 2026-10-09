@@ -351,3 +351,52 @@ def test_move_route_switch_steps_by_name(exported2003):
     expected = "this.move(switch_on(switches.%s),switch_off(switches.%s),switch_on(switches.%s)," % ((attr,) * 3)
     text = re.sub(r"\s+|,(?=\s*\))", "", open(unit.py_path, encoding="utf-8").read())  # ruff may split the line
     assert expected in text
+
+
+def test_edit_during_a_sync_is_never_overwritten(exported2003):
+    """A script saved while rpgsync regenerates it (a slow export after an editor save)
+    keeps the edit: nothing is written and the next pass syncs both changes."""
+    syncer, unit = _setup(exported2003)
+    # the game changes (the editor saved): rpgsync starts regenerating the script
+    data = open(unit.bin_path, "rb").read()
+    syncer.sync(unit, "script")  # a game write of our own, so that the next sync sees a game change
+    os.utime(unit.bin_path)
+    decompile = unit.decompile
+
+    def slow_decompile(d):
+        out = decompile(d)
+        _edit(unit.py_path, "variables.variable_0001 = 9999999", "variables[1] = 4242")  # the user saves meanwhile
+        return out
+
+    unit.decompile = slow_decompile
+    st = syncer.state.get(unit)
+    st["bin"] = "outdated"  # the game file counts as changed in the editor
+    r = syncer.sync(unit)
+    assert r.retry and "changed during the sync" in r.message
+    assert "variables[1] = 4242" in open(unit.py_path, encoding="utf-8").read()
+    # the next pass imports the edit
+    unit.decompile = decompile
+    r = syncer.sync(unit)
+    assert r.action in ("import", "merge"), r
+    cmds = [c for pg in _events(unit.bin_path)[9].get("pages") for c in pg.struct.get("event_commands")]
+    assert any(c.code == 10220 and c.params[5] == 4242 for c in cmds)
+    assert open(unit.bin_path, "rb").read() != data
+
+
+def test_watch_survives_a_game_file_being_written(exported2003):
+    """The editor writes RPG_RT.ldb in place: rpgsync may read it half written.
+    It tries again later instead of stopping."""
+    syncer, unit = _setup(exported2003)
+    ldb = syncer.project.ldb_path
+    whole = open(ldb, "rb").read()
+    with open(ldb, "wb") as f:
+        f.write(whole[: len(whole) // 2])  # the editor is halfway through its save
+    names = [u.name for u in syncer.units()]  # the tables known before
+    common = next(u for u in syncer.units() if u.kind == "common")
+    os.utime(ldb)
+    r = syncer.sync(common, "game")
+    assert r.retry and "trying again" in r.message
+    with open(ldb, "wb") as f:
+        f.write(whole)  # the save is done
+    assert [u.name for u in syncer.units()] == names
+    assert not syncer.sync(common).retry

@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from . import script as S
 from .commands import CompileError, TableSize
 from .compat import check_specs, load_rules, target_engine
-from .lcf import LcfFile
+from .lcf import LcfError, LcfFile
 from .project import Project
 
 Log = Callable[[str], None]
@@ -57,6 +57,16 @@ def write_atomic(path: str, data: bytes) -> None:
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, path)
+
+
+class ChangedMeanwhile(Exception):
+    """A file changed while rpgsync was syncing it (an edit in the editor or in the
+    script): nothing more is written, the next pass syncs both changes."""
+
+
+def check_unchanged(path: str, expected: bytes | None) -> None:
+    if read_bytes(path) != expected:
+        raise ChangedMeanwhile(os.path.basename(path))
 
 
 class ScriptError(Exception):
@@ -402,6 +412,7 @@ class Result(BaseModel):
     action: str  # "none", "export", "import", "merge", "error", "conflict"
     message: str = ""
     seconds: float | None = None  # how long the sync took, set by the caller
+    retry: bool = False  # a file changed during the sync: sync it again
 
 
 class Syncer:
@@ -412,15 +423,24 @@ class Syncer:
         self.keep_history = keep_history
         self.history_dir = os.path.join(project.state_dir, "history")
         self._failed: dict[str, str] = {}  # unit -> py hash that failed to compile
+        self._tables: tuple[tuple | None, list[str]] = (None, [])  # RPG_RT.ldb stat -> its tables
 
     def units(self) -> list[Unit]:
         from . import database
 
         out: list[Unit] = [CommonEventsUnit(self.project)]
-        db = read_bytes(self.project.ldb_path)
-        if db is not None:
-            root = LcfFile.parse(db).root
-            out += [DatabaseUnit(self.project, t) for t in database.TABLES if database.has_table(root, t)]
+        stat = _stat(self.project.ldb_path)
+        if stat != self._tables[0]:  # parse the database only when it changes
+            db = read_bytes(self.project.ldb_path)
+            try:
+                root = LcfFile.parse(db).root if db is not None else None
+            except LcfError:
+                root = None  # being written by the editor: keep the tables known so far, read it again later
+                stat = self._tables[0]
+            if root is not None or db is None:
+                tables = [t for t in database.TABLES if root is not None and database.has_table(root, t)]
+                self._tables = (stat, tables)
+        out += [DatabaseUnit(self.project, t) for t in self._tables[1]]
         for map_id, path in self.project.map_paths().items():
             out.append(MapUnit(self.project, map_id, path))
         return out
@@ -437,7 +457,9 @@ class Syncer:
         for old in snaps[: -self.keep_history]:
             shutil.rmtree(os.path.join(self.history_dir, old), ignore_errors=True)
 
-    def write_script(self, unit: Unit, text: str) -> None:
+    def write_script(self, unit: Unit, text: str, expect: bytes | None = None) -> None:
+        """expect: the script as the sync read it; ChangedMeanwhile if it was edited since."""
+        check_unchanged(unit.py_path, expect)
         if unit.format_problem:
             self.log("%s: written unformatted: %s" % (os.path.basename(unit.py_path), unit.format_problem))
             unit.format_problem = None
@@ -447,10 +469,12 @@ class Syncer:
         self.backup(unit.py_path)
         write_atomic(unit.py_path, text.encode("utf-8"))
 
-    def write_bin(self, unit: Unit, data: bytes) -> None:
+    def write_bin(self, unit: Unit, data: bytes, expect: bytes | None) -> None:
+        """expect: the game file as the sync read it; ChangedMeanwhile if it was saved since."""
         # never write something we cannot read back identically
         if LcfFile.parse(data).to_bytes() != data:
             raise RuntimeError("internal error: generated %s does not re-read identically" % unit.bin_path)
+        check_unchanged(unit.bin_path, expect)
         self.backup(unit.bin_path)
         write_atomic(unit.bin_path, data)
         if unit.kind == "common":
@@ -489,20 +513,30 @@ class Syncer:
     # -- main entry ------------------------------------------------------------
     def sync(self, unit: Unit, prefer: str | None = None) -> Result:
         """prefer: None (automatic), "game" (export) or "script" (import)."""
+        try:
+            return self._sync(unit, prefer)
+        except ChangedMeanwhile as e:
+            # the game file or the script was saved while we worked on the old version
+            return Result(
+                unit=unit.name, action="none", message="%s changed during the sync: syncing again" % e, retry=True
+            )
+        except (LcfError, OSError) as e:
+            # a game file read while the editor writes it, a file locked by another program (Windows)...
+            return Result(unit=unit.name, action="none", message="cannot sync yet (%s): trying again" % e, retry=True)
+
+    def _sync(self, unit: Unit, prefer: str | None) -> Result:
         what = {"map": "event", "common": "common event"}.get(unit.kind, "entry")
         data = read_bytes(unit.bin_path)
         if data is None:
             return Result(unit=unit.name, action="none", message="game file missing")
-        text = None
-        if os.path.exists(unit.py_path):
-            with open(unit.py_path, encoding="utf-8") as f:
-                text = f.read()
+        raw = read_bytes(unit.py_path)  # compared before writing: an edit made meanwhile is never overwritten
+        text = None if raw is None else raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         st = self.state.get(unit)
 
         if text is None or prefer == "game":
             new_text = unit.decompile(data)
             if text != new_text:
-                self.write_script(unit, new_text)
+                self.write_script(unit, new_text, raw)
             self.state.record(unit, data, new_text)
             return Result(
                 unit=unit.name,
@@ -521,7 +555,7 @@ class Syncer:
 
         if outdated and not py_changed and not bin_changed and prefer != "script":
             new_text = unit.decompile(data)
-            self.write_script(unit, new_text)
+            self.write_script(unit, new_text, raw)
             self.state.record(unit, data, new_text)
             return Result(
                 unit=unit.name,
@@ -530,7 +564,7 @@ class Syncer:
             )
         if bin_changed and not py_changed:
             new_text = unit.decompile(data)
-            self.write_script(unit, new_text)
+            self.write_script(unit, new_text, raw)
             self.state.record(unit, data, new_text)
             self._failed.pop(unit.name, None)
             return Result(
@@ -587,16 +621,20 @@ class Syncer:
             self._failed[unit.name] = py_hash
             return Result(unit=unit.name, action="error", message="%s: %s" % (unit.py_path, e))
         if new_data != data:
-            self.write_bin(unit, new_data)
+            self.write_bin(unit, new_data, data)
         if assigned and not conflicts and unit.kind != "database":
             text = insert_ids(text, assigned, "event" if unit.kind == "map" else "common_event")
+            check_unchanged(unit.py_path, raw)
             write_atomic(unit.py_path, text.encode("utf-8"))
+            raw = text.encode("utf-8")
         if summary.get("size") and not (bin_changed and py_changed):
             # an id past the end grew the table: show the new size in the script
             new_text = re.sub(r"^(\s*)size = \d+", r"\g<1>size = %d" % summary["size"][1], text, count=1, flags=re.M)
             if new_text != text:
                 text = new_text
+                check_unchanged(unit.py_path, raw)
                 write_atomic(unit.py_path, text.encode("utf-8"))
+                raw = text.encode("utf-8")
         if bin_changed and py_changed:
             # the merged result is the new truth for both sides
             merged_text = unit.decompile(new_data)
@@ -604,7 +642,7 @@ class Syncer:
                 stamp = time.strftime("%Y%m%d-%H%M%S")
                 cpath = unit.py_path[:-3] + ".conflict-%s.py" % stamp
                 write_atomic(cpath, text.encode("utf-8"))
-            self.write_script(unit, merged_text)
+            self.write_script(unit, merged_text, raw)
             self.state.record(unit, new_data, merged_text)
             msg = "both sides changed -> merged (%s)" % self.describe(summary, what)
             if conflicts:
@@ -619,7 +657,7 @@ class Syncer:
             # show new entries with their id and the editor's defaults for omitted fields
             canonical = unit.decompile(new_data)
             if assigned or [s.key() for s in unit.compile(canonical)] != [s.key() for s in specs]:
-                self.write_script(unit, canonical)
+                self.write_script(unit, canonical, raw)
                 text = canonical
         self.state.record(unit, new_data, text)
         msg = "%s -> %s: %s" % (
@@ -668,6 +706,7 @@ class Syncer:
             self.log("Ctrl+C to stop")
         seen: dict[str, tuple] = {}
         pending: dict[str, tuple] = {}
+        retried: dict[str, str | None] = {}  # unit -> message of its last retry
         first = first_pass
         if not first_pass:
             for unit in self.units():
@@ -682,9 +721,14 @@ class Syncer:
                         start = time.perf_counter()
                         r = self.sync(unit)
                         r.seconds = time.perf_counter() - start
-                        self.report(r)
+                        if not (r.retry and retried.get(unit.name) == r.message):
+                            self.report(r)  # a retry reported once, not on every pass
+                        retried[unit.name] = r.message if r.retry else None
                         sig = (_stat(unit.bin_path), _stat(unit.py_path))
-                        seen[unit.name] = sig
+                        if r.retry:
+                            seen.pop(unit.name, None)  # sync it again once its files settle
+                        else:
+                            seen[unit.name] = sig
                         pending.pop(unit.name, None)
                     else:
                         pending[unit.name] = sig
