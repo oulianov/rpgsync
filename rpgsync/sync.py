@@ -105,6 +105,15 @@ class Unit:
         """Ids a new entry must not take."""
         return [s.id for s in self.bin_specs(data)]
 
+    def bin_specs_for(self, data: bytes, ids: set) -> list:
+        """The game's specs of these ids only."""
+        return [s for s in self.bin_specs(data) if s.id in ids]
+
+    def compile_incremental(self, text: str, base: str) -> list | None:
+        """Specs of a script edited since the last sync (`base`), compiling only the
+        entries whose source changed (KeepSpec for the others); None: compile all."""
+        return None
+
     format_problem: str | None = None  # why the last generated script could not be formatted
 
     def formatted(self, text: str) -> str:
@@ -123,13 +132,18 @@ class Unit:
         text, self.format_problem = format_source(text, same, self.py_path, self.project.script_dir)
         return text
 
-    def compile_checked(self, text: str, data: bytes | None = None) -> tuple[list, list]:
-        """Compile a script; assign ids to new entries.  -> (specs, [(spec, id)])"""
+    def compile_checked(self, text: str, data: bytes | None = None, base: str | None = None) -> tuple[list, list]:
+        """Compile a script; assign ids to new entries.  -> (specs, [(spec, id)])
+        base: the script as of the last sync, the game unchanged since: only the
+        entries edited since are compiled."""
         try:
-            specs = self.compile(text)
+            specs = self.compile_incremental(text, base) if base is not None else None
+            if specs is None:
+                specs = self.compile(text)
         except CompileError as e:
             raise ScriptError(self.py_path, e) from None
-        existing = self.existing_ids(data) if data is not None else []
+        needs_ids = any(getattr(s, "id", 0) is None for s in specs)
+        existing = self.existing_ids(data) if data is not None and needs_ids else []
         assigned = S.assign_ids(specs, existing)
         return specs, assigned
 
@@ -156,8 +170,21 @@ class MapUnit(Unit):
     def compile(self, text):
         return S.compile_map_source(text, self.project.context(), self.py_path)
 
+    def compile_incremental(self, text, base):
+        part = S.incremental_source(text, base, "event", "")
+        if part is None:
+            return None
+        src, changed, unchanged = part
+        specs = S.compile_map_source(src, self.project.context(), self.py_path, names_src=text)
+        if sorted(s.id for s in specs) != sorted(changed):
+            return None  # not the events we expected: compile everything
+        return specs + [S.KeepSpec(id=eid) for eid in unchanged]
+
     def specs_from_bin(self, data):
         return S.map_event_specs(LcfFile.parse(data).root, self.project.context())
+
+    def bin_specs_for(self, data, ids):
+        return S.map_event_specs(LcfFile.parse(data).root, self.project.context(), ids=set(ids))
 
     def apply(self, data, specs):
         f = LcfFile.parse(data)
@@ -181,9 +208,23 @@ class CommonEventsUnit(Unit):
     def compile(self, text):
         return S.compile_common_events_source(text, self.project.context(), self.py_path)
 
+    def compile_incremental(self, text, base):
+        part = S.incremental_source(text, base, "common_event", "    ")
+        if part is None:
+            return None
+        src, changed, unchanged = part
+        specs = self.compile(src)
+        if sorted(s.id for s in specs if isinstance(s, S.CommonEventSpec)) != sorted(changed):
+            return None  # not the entries we expected: compile everything
+        return specs + [S.KeepSpec(id=eid) for eid in unchanged]
+
     def specs_from_bin(self, data):
         root = LcfFile.parse(data).root
         return S.common_event_specs(root) + [TableSize(size=len(root.get("commonevents")))]
+
+    def bin_specs_for(self, data, ids):
+        items = {it.id: it for it in LcfFile.parse(data).root.get("commonevents")}
+        return [S._ce_spec(items[i]) for i in ids if i in items]
 
     def fingerprint(self, data):
         return _chunk_sha(data, "commonevents")
@@ -229,8 +270,8 @@ class DatabaseUnit(Unit):
         )[self.table]
         return self.formatted(text)
 
-    def compile_checked(self, text, data=None):
-        specs, assigned = super().compile_checked(text, data)
+    def compile_checked(self, text, data=None, base=None):
+        specs, assigned = super().compile_checked(text, data, base)
         # entries that just got an id keep the attribute name they were given
         self.new_names = {new_id: s._ident for s, new_id in assigned if getattr(s, "_ident", None)}
         return specs, assigned
@@ -325,6 +366,7 @@ class State:
         self.data[unit.name] = {
             "bin": unit.fingerprint(bin_data),
             "py": sha(py_text.encode("utf-8")),
+            "ctx": self.project.context_signature(),
             "format": FORMAT,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -432,8 +474,12 @@ class Syncer:
         already uses patch commands can still be edited."""
         if unit.kind not in ("map", "common"):
             return []  # database entries have no event commands
-        unchanged = [s.key() for s in unit.bin_specs(data)]
-        changed = [s for s in specs if s.key() not in unchanged]
+        compiled = [s for s in specs if not isinstance(s, S.KeepSpec)]
+        if len(compiled) < len(specs):  # incremental compile: compare the edited entries only
+            unchanged = [s.key() for s in unit.bin_specs_for(data, {s.id for s in compiled})]
+        else:
+            unchanged = [s.key() for s in unit.bin_specs(data)]
+        changed = [s for s in compiled if s.key() not in unchanged]
         if not changed:
             return []
         patches, allow = load_rules(self.project.script_dir)
@@ -496,8 +542,14 @@ class Syncer:
 
         if self._failed.get(unit.name) == py_hash and prefer is None:
             return Result(unit=unit.name, action="none")  # same broken script as before; already reported
+        base = None
+        if st is not None and not bin_changed and prefer is None and st.get("ctx") == self.project.context_signature():
+            # the game is as the last sync left it: compile only what was edited since
+            base = self.state.base_text(unit)
+            if base is not None and sha(base.encode("utf-8")) != st["py"]:
+                base = None
         try:
-            specs, assigned = unit.compile_checked(text, data)
+            specs, assigned = unit.compile_checked(text, data, base)
         except ScriptError as e:
             self._failed[unit.name] = py_hash
             return Result(unit=unit.name, action="error", message=str(e))

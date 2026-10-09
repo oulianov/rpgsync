@@ -844,6 +844,75 @@ class CommonEventSpec(BaseModel):
         return (self.id, self.name, self.trigger, self.switch_id, tuple(c.key() for c in self.commands))
 
 
+class KeepSpec(BaseModel):
+    """An entry of an incremental compile whose source did not change since the
+    last sync: the game's entry is left exactly as it is (not even decoded)."""
+
+    id: int
+
+    def key(self):
+        return ("keep", self.id)
+
+
+def split_entries(text: str, decorator: str, indent: str) -> tuple[list[str], dict[int, tuple[int, int]]] | None:
+    """A script's lines, and id -> [first, end) line range of each `@decorator(id, ...)`
+    entry written at `indent`.  An entry runs from its decorator through its body, up to
+    the next line indented no deeper than the decorator.  None when an entry has no
+    literal id or an id appears twice: the caller then compiles everything."""
+    lines = text.split("\n")
+    head = indent + "@" + decorator + "("
+    starts = [n for n, line in enumerate(lines) if line.startswith(head)]
+    entries: dict[int, tuple[int, int]] = {}
+    for k, start in enumerate(starts):
+        limit = starts[k + 1] if k + 1 < len(starts) else len(lines)
+        end, body = start + 1, False
+        while end < limit:
+            line = lines[end]
+            if not body and line.startswith(indent + "def "):
+                body = True  # the decorator (maybe over several lines) ends here
+            elif body and line.strip() and len(line) - len(line.lstrip()) <= len(indent):
+                break
+            end += 1
+        if not body:
+            return None
+        m = re.match(r"\s*" + re.escape("@" + decorator) + r"\(\s*(\d+)\s*[,)]", "\n".join(lines[start:end]))
+        if m is None or int(m.group(1)) in entries:
+            return None
+        entries[int(m.group(1))] = (start, end)
+    return lines, entries
+
+
+def _skeleton(lines: list[str], entries: dict[int, tuple[int, int]]) -> list[str]:
+    """The lines outside the entries, each entry replaced by a marker."""
+    out, pos = [], 0
+    for eid, (a, b) in sorted(entries.items(), key=lambda kv: kv[1][0]):
+        out += lines[pos:a] + ["\0%d" % eid]
+        pos = b
+    return out + lines[pos:]
+
+
+def incremental_source(text: str, base: str, decorator: str, indent: str) -> tuple[str, list[int], list[int]] | None:
+    """For a script edited since the last sync (`base`): the source to compile, with the
+    unchanged entries blanked out (line numbers kept), the changed ids and the unchanged
+    ids.  None when anything outside the entries changed: compile everything then."""
+    cur, old = split_entries(text, decorator, indent), split_entries(base, decorator, indent)
+    if cur is None or old is None:
+        return None
+    (lines, entries), (base_lines, base_entries) = cur, old
+    if _skeleton(lines, entries) != _skeleton(base_lines, base_entries):
+        return None
+    changed = [
+        eid for eid, (a, b) in entries.items() if lines[a:b] != base_lines[base_entries[eid][0] : base_entries[eid][1]]
+    ]
+    if not changed:
+        return None
+    part = list(lines)
+    for eid, (a, b) in entries.items():
+        if eid not in changed:
+            part[a:b] = [""] * (b - a)
+    return "\n".join(part), changed, [eid for eid in entries if eid not in changed]
+
+
 def page_props_from_struct(p: Struct) -> dict[str, Any]:
     cond = p.get("condition")
     flags = cond.get("flags")
@@ -1257,8 +1326,10 @@ def _decorator(fn: ast.FunctionDef, name: str) -> Call:
     return calls[0]
 
 
-def compile_map_source(src: str, ctx: Ctx, filename: str = "<script>") -> list[EventSpec]:
-    with P.map_events(ids=_event_function_ids(src)), P.db_names(ctx):
+def compile_map_source(src: str, ctx: Ctx, filename: str = "<script>", names_src: str | None = None) -> list[EventSpec]:
+    """names_src: the whole script, when `src` holds only some of its events (incremental
+    compile): the events refer to each other by function name."""
+    with P.map_events(ids=_event_function_ids(names_src or src)), P.db_names(ctx):
         return _compile_map_source(src, ctx, filename)
 
 
@@ -1334,10 +1405,13 @@ def _is_header_stmt(stmt) -> bool:
     )
 
 
-def map_event_specs(m: Struct, ctx: Ctx) -> list[EventSpec]:
-    """Specs straight from binary data (equal to compiling the decompiled text)."""
+def map_event_specs(m: Struct, ctx: Ctx, ids: set | None = None) -> list[EventSpec]:
+    """Specs straight from binary data (equal to compiling the decompiled text);
+    only of `ids` when given."""
     out = []
     for item in m.get("events"):
+        if ids is not None and item.id not in ids:
+            continue
         e = item.struct
         pages = [
             PageSpec(
@@ -1373,6 +1447,11 @@ def apply_events(m: Struct, specs: list[EventSpec]) -> dict[str, list[int]]:
     new_items = []
     for spec in sorted(specs, key=lambda s: s.id):
         item = current.get(spec.id)
+        if isinstance(spec, KeepSpec):
+            if item is None:
+                raise ValueError("event %d is not on the map any more" % spec.id)
+            new_items.append(item)  # unchanged since the last sync: left as it is
+            continue
         if item is None:
             st = Struct("Event")
             st.set("name", spec.name)
@@ -1587,12 +1666,17 @@ def apply_common_events(db: Struct, specs: list) -> dict[str, list[int]]:
     items = []
     for cid in range(1, size + 1):
         item = current[cid - 1] if cid <= len(current) else None
+        if isinstance(by_id.get(cid), KeepSpec):
+            if item is None:
+                raise ValueError("common event %d is not in the database any more" % cid)
+            items.append(item)  # unchanged since the last sync: left as it is
+            continue
         spec = by_id.get(cid) or CommonEventSpec(id=cid, name=b"", trigger=5, switch_id=None, commands=[])
         if item is None:
             item = ArrayItem(id=cid, struct=new_common_event_struct())
             if cid in by_id:
                 summary["added"].append(cid)
-        elif cid not in by_id and not is_empty_common_event(_ce_spec(item)):
+        elif cid not in by_id and not _unused_slot(item):
             summary["removed"].append(cid)
         ce = item.struct
         changed = False

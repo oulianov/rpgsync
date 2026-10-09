@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import glob
+import hashlib
 import json
 import os
 import re
@@ -169,6 +170,14 @@ class Project:
             self._ctx.handles = self._handles(self._ctx)
             self._handles_key = key
         return self._ctx
+
+    def context_signature(self) -> str:
+        """What a script compiles against (engine, encoding, names of variables,
+        switches and common events...): an unchanged entry compiles the same while this
+        stays the same."""
+        ctx = self.context()
+        key = (ctx.engine, ctx.encoding, ctx.choice_sep, sorted((k, sorted(v.items())) for k, v in ctx.handles.items()))
+        return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
 
     def table_script(self, table: str) -> str:
         return os.path.join(self.script_dir, "database", table + ".py")
