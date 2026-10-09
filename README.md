@@ -4,10 +4,10 @@ A python twin of your RPG Maker 2000/2003 game.
 
 **rpgsync** turns the events of your game into readable Python scripts, and keeps both sides in sync while you work.
 
-- Save a script and the game is updated
-- Save in the RPG Maker editor and the script is updated. 
-
-Edit events in your favourite editor, with autocompletion, type checking, search and git.
+- Edit events in your favourite editor, with autocompletion, type checking, search and git. 
+- Translate dialogs and database more easily
+- Implement automated tests to verify game mechanics 
+- Improve your game using the modern developer's toolkit
 
 
 ## Code example
@@ -64,8 +64,7 @@ cd rpgsync
 uv tool install --editable .
 ```
 
-This puts the `rpgsync` command on your PATH. (Without installing, you can
-run every command below from the `rpgsync` folder as `uvx --from . rpgsync ...`.)
+This puts the `rpgsync` command on your PATH.
 
 ### 3. Start auto-sync
 
@@ -104,19 +103,6 @@ rpgsync is built so that **it should not**. If anything, you can always go back.
   the editor after script changes; otherwise its next save overwrites them.
 
 Using git on the game folder and doing backups is still a good idea.
-
-## Recommended: add EasyRPG Player
-
-[EasyRPG Player](https://easyrpg.org/player/) runs RPG Maker 2000/2003 games
-on Windows, macOS, Linux and more, and is the quickest way to test your
-changes: start the game, play, quit, edit, start again.
-
-- Download: https://easyrpg.org/player/downloads/
-- Run a game: `easyrpg-player --project-path /path/to/MyGame --window`
-- Useful options: `--test-play` (debug mode, F9 menu), `--new-game`,
-  `--start-map-id N --start-position X Y` (start right where you work).
-- F12 returns to the title screen, so you can reload changed maps without
-  restarting.
 
 ## Advanced workflows
 
@@ -196,3 +182,16 @@ dyn.dynparams_overwrite_next()
 dyn.change_text("desc-indice", r"\I[\v[153]]", 0)
 ```
 
+
+## Recommended: add EasyRPG Player
+
+[EasyRPG Player](https://easyrpg.org/player/) runs RPG Maker 2000/2003 games
+on Windows, macOS, Linux and more, and is the quickest way to test your
+changes: start the game, play, quit, edit, start again.
+
+- Download: https://easyrpg.org/player/downloads/
+- Run a game: `easyrpg-player --project-path /path/to/MyGame --window`
+- Useful options: `--test-play` (debug mode, F9 menu), `--new-game`,
+  `--start-map-id N --start-position X Y` (start right where you work).
+- F12 returns to the title screen, so you can reload changed maps without
+  restarting.
