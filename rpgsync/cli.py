@@ -7,6 +7,8 @@ rpgsync pull           # game -> scripts
 rpgsync push           # scripts -> game
 rpgsync check          # compile, engine and type checks, without writing
 rpgsync clean          # delete the backups of overwritten files
+rpgsync locate --map 1 --event 2 --command 3   # FILE:LINE where a script writes it (for editors)
+rpgsync locate --troop 4 --page 1               # ... or a troop's battle event page
 
 Every command works on the game of the current folder (the folder holding
 RPG_RT.ldb, its Scripts folder, or any folder inside them), or on the game
@@ -45,6 +47,7 @@ from rich.text import Text
 from .compat import check_specs, check_warnings, load_rules, target_engine
 from .project import Project
 from .scaffold import init_scripts_project
+from .script import CompileError, compile_common_events_source, compile_map_source, compile_troop_events_source
 from .sync import Result, ScriptError, Syncer, Unit, read_bytes, sha
 
 EDITORS_HELP = (
@@ -395,7 +398,7 @@ def _run(syncer: CliSyncer, units, prefer: str | None, initial: bool = False) ->
 
 Part = tuple[str, str]  # (text, rich style)
 
-PLURAL = {"event": "events", "common event": "common events", "entry": "entries"}
+PLURAL = {"event": "events", "common event": "common events", "troop": "troops", "entry": "entries"}
 
 
 def _ids(ids: list[int], limit: int = 8) -> str:
@@ -488,20 +491,22 @@ def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
         data = data_of[u.bin_path]
         if data is None:
             continue
-        what = {"map": "event", "common": "common event"}.get(u.kind, "entry")
+        what = {"map": "event", "common": "common event", "troop": "troop"}.get(u.kind, "entry")
         py_name = os.path.relpath(u.py_path, project.script_dir)
         bin_name = os.path.relpath(u.bin_path, project.game_dir)
         if u.kind == "database":
             bin_name += " [%s]" % u.table
         elif u.kind == "common":
             bin_name += " [common events]"
+        elif u.kind == "troop":
+            bin_name += " [troop events]"
         if not os.path.exists(u.py_path):
             out["new"].append(StatusLine(name=py_name))
             continue
         with open(u.py_path, encoding="utf-8") as f:
             text = f.read()
         st = syncer.state.get(u)
-        bin_changed = st is None or u.fingerprint(data) != st["bin"]
+        bin_changed = u.bin_changed(data, st)
         py_changed = st is None or sha(text.encode("utf-8")) != st["py"]
         if not (bin_changed or py_changed):
             continue
@@ -642,6 +647,69 @@ def push(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt 
     _run(syncer, _units(syncer, map, no_common), "script")
 
 
+def locate(
+    project: ProjectArg = None,
+    map: Annotated[int | None, typer.Option("--map", help="The map of the event.")] = None,
+    event: Annotated[int | None, typer.Option("--event", help="The event, on --map.")] = None,
+    page: Annotated[int, typer.Option("--page", help="Its page, from 1.")] = 1,
+    common_event: Annotated[int | None, typer.Option("--common-event", help="A common event instead.")] = None,
+    troop: Annotated[
+        int | None, typer.Option("--troop", help="The battle events of a troop instead (with --page).")
+    ] = None,
+    command: Annotated[
+        int | None, typer.Option("--command", help="A command of the list, from 0 (as in the editor).")
+    ] = None,
+):
+    """Print FILE:LINE where a script writes an event, its page or one of its commands
+    (for editors: open the script there). Writes nothing."""
+    syncer = _open(project)
+    proj = syncer.project
+    ctx = proj.context()
+    if troop is not None:
+        path = proj.troop_events_script
+    elif common_event is not None:
+        path = proj.common_events_script
+    elif map is not None and event is not None:
+        path = proj.script_for_map(map)
+    else:
+        raise _fail("give --map and --event, --common-event, or --troop")
+    if not os.path.isfile(path):
+        raise _fail("no script %s: run rpgsync first" % path)
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    # compiled from the file as it is now: the lines of the cache can be stale
+    try:
+        if troop is not None:
+            specs = [s for s in compile_troop_events_source(src, ctx, path) if s.id == troop]
+            pages = specs[0].pages if specs else []
+            if specs and 1 <= page <= len(pages):
+                line, commands = pages[page - 1].lineno, pages[page - 1].commands
+            else:
+                line, commands = (specs[0].lineno if specs else None), []
+        elif common_event is not None:
+            specs = [s for s in compile_common_events_source(src, ctx, path) if s.id == common_event]
+            line = specs[0].lineno if specs else None
+            commands = specs[0].commands if specs else []
+        else:
+            specs = [s for s in compile_map_source(src, ctx, path) if s.id == event]
+            pages = specs[0].pages if specs else []
+            if specs and 1 <= page <= len(pages):
+                line, commands = pages[page - 1].lineno, pages[page - 1].commands
+            else:
+                line, commands = (specs[0].lineno if specs else None), []
+    except CompileError as e:
+        raise _fail("%s:%s: %s" % (path, e.lineno or 1, e)) from None
+    if line is None:
+        raise _fail("not in %s" % path)
+    if command is not None and commands:
+        # the command, else the nearest one written before it (a block's end,
+        # the end of the list)
+        index = min(max(command, 0), len(commands) - 1)
+        lines = [c.line for c in commands[: index + 1] if c.line is not None]
+        line = lines[-1] if lines else line
+    print("%s:%d" % (os.path.abspath(path), line))
+
+
 def status(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt = False):
     """Show what is pending on each side, without writing anything."""
     syncer = _open(project)
@@ -774,10 +842,10 @@ def clean(
 
 
 # registered here so that `rpgsync --help` lists them in this order
-for _command in (watch, status, check, pull, push, clean):
+for _command in (watch, status, check, pull, push, clean, locate):
     app.command()(_command)
 
-COMMANDS = {"watch", "status", "check", "pull", "push", "clean"}
+COMMANDS = {"watch", "status", "check", "pull", "push", "clean", "locate"}
 
 
 def main() -> None:

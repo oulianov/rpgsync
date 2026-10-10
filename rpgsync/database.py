@@ -16,8 +16,8 @@ so an IDE can type check them against the models.  Only non-default fields
 are written; empty slots are left out.
 
 Writing back is a patch: a chunk is only re-encoded when its value changed,
-so untouched entries, unexported fields (troop battle events, ...) and
-unknown chunks stay byte-for-byte identical.  Like RPG_RT and EasyRPG, the
+so untouched entries, fields of other files (troop battle events, written by
+database/troop_events.py) and unknown chunks stay byte-for-byte identical.  Like RPG_RT and EasyRPG, the
 tables are indexed by position (id N is element N), so they never get holes:
 an entry missing from a file is reset to an empty slot, new ids past the end
 are appended (gaps are filled with empty slots).
@@ -476,6 +476,17 @@ def table_entries_from_bin(db: Struct, name: str, ctx: Ctx) -> list[M.DbModel]:
     return out
 
 
+def _keep_opaque(new: Struct, old: Struct, sname: str) -> Struct:
+    """`new` with the unexported chunks of `old` (a troop's battle events): another
+    script owns them (database/troop_events.py), so resetting the entry keeps them."""
+    for f in STRUCTS[sname]:
+        if f.id is not None and f.model == "raw" and f.size_of is None:
+            c = old._chunk(f.id)
+            if c is not None:
+                new.set(f.id, old.get(f.id))
+    return new
+
+
 def apply_table(db: Struct, name: str, entries: list[M.DbModel], ctx: Ctx) -> dict[str, list[int]]:
     """Patch a table of the database to hold exactly `entries`.
 
@@ -515,7 +526,7 @@ def apply_table(db: Struct, name: str, entries: list[M.DbModel], ctx: Ctx) -> di
             was_empty = is_empty_entry(struct_to_model(item.struct, sname, ctx, n), sname, engine)
             if spec is None:
                 if not was_empty:
-                    item = ArrayItem(id=n, struct=new_struct(sname, engine, actors))
+                    item = ArrayItem(id=n, struct=_keep_opaque(new_struct(sname, engine, actors), item.struct, sname))
                     summary["removed"].append(n)
             elif patch_struct(item.struct, sname, spec, ctx, engine, keep_new_defaults=was_empty):
                 summary["added" if was_empty else "changed"].append(n)

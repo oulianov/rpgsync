@@ -34,7 +34,7 @@ from . import commands as K
 from . import dynparams as D
 from . import pyexpr as P
 from .commands import Call, Command, CompileError, Ctx, Raw, TableSize, render_call, size_stmt, split_size, table_length
-from .lcf import ArrayItem, CommandList, LcfFile, MoveCommand, Struct
+from .lcf import ArrayItem, CommandList, IntVector, LcfFile, MoveCommand, Struct, decode_value, write_array
 
 INDENT = "    "
 evaluate = P.evaluate
@@ -514,7 +514,9 @@ class CommentIndex:
             item[3] = True
             same_group = last is not None and line == last[0] + 1 and c == last[1]
             code = 22410 if same_group else 12410
-            out.append(Command(code=code, indent=indent, string=ctx.enc(text)))
+            comment = Command(code=code, indent=indent, string=ctx.enc(text))
+            comment.line = line
+            out.append(comment)
             last = (line, c)
         return out
 
@@ -566,11 +568,18 @@ def compile_statements(
             out.extend(ci.take(prev, stmt.lineno, col, indent, ctx))
         nxt = stmts[i + 1] if i + 1 < len(stmts) else None
         try:
-            out.extend(_compile_stmt(stmt, nxt, ctx, indent))
+            cmds = _compile_stmt(stmt, nxt, ctx, indent)
         except CompileError as e:
             if e.lineno is None:
                 e.lineno = stmt.lineno
             raise
+        # the line of each command: the innermost statement that wrote it (the
+        # inner blocks are compiled first), an int so the tree is not kept
+        line = stmt.lineno
+        for c in cmds:
+            if c.line is None:
+                c.line = line
+        out.extend(cmds)
         prev = stmt.end_lineno
     if ci is not None:
         end = ci.region_end(stmts[-1].end_lineno, col) if stmts else len(ci.lines) + 1
@@ -1354,12 +1363,15 @@ def read_function_names(text: str, decorator: str = "common_event") -> dict[int,
     return out
 
 
-def common_event_names(names: dict[int, str], keep: dict[int, str] | None = None) -> dict[int, str]:
+def common_event_names(
+    names: dict[int, str], keep: dict[int, str] | None = None, prefix: str = "ce", table: type | None = None
+) -> dict[int, str]:
     """Function names of the common events (id -> name): the ones in the
-    file (`keep`), else derived from the editor names, else ce_<id>."""
+    file (`keep`), else derived from the editor names, else ce_<id>.  Also
+    names the troops of troop_events.py (prefix "troop", their table class)."""
     from . import dsl
 
-    reserved = set(dir(dsl)) | set(dir(dsl.CommonEventTable)) | set(keyword.kwlist) | {"size", "page"}
+    reserved = set(dir(dsl)) | set(dir(table or dsl.CommonEventTable)) | set(keyword.kwlist) | {"size", "page"}
     out: dict[int, str] = {}
     used: set[str] = set()
     for n, fname in (keep or {}).items():
@@ -1371,7 +1383,7 @@ def common_event_names(names: dict[int, str], keep: dict[int, str] | None = None
             continue
         slug = "" if _GENERIC_NAME.match(name.strip()) else _slug(name)
         if not slug or slug[0].isdigit() or slug in reserved:
-            slug = "ce_%d" % n
+            slug = "%s_%d" % (prefix, n)
         while slug in used:
             slug = "%s_%d" % (slug, n)
         out[n] = slug
@@ -1892,3 +1904,482 @@ def _ce_spec(item: ArrayItem) -> CommonEventSpec:
         switch_id=ce.get("switch_id") if ce.get("switch_flag") else None,
         commands=list(ce.get("event_commands")),
     )
+
+
+# --------------------------------------------------------------------------
+# File level: troop battle events
+# --------------------------------------------------------------------------
+#
+# The battle events of the monster groups (Database > Troops > battle events),
+# in database/troop_events.py:
+#
+#     class TroopEvents(TroopEventTable):
+#         @troop(3, "Slime*2")
+#         def slime_2():
+#             @page(when=turn(1, every=2) and enemies[0].hp_percent(0, 50))
+#             def page_1():
+#                 text("The slime is weak!")
+#
+# The database keeps Troop.pages as a raw chunk (database/troops.py leaves it
+# alone): only this file decodes it, and only that chunk is written back.
+
+TROOP_HEADER = '"""Troop battle events: the battle event pages of each monster group (troops.py has the rest)"""'
+
+# condition -> (bit of the flags, TroopPageCondition fields holding its values)
+TROOP_CONDITIONS: dict[str, tuple[int, tuple[str, ...]]] = {
+    "switch_a": (0, ("switch_a_id",)),
+    "switch_b": (1, ("switch_b_id",)),
+    "variable": (2, ("variable_id", "variable_value")),
+    "turn": (3, ("turn_a", "turn_b")),
+    "fatigue": (4, ("fatigue_min", "fatigue_max")),
+    "enemy_hp": (5, ("enemy_id", "enemy_hp_min", "enemy_hp_max")),
+    "actor_hp": (6, ("actor_id", "actor_hp_min", "actor_hp_max")),
+    "turn_enemy": (7, ("turn_enemy_id", "turn_enemy_a", "turn_enemy_b")),  # RPG Maker 2003
+    "turn_actor": (8, ("turn_actor_id", "turn_actor_a", "turn_actor_b")),  # RPG Maker 2003
+    "command_actor": (9, ("command_actor_id", "command_id")),  # RPG Maker 2003
+}
+TROOP_CONDITIONS_2K3 = ("turn_enemy", "turn_actor", "command_actor")
+
+
+class TroopSpec(BaseModel):
+    """The battle event pages of one troop.  Its name and monsters belong to
+    database/troops.py: the name in @troop(...) is a label, not part of the entry."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: int | None
+    pages: SkipValidation[list[PageSpec]]  # props: {"condition": {...}}, see troop_condition_from_struct
+    lineno: int | None = None
+    label: str | None = None  # the name written in @troop(id, "name"), and where (line, start, end column)
+    label_at: tuple[int, int, int] | None = None
+
+    def key(self):
+        return (self.id, tuple(p.key() for p in self.pages))
+
+
+def _label(dec: Call) -> tuple[str | None, tuple[int, int, int] | None]:
+    """The name string of a @troop(id, "name") decorator and its place (UTF-8 columns)."""
+    node = dec.node
+    arg = node.args[1] if len(node.args) > 1 else next((k.value for k in node.keywords if k.arg == "name"), None)
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.lineno == arg.end_lineno:
+        return arg.value, (arg.lineno, arg.col_offset, arg.end_col_offset)
+    return None, None
+
+
+def fix_troop_labels(text: str, specs: list, names: dict[int, str]) -> str:
+    """The script with the names of @troop(id, "name") set to the troops' names (`names`):
+    they are labels, the troops are renamed in troops.py."""
+    lines = text.split("\n")
+    edits = [
+        (s.label_at, K.pystr(names[s.id]))
+        for s in specs
+        if isinstance(s, TroopSpec) and s.label_at is not None and s.id in names and s.label != names[s.id]
+    ]
+    for (lineno, start, end), new in sorted(edits, reverse=True):
+        raw = lines[lineno - 1].encode("utf-8")  # columns are in UTF-8 bytes
+        lines[lineno - 1] = (raw[:start] + new.encode("utf-8") + raw[end:]).decode("utf-8")
+    return "\n".join(lines)
+
+
+def troop_pages(st: Struct) -> list[ArrayItem]:
+    """A troop's battle event pages, decoded from its raw `pages` chunk ([] without one)."""
+    data = st.get("pages", None)
+    return decode_value("A:TroopPage", data) if data is not None else []
+
+
+def troop_condition_from_struct(cond: Struct) -> dict[str, tuple[int, ...]]:
+    """The conditions a page checks: key -> values (in TROOP_CONDITIONS field order).
+    Values of unchecked conditions are not listed (the editor keeps them)."""
+    flags = cond.get("flags")
+    out = {}
+    for key, (bit, fields) in TROOP_CONDITIONS.items():
+        if bit // 8 < len(flags) and flags[bit // 8] >> (bit % 8) & 1:
+            out[key] = tuple(cond.get(f) for f in fields)
+    return out
+
+
+def _unused_troop(pages: list[ArrayItem]) -> bool:
+    """No battle events: no page, or the one empty page the editor gives a new troop."""
+    if not pages:
+        return True
+    if len(pages) != 1 or pages[0].id != 1:
+        return False
+    p = pages[0].struct
+    return not list(p.get("event_commands")) and not troop_condition_from_struct(p.get("condition"))
+
+
+def _turn_src(head: str, start: int, every: int) -> str:
+    return "%s(%d)" % (head, start) if every == 0 else "%s(%d, every=%d)" % (head, start, every)
+
+
+def troop_condition_src(c: dict[str, tuple[int, ...]]) -> str | None:
+    """`when=` of a troop page: the conditions joined with `and` (None: no condition)."""
+    parts = []
+    for key in TROOP_CONDITIONS:
+        if key not in c:
+            continue
+        v = c[key]
+        if key in ("switch_a", "switch_b"):
+            parts.append(P.sw_src(v[0]))
+        elif key == "variable":
+            parts.append("%s >= %d" % (P.var_src(v[0]), v[1]))
+        elif key == "turn":
+            parts.append(_turn_src("turn", v[0], v[1]))
+        elif key == "fatigue":
+            parts.append("fatigue(%d, %d)" % v)
+        elif key == "enemy_hp":
+            parts.append("enemies[%d].hp_percent(%d, %d)" % v)
+        elif key == "actor_hp":
+            parts.append("actors[%d].hp_percent(%d, %d)" % v)
+        elif key == "turn_enemy":
+            parts.append(_turn_src("enemies[%d].turn" % v[0], v[1], v[2]))
+        elif key == "turn_actor":
+            parts.append(_turn_src("actors[%d].turn" % v[0], v[1], v[2]))
+        else:  # command_actor
+            parts.append("actors[%d].uses_command(%d)" % v)
+    return " and ".join(parts) if parts else None
+
+
+def troop_page_kwargs_src(c: dict[str, tuple[int, ...]]) -> list[tuple[str, Any]]:
+    """Keyword arguments of a troop page's @page(...): its conditions, as `when=`."""
+    second_switch_only = "switch_b" in c and "switch_a" not in c  # editor's 2nd switch slot, 1st unused
+    when = troop_condition_src({k: v for k, v in c.items() if k != "switch_b"} if second_switch_only else c)
+    kw: list[tuple[str, Any]] = []
+    if when is not None:
+        kw.append(("when", Raw(src=when)))
+    if second_switch_only:
+        kw.append(("switch_b", c["switch_b"][0]))
+    return kw
+
+
+_TROOP_WHEN = (
+    "a troop page can require: up to two switches[id], variables[id] >= value, turn(n, every=m), "
+    "fatigue(min, max), enemies[i].hp_percent(min, max), actors[id].hp_percent(min, max) and "
+    "(2003) enemies[i].turn(n, every=m), actors[id].turn(n, every=m), actors[id].uses_command(n), "
+    "joined with 'and'"
+)
+
+
+def _troop_condition_part(p) -> tuple[str, tuple[int, ...]]:
+    if P.int_index(p, "switches") is not None:
+        return "switch_a", (p.index,)
+    if isinstance(p, P.Cmp) and P.var_index(p.left) is not None and P.is_int(p.right):
+        if p.op != ">=":
+            raise CompileError("troop pages only test variables[id] >= value", p.node)
+        return "variable", (p.left.index, p.right)
+    if isinstance(p, Call):
+        enemy = P.int_index(p.target, "enemies") if p.target is not None else None
+        actor = P.int_index(p.target, "actors") if p.target is not None else None
+        if p.name == "turn" and (p.target is None or enemy is not None or actor is not None):
+            a = K.Args(p, ["start", "every"])
+            turns = (a.int("start"), a.int("every", 0))
+            if p.target is None:
+                return "turn", turns
+            return ("turn_enemy", (enemy, *turns)) if enemy is not None else ("turn_actor", (actor, *turns))
+        if p.name == "fatigue" and p.target is None:
+            a = K.Args(p, ["min", "max"])
+            return "fatigue", (a.int("min", 0), a.int("max", 100))
+        if p.name == "hp_percent" and (enemy is not None or actor is not None):
+            a = K.Args(p, ["min", "max"])
+            hp = (a.int("min", 0), a.int("max", 100))
+            return ("enemy_hp", (enemy, *hp)) if enemy is not None else ("actor_hp", (actor, *hp))
+        if p.name == "uses_command" and actor is not None:
+            return "command_actor", (actor, K.Args(p, ["command"]).int("command"))
+    raise CompileError("unsupported troop page condition %s: %s" % (P.show(p), _TROOP_WHEN), getattr(p, "node", None))
+
+
+def troop_condition_val(v, ctx: Ctx) -> dict[str, tuple[int, ...]]:
+    """The conditions of `when=` (see troop_condition_src)."""
+    out: dict[str, tuple[int, ...]] = {}
+    for p in v.values if isinstance(v, P.And) else [v]:
+        key, values = _troop_condition_part(p)
+        if key == "switch_a" and key in out:
+            key = "switch_b"
+        if key in out:
+            raise CompileError("a troop page can only have one %s condition" % key.replace("_", " "), p.node)
+        for x in values:
+            if not -0x80000000 <= x <= 0x7FFFFFFF:
+                raise CompileError("%d is out of range (32 bit)" % x, getattr(p, "node", None))
+        out[key] = values
+    return out
+
+
+def troop_page_props_from_call(call: Call, ctx: Ctx) -> tuple[dict[str, Any], int | None, bool]:
+    """-> (props, explicit page id, raw flag) of a troop page's @page(...)."""
+    allowed = ("id", "raw", "when", "switch_b")
+    if call.args:
+        raise CompileError("page() only takes keyword arguments", call.node)
+    for k in call.kwargs:
+        if k not in allowed:
+            raise CompileError(
+                "a troop page() takes when=, switch_b=, id= and raw= (got %r; sprites, triggers... are for map "
+                "events)" % k,
+                call.node,
+            )
+    a = K.Args(call, allowed)
+    cond = troop_condition_val(a.get("when"), ctx) if a.get("when") is not None else {}
+    if a.get("switch_b") is not None:
+        if "switch_b" in cond:
+            raise CompileError("page(): a page has two switch slots; when= already uses both", call.node)
+        cond["switch_b"] = (a.int("switch_b"),)
+    pid = a.get("id")
+    if pid is not None and (not P.is_int(pid) or pid < 1):
+        raise CompileError("page(): id must be a positive integer", call.node)
+    return {"condition": cond}, pid, a.bool("raw", False)
+
+
+def _troop_names(db: Struct, ctx: Ctx) -> dict[int, str]:
+    """id -> editor name of the troops that have battle events."""
+    return {
+        item.id: ctx.dec(item.struct.get("name"))
+        for item in db.get("troops")
+        if not _unused_troop(troop_pages(item.struct))
+    }
+
+
+def troop_function_names(db: Struct, ctx: Ctx, keep: dict[int, str] | None = None) -> dict[int, str]:
+    """Function names of the troops with battle events: the ones in the file (`keep`), else
+    derived from the troop names, else troop_<id>."""
+    from . import dsl
+
+    return common_event_names(_troop_names(db, ctx), keep, "troop", dsl.TroopEventTable)
+
+
+def decompile_troop_events(db: Struct, ctx: Ctx, target: str, keep: dict[int, str] | None = None) -> str:
+    """database/troop_events.py.  keep: the function names of the current file."""
+    with P.db_names(ctx):
+        entries = _decompile_troop_entries(db, ctx, None, keep)
+    out = [
+        TROOP_HEADER,
+        "",
+        HEADER_NOTE.format(target=target),
+        DSL_IMPORT,
+        "",
+        "",
+        "class TroopEvents(TroopEventTable):",
+    ]
+    for n, lines in enumerate(entries.values()):
+        if n:
+            out.append("")
+        out.extend(lines)
+    if not entries:
+        out.append(INDENT + "pass")
+    out += ["", "", "troop_events = TroopEvents()"]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def decompile_troop_entries(
+    db: Struct, ctx: Ctx, ids: set[int] | None = None, keep: dict[int, str] | None = None
+) -> dict[int, list[str]]:
+    """id -> script lines of the troops with battle events (only of `ids` when given), in order."""
+    with P.db_names(ctx):
+        return _decompile_troop_entries(db, ctx, ids, keep)
+
+
+def _decompile_troop_entries(
+    db: Struct, ctx: Ctx, ids: set[int] | None = None, keep: dict[int, str] | None = None
+) -> dict[int, list[str]]:
+    names = troop_function_names(db, ctx, keep)
+    out = {}
+    for item in db.get("troops"):
+        if ids is not None and item.id not in ids:
+            continue
+        pages = troop_pages(item.struct)
+        if _unused_troop(pages):
+            continue  # no battle events; the script only lists troops that have some
+        lines = [INDENT + "@" + render_call("troop", [item.id, ctx.dec(item.struct.get("name"))])]
+        lines.append(INDENT + "def %s():" % names[item.id])
+        pad = INDENT * 2
+        for n, pg in enumerate(pages, 1):
+            kw = troop_page_kwargs_src(troop_condition_from_struct(pg.struct.get("condition")))
+            if pg.id != n:
+                kw.insert(0, ("id", pg.id))
+            body, structured = body_lines(list(pg.struct.get("event_commands")), ctx, 3)
+            if not structured:
+                kw.append(("raw", True))
+            if n > 1:
+                lines.append("")
+            lines.append(pad + "@" + render_call("page", [], kw))
+            lines.append(pad + "def page_%d():" % n)
+            lines.extend(_body(body, pad + INDENT))
+        if not pages:
+            lines.append(pad + "pass")
+        out[item.id] = lines
+        item.struct.release()  # one troop's pages at a time
+    return out
+
+
+def compile_troop_events_source(src: str, ctx: Ctx, filename: str = "<script>") -> list[TroopSpec]:
+    with P.db_names(ctx):
+        try:
+            tree, entry = parse_by_entries(src, filename, "troop", INDENT)
+            return _compile_troop_statements(tree, entry, src, ctx)
+        except SyntaxError as e:
+            raise CompileError("syntax error: %s" % e.msg, e) from None
+
+
+def _compile_troop_statements(tree: ast.Module, entry: Callable, src: str, ctx: Ctx) -> list[TroopSpec]:
+    ctx.comments = CommentIndex(src)
+    classes = [st for st in tree.body if isinstance(st, ast.ClassDef)]
+    if len(classes) != 1:
+        raise CompileError("troop_events.py holds one class, TroopEvents", classes[1] if classes else None)
+    for stmt in tree.body:
+        if _is_header_stmt(stmt) or stmt is classes[0]:
+            continue
+        v = stmt.value if isinstance(stmt, ast.Assign) else None
+        if not (isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == classes[0].name):
+            raise CompileError(
+                "top level may only contain `class TroopEvents(...)` and `troop_events = TroopEvents()`", stmt
+            )
+    out: list[TroopSpec] = []
+    seen: dict[int, int] = {}
+    for stmt in (s for placeholder in classes[0].body for s in entry(placeholder) if not isinstance(s, ast.Pass)):
+        if _is_header_stmt(stmt):
+            continue
+        if not isinstance(stmt, ast.FunctionDef):
+            raise CompileError("TroopEvents may only contain @troop functions", stmt)
+        dec = _decorator(stmt, "troop")
+        a = K.Args(dec, ["id", "name"])
+        tid = a.get("id")
+        if not P.is_int(tid) or tid < 1:
+            raise CompileError("@troop(...) needs the troop id, a positive integer (its slot in troops.py)", stmt)
+        if tid in seen:
+            raise CompileError("troop %d is listed twice (also on line %d)" % (tid, seen[tid]), stmt)
+        seen[tid] = stmt.lineno
+        a.str("name", "")  # a label: the name is changed in troops.py
+        label, label_at = _label(dec)
+        pages = []
+        for sub in stmt.body:
+            if isinstance(sub, ast.Pass) or _is_docstring(sub):
+                continue
+            if not isinstance(sub, ast.FunctionDef):
+                raise CompileError("a @troop function may only contain @page functions", sub)
+            props, pid, raw = troop_page_props_from_call(_decorator(sub, "page"), ctx)
+            if raw:
+                cmds = compile_raw_statements(sub.body, ctx)
+            else:
+                cmds = compile_statements(sub.body, ctx, 0, sub.lineno)
+            pages.append(PageSpec(props=props, commands=cmds, id=pid, lineno=sub.lineno))
+        out.append(TroopSpec(id=tid, pages=pages, lineno=stmt.lineno, label=label, label_at=label_at))
+    return out
+
+
+def _troop_spec(tid: int, pages: list[ArrayItem]) -> TroopSpec:
+    return TroopSpec(
+        id=tid,
+        pages=[
+            PageSpec(
+                props={"condition": troop_condition_from_struct(pg.struct.get("condition"))},
+                commands=list(pg.struct.get("event_commands")),
+                id=pg.id if pg.id != n else None,
+            )
+            for n, pg in enumerate(pages, 1)
+        ],
+    )
+
+
+def troop_event_specs(db: Struct, ids: set[int] | None = None) -> list[TroopSpec]:
+    """Specs straight from the database (equal to compiling the decompiled text): of the
+    troops that have battle events, or of `ids` when given."""
+    out = []
+    for item in db.get("troops"):
+        if ids is not None and item.id not in ids:
+            continue
+        pages = troop_pages(item.struct)
+        if ids is None and _unused_troop(pages):
+            continue
+        out.append(_troop_spec(item.id, pages))
+    return out
+
+
+def new_troop_page_struct(engine: str) -> Struct:
+    """An empty battle event page laid out like the RPG Maker editor writes one."""
+    p = Struct("TroopPage")
+    cond = Struct("TroopPageCondition")
+    cond.set("flags", IntVector([0] * (2 if engine == "2k3" else 1)))
+    p.set("condition", cond)
+    p.set("event_commands", CommandList([]))
+    return p
+
+
+def apply_troop_condition(p: Struct, c: dict[str, tuple[int, ...]], engine: str) -> None:
+    """Patch a page's condition so it checks `c`, touching only what differs: the values
+    of unchecked conditions and unknown flag bits stay."""
+    cond = p.get("condition") if p.has("condition") else Struct("TroopPageCondition")
+    old = cond.get("flags")
+    flags = list(old) or [0] * (2 if engine == "2k3" else 1)
+    need = max((TROOP_CONDITIONS[k][0] // 8 + 1 for k in c), default=0)
+    flags += [0] * (need - len(flags))
+    for key, (bit, _) in TROOP_CONDITIONS.items():
+        if key in c:
+            flags[bit // 8] |= 1 << (bit % 8)
+        elif bit // 8 < len(flags):
+            flags[bit // 8] &= ~(1 << (bit % 8)) & 0xFF
+    if flags != list(old) or not cond.has("flags"):
+        cond.set("flags", IntVector(flags, getattr(old, "trailer", b"")))
+    for key, values in c.items():
+        for field_name, value in zip(TROOP_CONDITIONS[key][1], values):
+            if cond.get(field_name) != value:
+                cond.set(field_name, value)
+    p.set("condition", cond)
+
+
+def _patch_troop_page(p: Struct, ps: PageSpec, engine: str) -> None:
+    if troop_condition_from_struct(p.get("condition")) != ps.props["condition"]:
+        apply_troop_condition(p, ps.props["condition"], engine)
+    if list(p.get("event_commands")) != ps.commands:
+        p.set("event_commands", CommandList(ps.commands))
+
+
+def _set_troop_pages(st: Struct, pages: list[ArrayItem]) -> bool:
+    """Write the pages into the troop's raw chunk if that changes its bytes."""
+    data = write_array(pages)
+    old = st.get("pages", None)
+    if data == old or (old is None and not pages):
+        return False
+    st.set("pages", data)
+    return True
+
+
+def _patch_troop(st: Struct, spec: TroopSpec, engine: str) -> bool:
+    pages = troop_pages(st)
+    new_pages = []
+    for n, ps in enumerate(spec.pages, 1):
+        pid = ps.id if ps.id is not None else n
+        if n - 1 < len(pages):
+            item = pages[n - 1]
+            if item.id != pid:
+                item = ArrayItem(id=pid, struct=item.struct)
+        else:
+            item = ArrayItem(id=pid, struct=new_troop_page_struct(engine))
+        _patch_troop_page(item.struct, ps, engine)
+        new_pages.append(item)
+    return _set_troop_pages(st, new_pages)
+
+
+def apply_troop_events(db: Struct, specs: list, engine: str) -> dict[str, list[int]]:
+    """Patch the battle events of the database's troops to match specs.
+
+    Only the `pages` chunk of the troops whose pages change is written: names,
+    monsters... (database/troops.py) stay as they are.  A troop missing from the
+    script gets the one empty page of a new troop; a troop must exist in the
+    database (troops.py adds troops)."""
+    items = db.get("troops")
+    current = {it.id: it for it in items}
+    by_id: dict[int, Any] = {}
+    for s in specs:
+        if s.id not in current:
+            raise ValueError("troop %d is not in the database: add it to database/troops.py first" % s.id)
+        by_id[s.id] = s
+    summary: dict[str, list[int]] = {"added": [], "removed": [], "changed": []}
+    for item in items:
+        spec = by_id.get(item.id)
+        if isinstance(spec, KeepSpec):
+            continue  # unchanged since the last sync: left as it is
+        unused = _unused_troop(troop_pages(item.struct))
+        if spec is None:
+            if not unused and _set_troop_pages(item.struct, [ArrayItem(id=1, struct=new_troop_page_struct(engine))]):
+                summary["removed"].append(item.id)
+        elif _patch_troop(item.struct, spec, engine):
+            summary["added" if unused else "changed"].append(item.id)
+    return summary

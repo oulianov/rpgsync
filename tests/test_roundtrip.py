@@ -68,3 +68,19 @@ def test_common_events_script_roundtrip(game, tmp_path):
     summary = S.apply_common_events(db.root, S.compile_common_events_source(text, ctx))
     assert not any(summary.values()), summary
     assert db.to_bytes() == data
+
+
+def test_troop_events_script_roundtrip(game, tmp_path):
+    from rpgsync.database import db_engine
+
+    proj = Project(game, script_dir=str(tmp_path))
+    ctx = proj.context()
+    data = open(proj.ldb_path, "rb").read()
+    text = S.decompile_troop_events(LcfFile.parse(data).root, ctx, "RPG_RT.ldb")
+    assert "raw=True" not in text
+    specs = S.compile_troop_events_source(text, ctx)
+    assert [s.key() for s in specs] == [s.key() for s in S.troop_event_specs(LcfFile.parse(data).root)]
+    db = LcfFile.parse(data)
+    summary = S.apply_troop_events(db.root, specs, db_engine(db.root))
+    assert not any(summary.values()), summary
+    assert db.to_bytes() == data

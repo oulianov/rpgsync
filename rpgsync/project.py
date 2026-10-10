@@ -89,6 +89,10 @@ class Project:
     def common_events_script(self) -> str:
         return os.path.join(self.script_dir, "database", "common_events.py")
 
+    @property
+    def troop_events_script(self) -> str:
+        return os.path.join(self.script_dir, "database", "troop_events.py")
+
     # -- config ----------------------------------------------------------------
     def _load_config(self) -> dict:
         if self._pending_config is not None:  # not written yet (no sync so far)

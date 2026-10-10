@@ -57,7 +57,7 @@ CLASS_DOCS = {
     "Enemy": "A monster (Database > Enemies).",
     "EnemyAction": "One entry of a monster's action pattern.",
     "Troop": "A monster party (Database > Troops).\n\n"
-    "    The troop's battle events (pages) are not exported; they are kept unchanged.",
+    "    The troop's battle events (pages) are in database/troop_events.py.",
     "TroopMember": "A monster placed in a troop.",
     "State": "A condition such as poison or death (Database > States).",
     "Attribute": "An attribute / element (Database > Attributes).",

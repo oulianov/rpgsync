@@ -4,7 +4,8 @@ import pytest
 
 from rpgsync.commands import Ctx
 from rpgsync.lcf import Command
-from rpgsync.messages import MessageLimits, command_problems, text_width
+from rpgsync.messages import MessageLimits, command_problems, message_problems, text_width
+from rpgsync.script import PageSpec, TroopSpec
 
 ACTORS = {1: "Alex", 3: "Haru"}
 
@@ -58,3 +59,11 @@ def test_rows_and_choices():
     (p,) = command_problems(choice, ctx, MessageLimits())
     assert p.startswith("choice ")
     assert command_problems(_msg("x" * 60), ctx, MessageLimits(width=60)) == []
+
+
+def test_troop_battle_events():
+    page = PageSpec({}, _msg("x" * 51))
+    troop = TroopSpec(id=4, pages=[page], label="Slimes")
+    (p,) = message_problems([troop], Ctx(), MessageLimits())
+    assert p.startswith("troop 4 Slimes page 1: message ")
+    assert message_problems([TroopSpec(id=5, pages=[page])], Ctx(), MessageLimits())[0].startswith("troop 5  page 1:")

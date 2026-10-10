@@ -163,14 +163,30 @@ cd /path/to/MyGame/Scripts
 rpgsync check
 ```
 
-### Database and Common Events
+### Database, Common Events and Troop Battle Events
 
 The database (`RPG_RT.ldb`): heroes, classes, skills, items, enemies,
-troops, states, variables, switches, common events... is written to
-`Scripts/database/`. 
+troops, states, variables, switches, common events, troop battle events... is
+written to `Scripts/database/`. 
 
 Common events are in `database/common_events.py`, as `@common_event`
 functions of the `CommonEvents` class.
+
+The battle events of the troops (monster groups) are in
+`database/troop_events.py`, one `@troop` function per troop that has some,
+with its pages and their conditions. The troops themselves (name, monsters)
+stay in `database/troops.py`:
+
+```python
+class TroopEvents(TroopEventTable):
+    @troop(3, "Slime*2")
+    def slime_2():
+        @page(when=turn(1, every=2) and enemies[0].hp_percent(0, 50))
+        def page_1():
+            text("The slime is weak!")
+            if battle_condition(enemies[1].can_act):
+                enemies[1].change_hp(-10)
+```
 
 ### Variables, switches and events by name
 

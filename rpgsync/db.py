@@ -883,7 +883,7 @@ class TroopMember(DbModel):
 class Troop(DbModel):
     """A monster party (Database > Troops).
 
-    The troop's battle events (pages) are not exported; they are kept unchanged."""
+    The troop's battle events (pages) are in database/troop_events.py."""
 
     id: int | None = Field(
         default=None,

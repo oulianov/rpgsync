@@ -179,3 +179,78 @@ def test_legacy_console_gets_ascii_and_no_crash(accented):
 def test_ascii_markers_can_be_forced(accented):
     out = _cli("status", accented, env={"RPGSYNC_ASCII": "1"})
     assert "[ok] All files are synced" in out and not any(emoji in out for emoji in EMOJIS)
+
+
+def test_locate_points_at_the_lines_of_events_and_commands(project):
+    """`rpgsync locate`: where a script writes an event page and each of its commands."""
+    script = project / "Scripts" / "Map0001.py"
+    lines = script.read_text(encoding="utf-8").split("\n")
+    first = None
+    for i, line in enumerate(lines):
+        if line.startswith("@event("):
+            first = i
+            break
+    assert first is not None
+    event = int(re.match(r"@event\((\d+)", lines[first]).group(1))
+    out = _cli("locate", project, "--map", 1, "--event", event).strip()
+    path, line = out.rsplit(":", 1)
+    assert path == str(script.resolve())
+    assert lines[int(line) - 1].lstrip().startswith("def page_")
+    # the first command is the first statement of the page
+    body = int(line)
+    while not lines[body].strip() or lines[body].lstrip().startswith(("#", '"')):
+        body += 1
+    out = _cli("locate", project, "--map", 1, "--event", event, "--command", 0).strip()
+    assert int(out.rsplit(":", 1)[1]) <= body + 1
+    # a statement added before it moves it down by one line
+    _edit(script, lines[body], lines[body][: len(lines[body]) - len(lines[body].lstrip())] + "wait(0.1)\n" + lines[body])
+    moved = _cli("locate", project, "--map", 1, "--event", event, "--command", 1).strip()
+    assert int(moved.rsplit(":", 1)[1]) == int(out.rsplit(":", 1)[1]) + 1
+
+
+def test_locate_common_events_and_errors(project):
+    out = _cli("locate", project, "--common-event", 1).strip()
+    path, line = out.rsplit(":", 1)
+    assert path.endswith("common_events.py") and int(line) > 0
+    assert "not in" in _cli("locate", project, "--map", 1, "--event", 9999, ok=False)
+    assert "give --map and --event" in _cli("locate", project, ok=False)
+
+
+def test_locate_troop_pages_and_commands(project):
+    """`rpgsync locate --troop T --page P [--command I]`: lines of database/troop_events.py."""
+    script = project / "Scripts" / "database" / "troop_events.py"
+    lines = script.read_text(encoding="utf-8").split("\n")
+
+    def locate(*args):
+        path, line = _cli("locate", project, "--troop", 89, *args).strip().rsplit(":", 1)
+        assert path == str(script.resolve())
+        return int(line), lines[int(line) - 1].strip()
+
+    assert locate()[1] == "def page_1():"
+    assert locate("--page", 2)[1] == "def page_2():"
+    assert locate("--page", 2, "--command", 0)[1] == "switches.test_battle_on = False"
+    assert locate("--page", 2, "--command", 1)[1] == "# Test Comment. Yeah this code is not that good..."
+    assert locate("--page", 2, "--command", 2)[1] == "match show_choices("
+    assert locate("--page", 1, "--command", 3)[1].startswith("text(")  # a text over several lines: its first one
+    # computed from the file as it is now
+    _edit(script, '            text("This is a test battle.")', '            wait(0.1)\n            text("This is a test battle.")')
+    lines = script.read_text(encoding="utf-8").split("\n")
+    assert locate("--page", 1, "--command", 1)[1] == 'text("This is a test battle.")'
+    assert "not in" in _cli("locate", project, "--troop", 1, ok=False)  # no battle events
+
+
+def test_troop_events_status_push_pull(project):
+    script = project / "Scripts" / "database" / "troop_events.py"
+    _edit(script, 'text("This is a test battle.")', 'text("This is a battle test.")')
+    out = _cli("status", project)
+    line = next(ln for ln in out.splitlines() if "troop_events.py" in ln)
+    assert re.search(r"modified:\s+database/troop_events\.py\s+\+1 -1\s+troop 89 changed$", line), line
+    ldb = (project / "RPG_RT.ldb").read_bytes()
+    out = _cli("push", project)
+    assert "troop_events.py -> RPG_RT.ldb: changed troop 89" in out
+    assert (project / "RPG_RT.ldb").read_bytes() != ldb
+    assert "All files are synced" in _cli("status", project)
+    # pull --force: back to what the game holds
+    _edit(script, 'text("This is a battle test.")', 'text("Not pushed.")')
+    _cli("pull", "--force", "-y", project)
+    assert 'text("This is a battle test.")' in script.read_text(encoding="utf-8")

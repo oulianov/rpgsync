@@ -90,6 +90,9 @@ def test_new_common_event_without_id_compiles_everything(exported2003):
     r = syncer.sync(unit)
     assert r.action == "import" and "new ids: 2" in r.message  # the first free slot
     assert calls["incremental"] == 0
+    # the id is written into the script, which then matches the game
+    assert '@common_event(2, name="Brand new")' in open(unit.py_path, encoding="utf-8").read()
+    assert syncer.sync(unit).action == "none"
 
 
 def test_renamed_variable_compiles_everything(exported2003):

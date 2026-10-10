@@ -131,7 +131,8 @@ def check_warnings(specs: Sequence, engine: str, patches: Iterable[str] = (), al
     out = []
     for spec in specs:
         if hasattr(spec, "pages"):
-            lists = [("event %d page %d" % (spec.id, n), page.commands) for n, page in enumerate(spec.pages, 1)]
+            what = "troop" if _is_troop(spec) else "event"
+            lists = [("%s %d page %d" % (what, spec.id, n), page.commands) for n, page in enumerate(spec.pages, 1)]
         elif hasattr(spec, "commands"):
             lists = [("common event %d" % spec.id, spec.commands)]
         else:
@@ -152,16 +153,31 @@ def check_page_condition(condition: dict, engine: str) -> list[str]:
     return problems
 
 
+def check_troop_page_condition(condition: dict, engine: str) -> list[str]:
+    from .script import TROOP_CONDITIONS_2K3
+
+    if engine != "2k":
+        return []
+    return ["page condition: %s only exists in RPG Maker 2003" % k for k in TROOP_CONDITIONS_2K3 if k in condition]
+
+
+def _is_troop(spec) -> bool:
+    return type(spec).__name__ == "TroopSpec"
+
+
 def check_specs(specs: Sequence, engine: str, patches: Iterable[str] = (), allow: Iterable[int] = ()) -> list[str]:
-    """Problems of compiled map events (EventSpec) or common events (CommonEventSpec)."""
+    """Problems of compiled map events (EventSpec), common events (CommonEventSpec) or
+    troop battle events (TroopSpec)."""
     out = []
     for spec in specs:
         if not hasattr(spec, "pages") and not hasattr(spec, "commands"):
             continue  # database entries have no event commands
         if hasattr(spec, "pages"):
+            troop = _is_troop(spec)
             for n, page in enumerate(spec.pages, 1):
-                where = "event %d page %d" % (spec.id, n)
-                out += ["%s: %s" % (where, p) for p in check_page_condition(page.props["condition"], engine)]
+                where = "%s %d page %d" % ("troop" if troop else "event", spec.id, n)
+                check = check_troop_page_condition if troop else check_page_condition
+                out += ["%s: %s" % (where, p) for p in check(page.props["condition"], engine)]
                 out += ["%s: %s" % (where, p) for p in check_commands(page.commands, engine, patches, allow)]
         else:
             out += ["common event %d: %s" % (spec.id, p) for p in check_commands(spec.commands, engine, patches, allow)]

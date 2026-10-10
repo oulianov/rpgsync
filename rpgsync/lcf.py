@@ -95,19 +95,22 @@ class Command:
     commands (61,000 in the common events of one test game), and a pydantic
     instance weighs about 700 bytes where this one weighs about 150."""
 
-    __slots__ = ("code", "indent", "string", "params")
+    # line: where a script wrote it (1-based, None when it comes from the game
+    # files); not part of the command: neither its equality nor its key
+    __slots__ = ("code", "indent", "string", "params", "line")
 
     def __init__(self, code: int, indent: int = 0, string: bytes = b"", params: Iterable[int] = ()):
         self.code = code
         self.indent = indent
         self.string = string
         self.params = list(params)
+        self.line: int | None = None
 
     @classmethod
     def decoded(cls, code: int, indent: int, string: bytes, params: list[int]) -> Command:
         """A command straight from the file decoder: the params list is taken as is."""
         c = cls.__new__(cls)
-        c.code, c.indent, c.string, c.params = code, indent, string, params
+        c.code, c.indent, c.string, c.params, c.line = code, indent, string, params, None
         return c
 
     def key(self) -> tuple:
@@ -310,6 +313,14 @@ SCHEMA: dict[str, dict[int, tuple[str, str]]] = {
         0x15: ("event_commands_size", "int"),
         0x16: ("event_commands", "commands"),
     },
+    # A troop's battle event pages (database/troop_events.py).  The database schema
+    # keeps Troop.pages as a raw chunk: only the troop events unit decodes it, with
+    # these (TroopPageCondition comes from dbschema.py, see _register_db_schema).
+    "TroopPage": {
+        0x02: ("condition", "S:TroopPageCondition"),
+        0x0B: ("event_commands_size", "int"),
+        0x0C: ("event_commands", "commands"),
+    },
     "TreeMap": {},
     "MapInfo": {
         0x01: ("name", "str"),
@@ -358,6 +369,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
 SIZE_FIELDS = {
     ("EventPage", 0x33): 0x34,
     ("CommonEvent", 0x15): 0x16,
+    ("TroopPage", 0x0B): 0x0C,
     ("MoveRoute", 0x0B): 0x0C,
 }
 
@@ -731,10 +743,11 @@ def _register_db_schema() -> None:
     """Add the database tables' structures to SCHEMA / DEFAULTS / SIZE_FIELDS.
 
     Structures already described above (CommonEvent, ...) are left alone;
-    unexported tables (animations, terms, system, ...) stay raw."""
+    unexported tables (animations, terms, system, ...) stay raw.  The condition
+    of troop pages is added too, for the troop events (it is not a table field)."""
     from . import dbschema
 
-    for sname in dbschema.MODEL_STRUCTS:
+    for sname in [*dbschema.MODEL_STRUCTS, "TroopPageCondition"]:
         if sname in SCHEMA:
             continue
         fields: dict[int, tuple[str, str]] = {}

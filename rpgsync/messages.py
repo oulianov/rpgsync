@@ -93,16 +93,20 @@ def command_problems(cmds: Sequence[Command], ctx: Ctx, limits: MessageLimits) -
 
 
 def message_problems(specs: Sequence, ctx: Ctx, limits: MessageLimits | None = None) -> list[str]:
-    """Problems of compiled map events (EventSpec) or common events (CommonEventSpec)."""
+    """Problems of compiled map events (EventSpec), common events (CommonEventSpec)
+    or troop battle events (TroopSpec)."""
     limits = limits or MessageLimits()
     out = []
     for spec in specs:
         if not hasattr(spec, "pages") and not hasattr(spec, "commands"):
             continue  # table size, database entries
-        name = spec.name.decode(ctx.encoding, "replace") if isinstance(spec.name, bytes) else spec.name
+        # a troop's name lives in database/troops.py: its spec only has the @troop(...) label
+        troop = not hasattr(spec, "name")
+        name = spec.label or "" if troop else spec.name
+        name = name.decode(ctx.encoding, "replace") if isinstance(name, bytes) else name
         if hasattr(spec, "pages"):
             for n, page in enumerate(spec.pages, 1):
-                where = "event %d %s page %d" % (spec.id, name, n)
+                where = "%s %d %s page %d" % ("troop" if troop else "event", spec.id, name, n)
                 out += ["%s: %s" % (where, p) for p in command_problems(page.commands, ctx, limits)]
         elif hasattr(spec, "commands"):
             out += ["common event %d %s: %s" % (spec.id, name, p) for p in command_problems(spec.commands, ctx, limits)]

@@ -34,7 +34,7 @@ from pydantic import BaseModel
 from . import script as S
 from .commands import CompileError, TableSize
 from .compat import check_specs, load_rules, target_engine
-from .lcf import LcfError, LcfFile, write_struct
+from .lcf import LcfError, LcfFile, ber, write_struct
 from .project import Project
 
 Log = Callable[[str], None]
@@ -104,6 +104,10 @@ class Unit:
         """Hash of the part of the game file this unit covers."""
         return sha(data)
 
+    def bin_changed(self, data: bytes | None, st: dict | None) -> bool:
+        """Did the part of the game file this unit covers change since the last sync (`st`)?"""
+        return st is None or self.fingerprint(data) != st["bin"]
+
     def bin_specs(self, data: bytes) -> list:
         """specs_from_bin, remembered for the same game data (a sync reads them more
         than once, and decoding every command of a big database is slow)."""
@@ -131,6 +135,10 @@ class Unit:
     # entries cost (Python's syntax tree of a whole 2 MB script weighs ~170 MB).
     decorator: str | None = None
     entry_indent = ""
+
+    def after_import(self, text: str, specs: list, data: bytes) -> str:
+        """The script once its specs are written into `data` (labels to update...)."""
+        return text
 
     def compile_part(self, src: str, whole: str) -> list:
         """Specs of the entries left in `src` (the others blanked out of `whole`)."""
@@ -335,6 +343,89 @@ class CommonEventsUnit(Unit):
         return f.to_bytes(), summary
 
 
+class TroopEventsUnit(Unit):
+    """The battle events of the troops <-> Scripts/database/troop_events.py.
+
+    The troops are shared with database/troops.py (a DatabaseUnit): this unit only
+    writes the `pages` chunk of each troop, troops.py everything else, and each one
+    only sees its own part change (see _troops_sha)."""
+
+    kind = "troop"
+    name = "TroopEvents"
+    decorator = "troop"
+    entry_indent = S.INDENT
+
+    def __init__(self, project: Project):
+        super().__init__(project)
+        self.bin_path = project.ldb_path
+        self.py_path = project.troop_events_script
+
+    def _function_names(self) -> dict[int, str]:
+        """The function names of the current script: they belong to it."""
+        text = read_bytes(self.py_path)
+        return S.read_function_names(text.decode("utf-8", "replace"), "troop") if text is not None else {}
+
+    def decompile(self, data):
+        root = LcfFile.parse(data).root
+        text = S.decompile_troop_events(root, self.project.context(), "RPG_RT.ldb", self._function_names())
+        return self.formatted(text)
+
+    def compile(self, text):
+        return S.compile_troop_events_source(text, self.project.context(), self.py_path)
+
+    def entry_hashes(self, data):
+        items = LcfFile.parse(data).root.get("troops")
+        return {
+            it.id: sha(bytes(it.struct.get("name")) + b"\0" + (it.struct.get("pages", None) or b""))
+            for it in items
+            if not S._unused_troop(S.troop_pages(it.struct))
+        }
+
+    def layout(self, data):
+        # the function names come from the names of all the troops that have battle events
+        root = LcfFile.parse(data).root
+        return _layout_sha(self.project, FORMAT, "troops", sorted(S._troop_names(root, self.project.context()).items()))
+
+    def entry_lines(self, data, ids):
+        root = LcfFile.parse(data).root
+        return S.decompile_troop_entries(root, self.project.context(), ids, self._function_names())
+
+    def compile_incremental(self, text, base):
+        part = S.incremental_source(text, base, "troop", S.INDENT)
+        if part is None:
+            return None
+        src, changed, unchanged = part
+        specs = self.compile(src)
+        if sorted(s.id for s in specs) != sorted(changed):
+            return None  # not the entries we expected: compile everything
+        return specs + [S.KeepSpec(id=tid) for tid in unchanged]
+
+    def after_import(self, text, specs, data):
+        # the names in @troop(id, "name") are labels: they show the troops' names
+        ctx = self.project.context()
+        names = {it.id: ctx.dec(it.struct.get("name")) for it in LcfFile.parse(data).root.get("troops")}
+        return S.fix_troop_labels(text, specs, names)
+
+    def specs_from_bin(self, data):
+        return S.troop_event_specs(LcfFile.parse(data).root)
+
+    def bin_specs_for(self, data, ids):
+        return S.troop_event_specs(LcfFile.parse(data).root, set(ids))
+
+    def existing_ids(self, data):
+        return [it.id for it in LcfFile.parse(data).root.get("troops")]
+
+    def fingerprint(self, data):
+        return _troops_sha(data, pages=True)
+
+    def apply(self, data, specs):
+        from .database import db_engine
+
+        f = LcfFile.parse(data)
+        summary = S.apply_troop_events(f.root, specs, db_engine(f.root))
+        return f.to_bytes(), summary
+
+
 class DatabaseUnit(Unit):
     """One database table (actors, items, enemies...) <-> Scripts/database/<table>.py"""
 
@@ -391,7 +482,15 @@ class DatabaseUnit(Unit):
         return entries + [TableSize(size=len(root.get(self.table)))]
 
     def fingerprint(self, data):
+        if self.table == "troops":  # their battle events belong to troop_events.py
+            return _troops_sha(data, pages=False)
         return _chunk_sha(data, self.table)
+
+    def bin_changed(self, data, st):
+        # synced by an rpgsync older than troop_events.py: the hash of the whole troops chunk
+        if st is not None and self.table == "troops" and st["bin"] == _chunk_sha(data, "troops"):
+            return False
+        return super().bin_changed(data, st)
 
     def existing_ids(self, data):
         # new entries go after the last slot: empty slots may still be referenced
@@ -429,14 +528,37 @@ def _chunk_sha(data: bytes | None, field: str) -> str:
     return sha(chunk.raw if chunk is not None else b"")
 
 
+def _troops_sha(data: bytes | None, pages: bool) -> str:
+    """Hash of the troops' battle events (pages=True: the `pages` chunk of each troop,
+    and its name, which troop_events.py shows) or of everything else of the troops
+    (pages=False, what database/troops.py covers): the two scripts share the Troop
+    entries, and each one only sees its own part change."""
+    if data is None:
+        return "missing"
+    root = LcfFile.parse(data).root
+    cid = root._field("troops")[0]
+    if root._chunk(cid) is None:
+        return sha(b"")
+    pages_id, name_id = 0x0B, 0x01
+    h = hashlib.sha256()
+    for it in root.get("troops"):
+        h.update(ber(it.id))
+        for c in it.struct.chunks:
+            if (c.id == pages_id) == pages or (pages and c.id == name_id):
+                h.update(ber(c.id) + ber(len(c.raw)) + c.raw)
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def insert_ids(text: str, assigned, decorator: str) -> str:
-    """Write auto-assigned ids into the decorators of new events."""
+    """Write auto-assigned ids into the decorators of new events (top-level
+    functions of a map, methods of the CommonEvents class)."""
     if not assigned:
         return text
     tree = ast.parse(text)
     edits = []
     by_line = {spec.lineno: new_id for spec, new_id in assigned}
-    for stmt in tree.body:
+    for stmt in ast.walk(tree):
         if isinstance(stmt, ast.FunctionDef) and stmt.lineno in by_line:
             for d in stmt.decorator_list:
                 if isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == decorator:
@@ -543,6 +665,8 @@ class Syncer:
                 tables = [t for t in database.TABLES if root is not None and database.has_table(root, t)]
                 self._tables = (stat, tables)
         out += [DatabaseUnit(self.project, t) for t in self._tables[1]]
+        if "troops" in self._tables[1]:  # after troops.py: a troop it adds can get battle events in the same pass
+            out.append(TroopEventsUnit(self.project))
         for map_id, path in self.project.map_paths().items():
             out.append(MapUnit(self.project, map_id, path))
         return out
@@ -587,9 +711,10 @@ class Syncer:
         parts = []
         if summary.get("size"):
             parts.append("size %d -> %d" % tuple(summary["size"]))
+        notes = {"common event": " (emptied: database ids cannot have holes)", "troop": " (back to one empty page)"}
         for k in ("changed", "added", "removed"):
             if summary.get(k):
-                note = " (emptied: database ids cannot have holes)" if k == "removed" and what == "common event" else ""
+                note = notes.get(what, "") if k == "removed" else ""
                 parts.append("%s %s %s%s" % (k, what, ", ".join(map(str, summary[k])), note))
         return "; ".join(parts) or "no changes"
 
@@ -598,7 +723,7 @@ class Syncer:
 
         Entries identical to the game file are not checked, so a game that
         already uses patch commands can still be edited."""
-        if unit.kind not in ("map", "common"):
+        if unit.kind not in ("map", "common", "troop"):
             return []  # database entries have no event commands
         compiled = [s for s in specs if not isinstance(s, S.KeepSpec)]
         if len(compiled) < len(specs):  # incremental compile: compare the edited entries only
@@ -627,7 +752,7 @@ class Syncer:
             return Result(unit=unit.name, action="none", message="cannot sync yet (%s): trying again" % e, retry=True)
 
     def _sync(self, unit: Unit, prefer: str | None) -> Result:
-        what = {"map": "event", "common": "common event"}.get(unit.kind, "entry")
+        what = {"map": "event", "common": "common event", "troop": "troop"}.get(unit.kind, "entry")
         data = read_bytes(unit.bin_path)
         if data is None:
             return Result(unit=unit.name, action="none", message="game file missing")
@@ -646,13 +771,17 @@ class Syncer:
                 message="wrote %s" % os.path.relpath(unit.py_path, self.project.game_dir),
             )
 
-        bin_changed = st is None or unit.fingerprint(data) != st["bin"]
+        bin_changed = unit.bin_changed(data, st)
         py_hash = sha(text.encode("utf-8"))
         py_changed = st is None or py_hash != st["py"]
         if prefer == "script":
             bin_changed, py_changed = False, True
         outdated = st is not None and st.get("format") != FORMAT  # written by an older rpgsync
         if not bin_changed and not py_changed and not outdated:
+            fingerprint = unit.fingerprint(data)
+            if st is not None and st["bin"] != fingerprint:  # recorded by an older rpgsync, in another form
+                st["bin"] = fingerprint
+                self.state.save()
             return Result(unit=unit.name, action="none")
 
         if outdated and not py_changed and not bin_changed and prefer != "script":
@@ -725,10 +854,17 @@ class Syncer:
         if new_data != data:
             self.write_bin(unit, new_data, data)
         if assigned and not conflicts and unit.kind != "database":
-            text = insert_ids(text, assigned, "event" if unit.kind == "map" else "common_event")
+            text = insert_ids(text, assigned, unit.decorator or "event")
             check_unchanged(unit.py_path, raw)
             write_atomic(unit.py_path, text.encode("utf-8"))
             raw = text.encode("utf-8")
+        if not (bin_changed and py_changed):
+            new_text = unit.after_import(text, specs, new_data)
+            if new_text != text:
+                text = new_text
+                check_unchanged(unit.py_path, raw)
+                write_atomic(unit.py_path, text.encode("utf-8"))
+                raw = text.encode("utf-8")
         if summary.get("size") and not (bin_changed and py_changed):
             # an id past the end grew the table: show the new size in the script
             new_text = re.sub(r"^(\s*)size = \d+", r"\g<1>size = %d" % summary["size"][1], text, count=1, flags=re.M)

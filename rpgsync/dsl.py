@@ -477,7 +477,15 @@ class Actor:
         """Condition: the hero has this state (poison, sleep...)."""
 
     def uses_command(self, command: int) -> Condition:
-        """In ``battle_condition(...)``: the hero uses this battle command (2003)."""
+        """In ``battle_condition(...)`` and troop page conditions: the hero uses this
+        battle command (2003)."""
+
+    def hp_percent(self, min: int = 0, max: int = 100) -> Condition:
+        """Troop page condition: the hero's HP is between min% and max% of its max HP."""
+
+    def turn(self, start: int, every: int = 0) -> Condition:
+        """Troop page condition (2003): the hero's own turn count is ``start``, then
+        every ``every`` turns (``every=0``: that turn only)."""
 
     def set_sprite(
         self, charset: str, index: int | None = None, transparent: bool | None = None, *, extra: Extra = ()
@@ -727,6 +735,11 @@ class CommonEventFunction:
         return CommonEvent()
 
 
+class TroopEventTable:
+    """The battle events of database/troop_events.py: one @troop function per
+    monster group that has some, holding its @page functions."""
+
+
 class Percent(Value):
     """``percent(n)``: n% of the target's HP."""
 
@@ -746,6 +759,13 @@ class Enemy:
     """In ``battle_condition(...)``: the enemy can act."""
     targeted: Condition
     """In ``battle_condition(...)``: the enemy is the current target."""
+
+    def hp_percent(self, min: int = 0, max: int = 100) -> Condition:
+        """Troop page condition: the enemy's HP is between min% and max% of its max HP."""
+
+    def turn(self, start: int, every: int = 0) -> Condition:
+        """Troop page condition (2003): the enemy's own turn count is ``start``, then
+        every ``every`` turns (``every=0``: that turn only)."""
 
     def change_hp(self, amount: Number | Percent, lethal: bool | None = None, extra: Extra = ()) -> None:
         """Change the enemy's HP (negative = damage); ``percent(n)`` changes
@@ -1386,6 +1406,18 @@ def battle_condition(condition: Condition | bool) -> Condition:
     return Condition()
 
 
+def turn(start: int, every: int = 0) -> Condition:
+    """Troop page condition: the battle's turn count is ``start``, then every
+    ``every`` turns: ``turn(0)`` is the start of the battle, ``turn(1, every=2)``
+    turns 1, 3, 5...  (``every=0``: that turn only)."""
+    return Condition()
+
+
+def fatigue(min: int = 0, max: int = 100) -> Condition:
+    """Troop page condition: the party's fatigue (exhaustion) is between min% and max%."""
+    return Condition()
+
+
 # ==========================================================================
 # Structure
 # ==========================================================================
@@ -1463,6 +1495,14 @@ def page(
             slot; both behave the same).
         switch_a, variable, item, actor, timer, timer2: the conditions in
             explicit form (used instead of ``when`` for rare combinations).
+
+    A battle event page of a troop (database/troop_events.py) only takes
+    ``when``, ``switch_b``, ``id`` and ``raw``; its ``when`` joins with ``and``:
+    up to two ``switches[id]``, ``variables[id] >= n``, ``turn(n, every=m)``,
+    ``fatigue(min, max)``, ``enemies[i].hp_percent(min, max)``,
+    ``actors[id].hp_percent(min, max)`` and, in 2003,
+    ``enemies[i].turn(n, every=m)``, ``actors[id].turn(n, every=m)``,
+    ``actors[id].uses_command(n)``.  The page runs when they all hold.
     """
     return lambda fn: fn
 
@@ -1480,6 +1520,17 @@ def common_event(
         trigger: call (run with common_events[id]()), autorun or parallel.
         switch: condition switch of an autorun/parallel common event.
         raw: the body is raw cmd(...) lines (set by rpgsync).
+    """
+    return lambda fn: fn
+
+
+def troop(id: int, name: str = "") -> Callable[[Callable[[], None]], Callable[[], None]]:
+    """The battle events of a troop (monster group), in database/troop_events.py:
+    its @page functions, in order.
+
+    Args:
+        id: the troop's id (its slot in database/troops.py, where troops are added).
+        name: the troop's name, as a label: rename the troop in database/troops.py.
     """
     return lambda fn: fn
 
