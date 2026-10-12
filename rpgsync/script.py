@@ -600,12 +600,39 @@ def _is_elif(stmt: ast.If, ctx: Ctx) -> bool:
     return ctx.comments.lines[stmt.orelse[0].lineno - 1].lstrip().startswith("elif")
 
 
+def _nest_and(stmt: ast.If) -> ast.If:
+    """`if a and b: body` as `if a: if b: body` (an RPG Maker branch tests one
+    condition).  An else part would be needed once per condition: not supported."""
+    if stmt.orelse:
+        raise CompileError(
+            "an 'and' condition can't have an else or elif (RPG Maker would need it once per condition); "
+            "nest the ifs instead",
+            stmt,
+        )
+    values: list[ast.expr] = []
+    todo = list(stmt.test.values)
+    while todo:
+        v = todo.pop(0)
+        if isinstance(v, ast.BoolOp) and isinstance(v.op, ast.And):
+            todo[:0] = v.values
+        else:
+            values.append(v)
+    nested: ast.If = stmt
+    for v in reversed(values):
+        nested = ast.copy_location(ast.If(test=v, body=[nested] if nested is not stmt else stmt.body, orelse=[]), stmt)
+        nested.end_lineno, nested.end_col_offset = stmt.end_lineno, stmt.end_col_offset
+    return nested
+
+
 def _compile_stmt(stmt: ast.stmt, nxt: ast.stmt | None, ctx: Ctx, indent: int) -> list[Command]:
     def C(code, params=(), string=b""):
         return Command(code=code, indent=indent, params=list(params), string=string)
 
     if isinstance(stmt, ast.Pass) or _is_docstring(stmt):
         return []
+
+    if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.BoolOp) and isinstance(stmt.test.op, ast.And):
+        return _compile_stmt(_nest_and(stmt), nxt, ctx, indent)
 
     if isinstance(stmt, ast.If):
         test = evaluate(stmt.test)
