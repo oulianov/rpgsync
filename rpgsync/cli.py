@@ -781,7 +781,7 @@ def check(
             err.print((u.py_path, "cyan"), ": ", (problem, "yellow"), kind="warning")
             warnings += 1
     if not no_types:
-        errors += _check_types(syncer.project.script_dir, ui, err)
+        errors += _check_types(syncer.project.script_dir, ui, err, syncer.project.context().dynparams)
     warned = ("%d warning(s)" % warnings, "bold yellow") if warnings else None
     if errors:
         ui.print(("%d problem(s)" % errors, "bold red"), *([", ", warned] if warned else []), kind="error")
@@ -799,8 +799,10 @@ def _ty(script_dir: str) -> str | None:
     return shutil.which("ty")
 
 
-def _check_types(script_dir: str, ui: UI, err: UI) -> int:
-    """Run ty on the scripts folder; print its diagnostics.  -> number of problems"""
+def _check_types(script_dir: str, ui: UI, err: UI, dynparams: bool = False) -> int:
+    """Run ty on the scripts folder; print its diagnostics.  -> number of problems
+    With DynParams a variable may stand where the DSL takes a number: the
+    compiler checked those, ty's complaints about them are left out."""
     ty = _ty(script_dir)
     if ty is None:
         ui.print("type check skipped: ty is not installed (run `uv sync` in %s)" % script_dir, kind="info")
@@ -811,7 +813,13 @@ def _check_types(script_dir: str, ui: UI, err: UI) -> int:
         cmd += ["--python", venv]
     result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True, errors="replace", check=False)
     lines = [ln for ln in result.stdout.splitlines() if ln.strip() and not ln.startswith(("Found ", "All checks"))]
-    if result.returncode == 0:
+    if dynparams:
+        lines = [
+            ln
+            for ln in lines
+            if not ("invalid-argument-type" in ln and ("type `Variable`" in ln or "found `Variable`" in ln))
+        ]
+    if result.returncode == 0 or not lines:
         return 0
     for line in lines:
         err.print((line, "red"), kind="error")

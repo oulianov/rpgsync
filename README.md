@@ -238,6 +238,39 @@ EasyRPG Player reads the same `[Patch]` section of the game's `EasyRPG.ini`
 (e.g. `Maniac=1`, `DynRPG=1`, `PowerMode2003=1`) when it doesn't detect a patch
 by itself. See [Patches.md](Patches.md) for how each patch is handled.
 
+#### DynParams: a variable anywhere
+
+With the [DynParams](https://rewking.com/dynrpg/) plugin
+(`DynPlugins/DynParams.dll`), write a variable wherever RPG Maker only takes a
+fixed number, and a text built from variables wherever it takes a fixed text:
+
+```python
+if switches[variables.clue]:                       # the switch whose number is in a variable
+    common_events[variables.next_scene]()
+events[variables.npc].move(face_up, frequency=8)
+pictures[variables.slot].show(f"face{variables.mood}", x=160, y=120)
+variables.hp = actors[variables.hero].hp
+```
+
+rpgsync writes the `@dynparams_add_param` / `@dynparams_append_string` /
+`@dynparams_overwrite_next` comments before the command for you, and only for
+the values RPG Maker can't read from a variable itself (`x=variables.x` stays a
+plain RPG Maker option). Pulling a game turns existing DynParams comments into
+this form when it writes back the exact same commands.
+
+The command itself still holds a fixed value, the **placeholder**: what runs
+without the plugin, and what the RPG Maker editor shows. It is 1 (or `""` for a
+text) unless a comment says otherwise:
+
+```python
+if switches[variables.clue]:  # placeholder: switches.relm
+events[variables.npc].move(face_up)  # placeholder: this
+pictures[variables.slot].erase()  # placeholder: pictures[42]
+```
+
+Some values can't go through DynParams: those RPG Maker doesn't store as the
+number itself, like `wait()` (stored in tenths of a second).
+
 ## Recommended: add EasyRPG Player
 
 [EasyRPG Player](https://easyrpg.org/player/) runs RPG Maker 2000/2003 games

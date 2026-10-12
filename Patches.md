@@ -60,6 +60,30 @@ with `@`.
   dyn.write_text("id", 10, 20, 'He said "hi"')      # @write_text "id", 10, 20, "He said ""hi"""
   ```
 
+- **DynParams as plain Python:** with `DynPlugins/DynParams.dll`, a variable
+  where RPG Maker takes a number compiles to the DynParams comments, and the
+  decompiler folds them back (see the README):
+
+  ```python
+  if switches[variables.clue_switch]:  # placeholder: switches.relm
+  ```
+
+  - **Compiling:** a statement that does not compile is tried again with the
+    fewest of its variables (and f-strings of variables) put through DynParams.
+    The parameter a variable lands in is found by compiling the command with
+    1, then 2, in its place. It must be stored as the number itself.
+  - **Placeholder:** the command holds 1 (`""` for a text), or the values of a
+    `# placeholder: a, b` comment on the statement, one per dynamic value in
+    source order. A value replaces the whole `pictures[...]`, or the variable alone.
+  - **Folding:** a run of `@dynparams_add_param N, V..` (or `VV..`),
+    `@dynparams_append_string` and `@dynparams_append_number` comments, then
+    `@dynparams_overwrite_next` right before its command, is written in this
+    form when it compiles back to the same commands. Everything else (a stat
+    chosen by a variable, parameters built across other commands, other spellings)
+    stays as `dyn.*` lines with hints.
+  - **Type check:** `rpgsync check` leaves out ty's complaints about a `Variable`
+    where the DSL takes an `int`; the compiler has checked them.
+
 - **DynParams hints:** each `dyn.dynparams_add_param(...)` gets a hint naming
   the parameter it overwrites, and `dyn.dynparams_overwrite_next()` the command
   it rewrites:

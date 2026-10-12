@@ -33,6 +33,13 @@ CODEPAGES = {
 CONFIG_DIR = ".rpgsync"
 
 
+def _listdir(path: str) -> list[str]:
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
 def _stat(path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(path)
@@ -166,6 +173,7 @@ class Project:
             for key in ("switches", "variables", "items", "actors", "commonevents"):
                 ctx.names[key] = {it.id: ctx.dec(it.struct.get("name")) for it in db.get(key) if it.struct.get("name")}
             ctx.choice_sep = self.choice_separator()
+            ctx.dynparams = self.has_dynparams()
             self._ctx = ctx
             self._handles_key = None
         # names of variables / switches: the attributes of their database files
@@ -175,12 +183,21 @@ class Project:
             self._handles_key = key
         return self._ctx
 
+    def has_dynparams(self) -> bool:
+        """Does the game run the DynParams plugin (DynPlugins/DynParams.dll)?"""
+        plugins = next((e for e in _listdir(self.game_dir) if e.lower() == "dynplugins"), None)
+        if plugins is None:
+            return False
+        return any(e.lower() == "dynparams.dll" for e in _listdir(os.path.join(self.game_dir, plugins)))
+
     def context_signature(self) -> str:
         """What a script compiles against (engine, encoding, names of variables,
         switches and common events...): an unchanged entry compiles the same while this
         stays the same."""
         ctx = self.context()
         key = (ctx.engine, ctx.encoding, ctx.choice_sep, sorted((k, sorted(v.items())) for k, v in ctx.handles.items()))
+        if ctx.dynparams:  # (left out otherwise: the signatures of existing states stay valid)
+            key += ("dynparams",)
         return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
 
     def table_script(self, table: str) -> str:

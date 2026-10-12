@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import ast
 import bisect
+import copy
 import functools
 import io
+import itertools
 import keyword
 import re
 import tokenize
@@ -203,7 +205,6 @@ def _is_closer(n: Node, code: int) -> bool:
 
 def _emit(nodes: list[Node], ctx: Ctx, level: int, in_loop: bool) -> list[str]:
     out: list[str] = []
-    pad = INDENT * level
     i = 0
     prev_generic_block: int | None = None
     while i < len(nodes):
@@ -223,24 +224,183 @@ def _emit(nodes: list[Node], ctx: Ctx, level: int, in_loop: bool) -> list[str]:
             continue
         prev_generic_block = None
 
-        for construct in (_emit_text, _emit_if, _emit_while, _emit_match, _emit_handlers):
-            r = construct(nodes, i, ctx, level, in_loop)
-            if r is not None:
-                lines, consumed = r
-                if out and lines and out[-1].lstrip().startswith("#") and lines[0].lstrip().startswith("#"):
-                    out.append("")  # separates two comment commands
-                out.extend(lines)
-                i += consumed
-                break
-        else:
-            if n.body is None:
-                out.append(pad + stmt_src(c, ctx, in_loop) + _hint(c, ctx))
-            else:
-                out.append(pad + "with " + K.generic_src(c, ctx) + ":" + _hint(c, ctx))
-                out.extend(_body(_emit(n.body, ctx, level + 1, in_loop), pad + INDENT))
-                prev_generic_block = c.code
-            i += 1
+        r = _emit_dynparams(nodes, i, ctx, level, in_loop) if ctx.dynparams else None
+        if r is not None:
+            lines, consumed = r
+            out.extend(lines)
+            i += consumed
+            continue
+        lines, consumed, prev_generic_block = _emit_one(nodes, i, ctx, level, in_loop)
+        if out and lines and out[-1].lstrip().startswith("#") and lines[0].lstrip().startswith("#"):
+            out.append("")  # separates two comment commands
+        out.extend(lines)
+        i += consumed
     return out
+
+
+def _emit_one(nodes, i, ctx, level, in_loop) -> tuple[list[str], int, int | None]:
+    """The lines of the construct starting at nodes[i], the nodes it takes, and the
+    code of a generic `with cmd(...)` block (its closer is implied)."""
+    for construct in (_emit_text, _emit_if, _emit_while, _emit_match, _emit_handlers):
+        r = construct(nodes, i, ctx, level, in_loop)
+        if r is not None:
+            return r[0], r[1], None
+    n = nodes[i]
+    c = n.cmd
+    pad = INDENT * level
+    if n.body is None:
+        return [pad + stmt_src(c, ctx, in_loop) + _hint(c, ctx)], 1, None
+    lines = [pad + "with " + K.generic_src(c, ctx) + ":" + _hint(c, ctx)]
+    lines.extend(_body(_emit(n.body, ctx, level + 1, in_loop), pad + INDENT))
+    return lines, 1, c.code
+
+
+_DYN_ADD = re.compile(r"^@dynparams_add_param (\d+), (VV?)(\d+)$")
+_DYN_NUM = re.compile(r"^@dynparams_append_number (VV?)(\d+)$")
+_DYN_STR = "@dynparams_append_string "
+_DYN_SENTINEL = 918273  # a number no command holds, to find where a parameter is written
+
+
+def _token_src(prefix: str, n: int) -> str:
+    return P.var_src(n) if prefix == "V" else "variables[%s]" % P.var_src(n)
+
+
+def _first_line_comment(text: str) -> tuple[int, int] | None:
+    """(start, end) offsets of the trailing comment of the first line of text."""
+    first = text.split("\n", 1)[0]
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(first).readline):
+            if tok.type == tokenize.COMMENT:
+                return tok.start[1], len(first)
+    except (tokenize.TokenError, SyntaxError):
+        pass
+    return None
+
+
+def _diverging(a: ast.AST, b: ast.AST, parent_a=None, parent_b=None, out=None) -> list:
+    """The (node, parent) pairs of two trees where they first differ."""
+    out = [] if out is None else out
+    if type(a) is not type(b):
+        out.append((a, b, parent_a, parent_b))
+        return out
+    for name, va in ast.iter_fields(a):
+        vb = getattr(b, name, None)
+        if isinstance(va, ast.AST):
+            _diverging(va, vb, a, b, out)
+        elif isinstance(va, list):
+            if len(va) != len(vb):
+                out.append((a, b, parent_a, parent_b))
+                return out
+            for x, y in zip(va, vb):
+                if isinstance(x, ast.AST):
+                    _diverging(x, y, a, b, out)
+                elif x != y:
+                    out.append((a, b, parent_a, parent_b))
+                    return out
+        elif name not in ("ctx", "kind") and va != vb:
+            out.append((a, b, parent_a, parent_b))
+            return out
+    return out
+
+
+def _emit_dynparams(nodes, i, ctx, level, in_loop):
+    """`if switches[variables.x]:` for DynParams comments and the command they rewrite,
+    with a `# placeholder: ...` when that command does not hold the default ones."""
+    params: list[tuple[int, str]] = []  # (1-based parameter, variable source)
+    parts: list[str] = []  # the f-string, in pieces
+    j = i
+    while True:
+        if j >= len(nodes):
+            return None
+        n = nodes[j]
+        if n.body is not None or n.cmd.code != 12410 or n.cmd.params:
+            return None
+        if j + 1 < len(nodes) and nodes[j + 1].cmd.code == 22410:
+            return None  # a comment of several lines
+        s = ctx.dec(n.cmd.string)
+        if s == "@dynparams_overwrite_next":
+            break
+        if m := _DYN_ADD.match(s):
+            params.append((int(m.group(1)), _token_src(m.group(2), int(m.group(3)))))
+        elif m := _DYN_NUM.match(s):
+            parts.append("{%s}" % _token_src(m.group(1), int(m.group(2))))
+        elif s.startswith(_DYN_STR) and len(s) > len(_DYN_STR):
+            lit = s[len(_DYN_STR) :]
+            if not lit.isprintable() or "\\" in lit:
+                return None
+            parts.append(lit.replace("{", "{{").replace("}", "}}").replace('"', '\\"'))
+        else:
+            return None
+        j += 1
+    t = j + 1
+    if (not params and not parts) or t >= len(nodes) or j == i:
+        return None
+    target = nodes[t].cmd
+    if target.code in K.TEXT_CODES or target.code in D.SKIPPED or target.code == 22410:
+        return None
+    if len({p for p, _ in params}) != len(params) or any(not 1 <= p <= len(target.params) for p, _ in params):
+        return None
+    if any(str(_DYN_SENTINEL + k) in str(target.params) for k in range(len(params))):
+        return None
+
+    # the command with numbers no command holds in the rewritten parameters
+    marked = Command(code=target.code, indent=target.indent, params=list(target.params), string=target.string)
+    for k, (p, _) in enumerate(params):
+        marked.params[p - 1] = _DYN_SENTINEL + k
+    if parts:
+        marked.string = ctx.enc(_DYN_TEXT)
+    mnodes = list(nodes)
+    mnodes[t] = Node(cmd=marked, body=nodes[t].body)
+    token = _TRUSTED.set(True)  # checked below, as a whole
+    try:
+        mlines, consumed, generic = _emit_one(mnodes, t, ctx, level, in_loop)
+        olines, oconsumed, _ = _emit_one(nodes, t, ctx, level, in_loop)
+    finally:
+        _TRUSTED.reset(token)
+    if generic is not None or consumed != oconsumed:
+        return None
+    marked_text = "\n".join(mlines)
+    cut = _first_line_comment(marked_text)  # a hint about the marked numbers
+    if cut is not None:
+        marked_text = marked_text[: cut[0]].rstrip() + marked_text[cut[1] :]
+
+    # where each dynamic value sits, in source order, and what the command really holds there
+    pad = INDENT * level
+    try:
+        mtree = ast.parse("\n".join(l[len(pad) :] if l.startswith(pad) else l for l in marked_text.split("\n")))
+        otext = "\n".join(l[len(pad) :] if l.startswith(pad) else l for l in olines)
+        otree = ast.parse(otext)
+    except SyntaxError:
+        return None
+    fstring = 'f"%s"' % "".join(parts) if parts else None
+    sources = {_DYN_SENTINEL + k: src for k, (_, src) in enumerate(params)}
+    if fstring is not None:
+        sources[_DYN_TEXT] = fstring
+    found = []  # (position, marked constant, replacement source, placeholder source)
+    for a, b, pa, pb in _diverging(mtree, otree):
+        marks = [x for x in ast.walk(a) if isinstance(x, ast.Constant) and x.value in sources]
+        if len(marks) != 1:
+            return None
+        mark = marks[0]
+        if mark is a and isinstance(pa, ast.Subscript) and pa.slice is a:
+            b = pb  # pictures[42] for pictures[variables.n]
+        held = ast.get_source_segment(otext, b) or ast.unparse(b)
+        found.append(((mark.lineno, mark.col_offset), mark, sources[mark.value], held))
+    if len(found) != len(params) + (1 if parts else 0):
+        return None
+    # the folded text: each marked value replaced by its variable (or f-string)
+    lines = marked_text.split("\n")
+    for (line, col), a, src, _ in sorted(found, key=lambda f: f[0], reverse=True):
+        k = line - 1
+        start = col + (len(pad) if lines[k].startswith(pad) else 0)
+        end = start + (a.end_col_offset - a.col_offset)
+        lines[k] = lines[k][:start] + src + lines[k][end:]
+    default = all(target.params[p - 1] == 1 for p, _ in params) and (not parts or target.string == b"")
+    if not default:
+        lines[0] += "  # placeholder: " + ", ".join(h for _, _, _, h in sorted(found, key=lambda f: f[0]))
+    if not _compiles_to(lines, flatten(nodes[i : t + consumed]), ctx):
+        return None
+    return lines, t + consumed - i
 
 
 def _emit_text(nodes, i, ctx, level, in_loop):
@@ -568,7 +728,12 @@ def compile_statements(
             out.extend(ci.take(prev, stmt.lineno, col, indent, ctx))
         nxt = stmts[i + 1] if i + 1 < len(stmts) else None
         try:
-            cmds = _compile_stmt(stmt, nxt, ctx, indent)
+            try:
+                cmds = _compile_stmt(stmt, nxt, ctx, indent)
+            except CompileError as e:
+                if not ctx.dynparams:
+                    raise
+                cmds = _compile_dynparams(stmt, nxt, ctx, indent, e)
         except CompileError as e:
             if e.lineno is None:
                 e.lineno = stmt.lineno
@@ -699,6 +864,277 @@ def _compile_stmt(stmt: ast.stmt, nxt: ast.stmt | None, ctx: Ctx, indent: int) -
         cmd.indent = indent if explicit is None else explicit
         return [cmd]
     raise CompileError("unsupported statement: %s" % ast.unparse(stmt).split("\n")[0], stmt)
+
+
+# --------------------------------------------------------------------------
+# DynParams: a variable where RPG Maker only takes a number
+# --------------------------------------------------------------------------
+#
+#   if switches[variables.which]:      @dynparams_add_param 2, V12
+#                                      @dynparams_overwrite_next
+#                                      Conditional Branch: Switch [0001] ON
+#
+# A statement that does not compile is tried again with the fewest of its
+# variables replaced by numbers: the parameter a variable lands in is found by
+# compiling with 1, then 2, in its place.  The command keeps a placeholder, 1
+# (or "" for a text) unless a trailing `# placeholder: switches.relm` gives it.
+
+_DYN_TEXT = "DYNPARAMS"
+_PLACEHOLDER = re.compile(r"^\s*placeholder\s*:(.*)$")
+_DYN_MAX_PARTS = 6
+
+
+def _dyn_token(node: ast.AST) -> str | None:
+    """V12 for variables.x or variables[12], VV12 for variables[variables.x]; else None."""
+    base = node.value if isinstance(node, (ast.Attribute, ast.Subscript)) else None
+    if not (isinstance(base, ast.Name) and base.id == "variables"):
+        return None
+    try:
+        return P._dyn_token(evaluate(node))
+    except CompileError:
+        return None
+
+
+def _dyn_parts(expr: ast.expr) -> list[ast.expr]:
+    """The variables of an expression and its f-strings of variables, in source order."""
+    out: list[ast.expr] = []
+
+    def visit(n: ast.AST) -> None:
+        if isinstance(n, ast.JoinedStr):
+            if all(
+                isinstance(v, ast.Constant)
+                or (
+                    isinstance(v, ast.FormattedValue)
+                    and v.conversion == -1
+                    and v.format_spec is None
+                    and _dyn_token(v.value) is not None
+                )
+                for v in n.values
+            ):
+                out.append(n)
+            return
+        if _dyn_token(n) is not None:
+            out.append(n)
+            if isinstance(n, ast.Subscript) and _dyn_token(n.slice) is not None:
+                out.append(n.slice)  # variables[variables.x]: its value, or which variable
+            return
+        for c in ast.iter_child_nodes(n):
+            visit(c)
+
+    visit(expr)
+    return out
+
+
+def _dyn_field(stmt: ast.stmt) -> str | None:
+    """The part of a statement DynParams can rewrite: the condition of an if, the
+    command of an expression, the value of an assignment."""
+    if isinstance(stmt, ast.If):
+        return "test"
+    if isinstance(stmt, (ast.Expr, ast.Assign, ast.AugAssign)):
+        return "value"
+    return None
+
+
+def _replaced(expr: ast.expr, repl: dict[int, ast.expr]) -> ast.expr:
+    """A copy of expr with the nodes whose id() is a key of repl replaced."""
+    memo: dict = {}
+    out = copy.deepcopy(expr, memo)
+    by_copy = {id(memo[k]): (memo[k], v) for k, v in repl.items() if k in memo}
+
+    def located(new: ast.expr, old: ast.expr) -> ast.expr:
+        new = copy.deepcopy(new)
+        for n in ast.walk(new):
+            ast.copy_location(n, old)
+        return new
+
+    if id(out) in by_copy:
+        return located(by_copy[id(out)][1], out)
+
+    class Swap(ast.NodeTransformer):
+        def visit(self, node):
+            if id(node) in by_copy:
+                return located(by_copy[id(node)][1], node)
+            return super().visit(node)
+
+    return Swap().visit(out)
+
+
+def _with_part(stmt: ast.stmt, field: str, expr: ast.expr, header_only: bool) -> ast.stmt:
+    """The statement with `field` set to expr (an if without its body: header_only)."""
+    if header_only and isinstance(stmt, ast.If):
+        return ast.copy_location(ast.If(test=expr, body=[ast.copy_location(ast.Pass(), stmt)], orelse=[]), stmt)
+    s = copy.copy(stmt)  # the body is shared, never changed
+    setattr(s, field, expr)
+    return s
+
+
+def _try_compile(stmt: ast.stmt, nxt, ctx: Ctx, indent: int) -> list[Command] | None:
+    try:
+        return _compile_stmt(stmt, nxt, ctx, indent)
+    except CompileError:
+        return None
+
+
+def _dyn_slots(stmt, field, part, subset, nxt, ctx, indent):
+    """([(variable, 1-based parameter)], f-string or None) when DynParams can take
+    `subset` of the variables of the statement, else None."""
+    nums = [p for p in subset if not isinstance(p, ast.JoinedStr)]
+    texts = [p for p in subset if isinstance(p, ast.JoinedStr)]
+    if len(texts) > 1:  # a command has one text
+        return None
+
+    def probe(values: dict) -> list[Command] | None:
+        e = _replaced(part, {id(p): ast.Constant(v) for p, v in values.items()})
+        return _try_compile(_with_part(stmt, field, e, True), nxt, ctx, indent)
+
+    base_values = {**{p: 1 for p in nums}, **{p: _DYN_TEXT for p in texts}}
+    base = probe(base_values)
+    if not base or base[0].code in K.TEXT_CODES or base[0].code in D.SKIPPED:
+        return None
+    target = base[0]
+    slots = []
+    for p in nums:
+        other = probe({**base_values, p: 2})
+        if other is None or len(other) != len(base) or _keys(other[1:], 0) != _keys(base[1:], 0):
+            return None
+        o = other[0]
+        if (o.code, o.string, len(o.params)) != (target.code, target.string, len(target.params)):
+            return None
+        diff = [k for k, (a, b) in enumerate(zip(target.params, o.params)) if a != b]
+        if len(diff) != 1 or (target.params[diff[0]], o.params[diff[0]]) != (1, 2):
+            return None  # not stored as the number itself
+        slots.append((p, diff[0] + 1))
+    if len({i for _, i in slots}) != len(slots):
+        return None
+    if texts:
+        sentinel = ctx.enc(_DYN_TEXT)
+        if target.string != sentinel or any(sentinel in c.string for c in base[1:]):
+            return None
+    return slots, (texts[0] if texts else None), target
+
+
+def _placeholders(stmt: ast.stmt, ctx: Ctx) -> list[ast.expr] | None:
+    """The values of a `# placeholder: a, b` comment after the code of the statement's
+    first logical line (the formatter puts it after a wrapped call's closing parenthesis)."""
+    if ctx.comments is None or not 0 < stmt.lineno <= len(ctx.comments.lines):
+        return None
+    last = stmt.body[0].lineno - 1 if isinstance(stmt, ast.If) else stmt.end_lineno
+    src = "\n".join(ctx.comments.lines[stmt.lineno - 1 : max(last, stmt.lineno)]) + "\n"
+    m = None
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.NEWLINE:
+                break
+            if tok.type == tokenize.COMMENT and tok.line[: tok.start[1]].strip():
+                m = _PLACEHOLDER.match(tok.string[1:]) or m
+    except (tokenize.TokenError, SyntaxError):
+        pass
+    if m is None:
+        return None
+    try:
+        tree = ast.parse("(" + m.group(1).strip() + ",)", mode="eval")
+    except SyntaxError:
+        raise CompileError("unreadable placeholder: %s" % m.group(1).strip(), stmt) from None
+    return list(tree.body.elts)
+
+
+def _compile_dynparams(stmt: ast.stmt, nxt, ctx: Ctx, indent: int, error: CompileError) -> list[Command]:
+    """The statement through DynParams comments, else `error` again."""
+    field = _dyn_field(stmt)
+    if field is None:
+        raise error
+    part = getattr(stmt, field)
+    parts = _dyn_parts(part)
+    if not parts or len(parts) > _DYN_MAX_PARTS:
+        raise error
+    saved, ctx.comments = ctx.comments, None  # probes must not claim the '#' comments
+    try:
+        if _try_compile(_with_part(stmt, field, part, True), nxt, ctx, indent) is not None:
+            raise error  # the condition compiles: the error is in the body
+        found = None
+        for size in range(1, len(parts) + 1):
+            for subset in itertools.combinations(parts, size):
+                found = _dyn_slots(stmt, field, part, subset, nxt, ctx, indent)
+                if found is not None:
+                    break
+            if found is not None:
+                break
+    finally:
+        ctx.comments = saved
+    if found is None:
+        raise error
+    slots, text, probed = found
+    dynamic = sorted(
+        [p for p, _ in slots] + ([text] if text is not None else []), key=lambda p: (p.lineno, p.col_offset)
+    )
+    held = _placeholders(stmt, ctx)
+    if held is not None and len(held) != len(dynamic):
+        raise CompileError(
+            "the placeholder comment gives %d value%s for %d dynamic value%s (%s)"
+            % (
+                len(held),
+                "s" * (len(held) != 1),
+                len(dynamic),
+                "s" * (len(dynamic) != 1),
+                ", ".join(ast.unparse(p) for p in dynamic),
+            ),
+            stmt,
+        )
+    parents = {id(c): n for n in ast.walk(part) for c in ast.iter_child_nodes(n)}
+    options = []
+    for k, p in enumerate(dynamic):
+        if held is None:
+            options.append([(p, ast.Constant("" if isinstance(p, ast.JoinedStr) else 1))])
+            continue
+        parent = parents.get(id(p))
+        whole = [(parent, held[k])] if isinstance(parent, ast.Subscript) and parent.slice is p else []
+        options.append(whole + [(p, held[k])])  # switches.relm for switches[variables.x], or 7 for variables.x
+    indices = {i - 1 for _, i in slots}
+    if isinstance(stmt, ast.If):
+        indices.add(len(probed.params) - 1)  # the else flag: the probe had no else
+
+    def fits(c: Command) -> bool:
+        """The command the probes found, but for its placeholders."""
+        return (
+            c.code == probed.code
+            and len(c.params) == len(probed.params)
+            and all(a == b for k, (a, b) in enumerate(zip(c.params, probed.params)) if k not in indices)
+            and (text is not None or c.string == probed.string)
+        )
+
+    chosen = None
+    saved, ctx.comments = ctx.comments, None
+    try:
+        for combo in itertools.product(*options):
+            e = _replaced(part, {id(n): v for n, v in combo})
+            got = _try_compile(_with_part(stmt, field, e, True), nxt, ctx, indent)
+            if got and fits(got[0]):
+                chosen = e
+                break
+    finally:
+        ctx.comments = saved
+    if chosen is None:
+        what = "the placeholder" if held is not None else 'the default placeholder (1, or "" for a text)'
+        raise CompileError("%s does not fit this command: give one with a `# placeholder: ...` comment" % what, stmt)
+    cmds = _compile_stmt(_with_part(stmt, field, chosen, False), nxt, ctx, indent)  # with its body
+    out = []
+
+    def comment(s: str) -> None:
+        out.append(Command(code=12410, indent=indent, string=ctx.enc(s, stmt)))
+
+    for p, i in sorted(slots, key=lambda s: s[1]):
+        comment("@dynparams_add_param %d, %s" % (i, _dyn_token(p)))
+    if text is not None:
+        for v in text.values:
+            if isinstance(v, ast.Constant):
+                if "\n" in v.value:
+                    raise CompileError("a text built by DynParams has no line break", stmt)
+                if v.value:
+                    comment("@dynparams_append_string " + v.value)
+            else:
+                comment("@dynparams_append_number " + _dyn_token(v.value))
+    comment("@dynparams_overwrite_next")
+    return out + cmds
 
 
 def _is_explicit(stmt: ast.stmt | None, code: int) -> bool:

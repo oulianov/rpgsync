@@ -220,6 +220,7 @@ class Ctx(BaseModel):
     event_names: dict[int, str] = Field(default_factory=dict)  # map event names for comments
     handles: dict[str, dict[int, str]] = Field(default_factory=dict)  # variables/switches id -> Python name
     choice_sep: str | None = None  # how the editor joined show_choices options (None: engine default)
+    dynparams: bool = False  # DynPlugins/DynParams.dll: variables wherever RPG Maker takes a number
 
     def enc(self, s: str, node=None) -> bytes:
         try:

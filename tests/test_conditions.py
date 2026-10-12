@@ -21,7 +21,7 @@ def _keys(src: str) -> list:
         ),
         (  # several and, grouped or not, with a comment in the body
             'if switches[1] and (variables[2] > 5 and not switches[3]):\n    # note\n    text("A")\ntext("B")',
-            'if switches[1]:\n    if variables[2] > 5:\n        if not switches[3]:\n'
+            "if switches[1]:\n    if variables[2] > 5:\n        if not switches[3]:\n"
             '            # note\n            text("A")\ntext("B")',
         ),
         (  # in an elif
@@ -36,4 +36,4 @@ def test_and_is_nested_branches(with_and, nested):
 
 def test_and_with_else_is_an_error():
     with pytest.raises(CompileError, match="can't have an else"):
-        compile_body_src(['if switches[1] and switches[2]:', '    text("A")', "else:", '    text("B")'], CTX)
+        compile_body_src(["if switches[1] and switches[2]:", '    text("A")', "else:", '    text("B")'], CTX)
