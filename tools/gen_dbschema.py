@@ -46,8 +46,18 @@ TABLES: list[tuple[str, int, str, str]] = [
     ("variables", 0x18, "Variable", "Variables"),
 ]
 
-# Fields kept opaque (never exported, written back untouched).
-OPAQUE = {("Troop", "pages")}
+# Map tree (RPG_RT.lmt) structures exported too (database/map_tree.py).
+TREE_ROOTS = ["MapInfo", "Start"]
+
+# Fields kept opaque (never exported, written back untouched).  The map tree's
+# editor state (indentation, scroll position, expanded nodes) is not the game's.
+OPAQUE = {
+    ("Troop", "pages"),
+    ("MapInfo", "indentation"),
+    ("MapInfo", "scrollbar_x"),
+    ("MapInfo", "scrollbar_y"),
+    ("MapInfo", "expanded_node"),
+}
 
 CLASS_DOCS = {
     "Actor": "A hero (Database > Actors).",
@@ -73,6 +83,9 @@ CLASS_DOCS = {
     "Music": "A music track.",
     "Parameters": "Base stats per level: element N-1 of each list is the value at level N.",
     "Equipment": "Initial equipment: item ids, 0 = nothing.",
+    "MapInfo": "A map or an area of the map tree (RPG_RT.lmt) and its map properties.",
+    "Encounter": "A troop met at random on a map.",
+    "Start": "Where the party and the vehicles start a new game.",
 }
 
 # Better descriptions for fields whose liblcf comment only states the type.
@@ -308,6 +321,32 @@ FIELD_DOCS = {
     ("BattlerAnimationPose", "battle_animation_id"): "Battle animation (animation_type='battle')",
     ("BattlerAnimationWeapon", "weapon_name"): "Weapon graphic file",
     ("BattlerAnimationWeapon", "weapon_index"): "Index inside the file",
+    ("MapInfo", "name"): "Name in the map tree",
+    ("MapInfo", "parent_map"): "Parent in the map tree, 0 = top level; 'parent' settings come from it",
+    ("MapInfo", "type"): "Map, or area: a rectangle of its parent map with its own encounters",
+    ("MapInfo", "music_type"): "Background music: the parent's, set by events, or `music`",
+    ("MapInfo", "music"): "Background music when music_type='specific'",
+    ("MapInfo", "background_type"): "Battle background: the parent's, the terrain's, or `background_name`",
+    ("MapInfo", "background_name"): "Battle background file when background_type='specific'",
+    ("MapInfo", "teleport"): "Teleport skills: the parent's setting, allowed or forbidden",
+    ("MapInfo", "escape"): "Escape skills: the parent's setting, allowed or forbidden",
+    ("MapInfo", "save"): "Saving: the parent's setting, allowed or forbidden",
+    ("MapInfo", "encounters"): "Troops met at random",
+    ("MapInfo", "encounter_steps"): "Average steps between random encounters (0 = none)",
+    ("MapInfo", "area_rect"): "Area rectangle in tiles: left, top, right, bottom (0, 0, 0, 0 for a map)",
+    ("Encounter", "troop_id"): "Troop",
+    ("Start", "party_map_id"): "Map of the party (0 = not set)",
+    ("Start", "party_x"): "Party X",
+    ("Start", "party_y"): "Party Y",
+    ("Start", "boat_map_id"): "Map of the boat (0 = not placed)",
+    ("Start", "boat_x"): "Boat X",
+    ("Start", "boat_y"): "Boat Y",
+    ("Start", "ship_map_id"): "Map of the ship (0 = not placed)",
+    ("Start", "ship_x"): "Ship X",
+    ("Start", "ship_y"): "Ship Y",
+    ("Start", "airship_map_id"): "Map of the airship (0 = not placed)",
+    ("Start", "airship_x"): "Airship X",
+    ("Start", "airship_y"): "Airship Y",
 }
 
 STRUCT_KIND_TYPES = {"Parameters": "params", "Equipment": "equip"}
@@ -345,7 +384,9 @@ class Schema:
 
         self.structs: dict[str, bool] = {}  # ldb struct -> has ID
         for r in both("structs"):
-            if r["Type"] == "ldb":
+            # the database, and the map tree's chunked structures (TreeMap itself is not
+            # chunked, Rect is a packed field)
+            if r["Type"] == "ldb" or (r["Type"] == "lmt" and r["Index available?"] in ("0", "1")):
                 self.structs[r["Structure"]] = r["Index available?"] == "1"
         self.rows: dict[str, list[Row]] = {s: [] for s in self.structs}
         for r in both("fields"):
@@ -406,6 +447,8 @@ class Schema:
             return "i32vec", "i32"
         if t in STRUCT_KIND_TYPES:
             return "i16vec", STRUCT_KIND_TYPES[t]
+        if t == "Rect":  # 4 x UInt32: left, top, right, bottom
+            return "i32vec", "i32"
         if t in self.flags:
             return "u8vec", "flags:" + t
         if t.startswith("Array<"):
@@ -436,6 +479,8 @@ class Schema:
 
         for _, _, s, _ in TABLES:
             visit(s)
+        for s in TREE_ROOTS:
+            visit(s)
         return order
 
     # -- defaults -----------------------------------------------------------------
@@ -460,6 +505,8 @@ class Schema:
             n = int(raw) if raw else 0
             names = [k for k, x in self.enums[model[5:]].items() if x == n]
             v = names[0] if names else n
+        elif row.type == "Rect":
+            v = [0, 0, 0, 0]
         elif model in ("bits", "u8", "i16", "i32", "array") or model.startswith("array:"):
             v = _list_literal(raw) if raw else []
         else:
@@ -779,6 +826,8 @@ def gen_db(schema: Schema) -> str:
         if schema.structs.get(s):
             if s in tables:
                 d = "Database id: entry N is the N-th slot of the table (RPG_RT looks entries up by position)."
+            elif s == "MapInfo":
+                d = "Map id: the map's file is MapNNNN.lmu. Leave it out for a new map to get a free id."
             else:
                 d = "Element id; leave it out to use the position in the list (1-based)."
             out.append(_field_src("id", "int | None", "default=None", d))
@@ -804,7 +853,7 @@ def gen_db(schema: Schema) -> str:
             elif model == "bits":
                 ann, dflt = "list[bool]", "default_factory=list"
             elif model in ("u8", "i16", "i32"):
-                ann, dflt = "list[int]", "default_factory=list"
+                ann, dflt = "list[int]", "default_factory=lambda: %r" % d2k if d2k else "default_factory=list"
             elif model == "params":
                 ann, dflt = "Parameters", "default_factory=Parameters"
             elif model == "equip":

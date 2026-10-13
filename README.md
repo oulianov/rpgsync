@@ -14,16 +14,19 @@ A python twin of your RPG Maker 2000/2003 game.
 
 ```python
 @event(10, "Jeremy", x=15, y=38)
-def linky():
-    @page(when=variables[102] == 1, sprite=("heroes1", 1), layer="same")
-    def page_1():
-        # Greetings (this comment is stored in the game)
+class Jeremy(Event):
+    sprite = ("heroes1", 1)  # the settings of every page
+    layer = "same"
+
+    def page_1(self):
+        """Greetings (stored in the game as the page's first comment)"""
         text(r"\n[3] : Bonjour, je suis \c[2]Jeremy\c[0].")
         this.move(move_up * 3, face_player, frequency=8)
-        ulysse.move(move_up * 2)  # another event of this map, by name
+        Ulysse.move(move_up * 2)  # another event of this map, by name
         if party.gold >= 100:
             match show_choices("Payer", "Partir"):
                 case "Payer":
+                    # Take gold (this is stored in the events!)
                     party.gold -= 100
                     items[3].count += 1
                 case "Partir":
@@ -32,11 +35,18 @@ def linky():
             text("Reviens avec de l'or.")
         variables[102] += 1
 
+    @page(when=variables[102] >= 1)  # the active page: the last one whose condition holds
+    def page_2(self):
+        text("Merci encore !")
+        Ulysse.page_1()  # runs Ulysse's page 1 (Call Event)
+
 
 @event(11, "Ulysse", x=10, y=42)
-def ulysse(): # The other event!
-    @page(sprite=("heroes1", 0), layer="same")
-    def page_1():
+class Ulysse(Event):  # The other event!
+    sprite = ("heroes1", 0)
+    layer = "same"
+
+    def page_1(self):
         pass
 ```
 
@@ -91,6 +101,8 @@ cd /path/to/MyGame
 rpgsync
 ```
 Open the `Scripts` folder in your editor and select its `.venv` as the Python interpreter. You're seeing your Python clone!
+
+Copied or renamed the game folder? The commands of its `.venv` still point at the old folder: the next `rpgsync` (or `.venv/bin/python -m rpgsync`) writes them again for the new one. On Windows, run `uv sync --reinstall` in the `Scripts` folder.
 
 ### 4. Choose your editor workflow
 
@@ -150,6 +162,9 @@ rpgsync push     # scripts -> game
 - Each command works on the game of the current folder, or on the game or `Scripts` folder given as argument. 
 - `--map N` limits a command to one map
 - `pull --force` overwrites scripts that have unsynced edits.
+- `rpgsync check` also checks the maps: teleports, vehicle locations and
+  teleport / escape targets go to a map of the map tree and inside it, every
+  map of the tree has its file, and no `MapNNNN.py` is left from a deleted map.
 
 ### Automated tests
 
@@ -162,6 +177,11 @@ game file stays as it was.
 cd /path/to/MyGame/Scripts
 rpgsync check
 ```
+
+`rpgsync check` also runs the type checker [ty](https://github.com/astral-sh/ty);
+VS Code shows the same problems while you type, with the ty extension or
+Pylance. `Scripts/pyproject.toml` turns off Pylance's warning about
+`from rpgsync.dsl import *`: the scripts use it on purpose.
 
 ### Database, Common Events and Troop Battle Events
 
@@ -182,11 +202,68 @@ class TroopEvents(TroopEventTable):
     @troop(3, "Slime*2")
     def slime_2():
         @page(when=turn(1, every=2) and enemies[0].hp_percent(0, 50))
-        def page_1():
+        def page_1(self):
             text("The slime is weak!")
             if battle_condition(enemies[1].can_act):
                 enemies[1].change_hp(-10)
 ```
+
+### The map tree
+
+The editor's map tree (`RPG_RT.lmt`) is `database/map_tree.py`: one entry per
+map or area, with its map properties (music, battle background, teleport /
+escape / save, random encounters). The maps under a map go in the `with` block
+that follows it, so the file has the shape of the tree. `start` is where a new
+game begins (the party and the vehicles).
+
+```python
+class Maps(MapTree):
+    # New game: the party on Relm
+    start = Start(party_map_id=1, party_x=8, party_y=6)
+
+    hertepay = Map(id=5, name="Hertepay", music_type="event")
+    with hertepay:
+        relm = Map(id=1, name="Relm", encounters=[Encounter(troop_id=3)])
+        with relm:
+            cellar = Area(id=26, name="Cellar", area_rect=[2, 3, 9, 8])
+
+
+maps = Maps()
+```
+
+- **Rename a map** with `name=`: its script's title follows.
+- **Add a map** with a new `Map(name="Forest")` where it belongs in the tree:
+  rpgsync gives it an id, creates an empty `MapNNNN.lmu` (20x15) and its script.
+- **Delete a map** by removing its entry and its `with` block: its files and
+  the scripts are deleted, after a copy in `Scripts/.rpgsync/history`.
+- **Move a map** by moving its entry (and its block) elsewhere in the tree.
+- Nothing goes under an area: your IDE flags `with an_area:`.
+
+Event scripts name maps by their attribute, wherever they are in the tree:
+`teleport(maps.cellar, 10, 4)` (`teleport(26, 10, 4)` still works).
+
+### Events and pages
+
+Each map event is a class named after it (`Gary`, `Event12` for an event
+with the editor's default name), and its pages are its `page_1(self)`,
+`page_2(self)`... methods, numbered like the editor's tabs:
+
+- **The active page is the last one whose `when=` holds** (none: the event is
+  not on the map), as in RPG Maker. `rpgsync check` warns about a page that can
+  never be active because a page after it holds whenever it does.
+- **The class attributes are the settings of every page** (`sprite`, `layer`,
+  `trigger`, `move_type`...); a page's `@page(...)` states only its condition
+  and what differs (`sprite=None`: no graphic). A page with no condition and
+  the class's settings needs no `@page`. `direction` and `route` are set on
+  each page.
+- **A page's docstring is its first comment in the game**, so the editor shows
+  it too.
+- **`Gary.page_3()` runs Gary's page 3** (Call Event); in Gary's pages,
+  `self` is Gary (`self.move(...)`, `self.page_3()`), while `this` is RPG
+  Maker's "this event". Add or move pages freely:
+  after the push, rpgsync names them by their number and updates the calls of
+  the map. In the game, Call Event keeps a page number: when pages move in the
+  editor, rpgsync points out the calls to check.
 
 ### Variables, switches and events by name
 
@@ -205,6 +282,7 @@ Event scripts import them and use them by name. Events of the same map are used 
 
 ```python
 from database.common_events import common_events
+from database.map_tree import maps
 from database.switches import switches
 from database.variables import variables
 
@@ -257,6 +335,10 @@ rpgsync writes the `@dynparams_add_param` / `@dynparams_append_string` /
 the values RPG Maker can't read from a variable itself (`x=variables.x` stays a
 plain RPG Maker option). Pulling a game turns existing DynParams comments into
 this form when it writes back the exact same commands.
+
+Type checkers accept these variables in this game only: rpgsync writes
+`Scripts/database/game_types.py`, which tells ty and Pylance that the game runs
+DynParams.
 
 The command itself still holds a fixed value, the **placeholder**: what runs
 without the plugin, and what the RPG Maker editor shows. It is 1 (or `""` for a

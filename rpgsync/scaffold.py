@@ -6,6 +6,7 @@ import configparser
 import json
 import os
 import re
+import tomllib
 from importlib import metadata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -15,7 +16,14 @@ from .project import Project
 RPGSYNC_ROOT = Path(__file__).resolve().parent.parent
 RPGSYNC_GIT = "https://github.com/oulianov/rpgsync"
 
-PYPROJECT = """\
+PYRIGHT = """\
+[tool.pyright]
+# Pylance: the scripts use `from rpgsync.dsl import *` on purpose
+reportWildcardImportFromLibrary = false
+"""
+
+PYPROJECT = (
+    """\
 [project]
 name = "{name}"
 version = "0.1.0"
@@ -60,7 +68,20 @@ ignore = ["F403", "F405", "F811", "F841", "SIM102", "SIM114", "SIM117"]
 
 [tool.ty.src]
 exclude = [".rpgsync", "*.conflict-*.py"]
+
 """
+    + PYRIGHT
+)
+
+GAME_TYPES = '''\
+"""Types that depend on this game (written by rpgsync, do not edit).
+
+Dynamic: what may stand, besides a number, where a command keeps a fixed number
+(rpgsync.dsl.Fixed). {why}
+"""
+
+{body}
+'''
 
 TEST_SCRIPTS = '''\
 """Default checks for the event scripts.  Run with: uv run pytest (in parallel),
@@ -75,6 +96,12 @@ writes a script into the game.
   declared in pyproject.toml [tool.rpgsync]: dynrpg, maniac, easyrpg)
   supports.  rpgsync never writes
   an event that fails this.
+- test_map_references: teleports, vehicle locations, teleport and escape
+  targets, and the start positions of a new game go to maps of the map
+  tree, inside them.
+- test_pages_reachable: warns about event pages that are never active (a
+  page after them holds whenever they do: the active page is the last one
+  whose conditions hold).  A warning, not a failure.
 - test_message_width (commented out, an example to adapt): every message
   row fits in the message window.
 - test_types: ty finds no wrong values (e.g. a misspelled direction or
@@ -87,11 +114,14 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import warnings
 from pathlib import Path
 
 import pytest
 from rpgsync.compat import check_specs, target_engine
+from rpgsync.maptree import map_reference_problems, map_tree_maps
 from rpgsync.project import Project
+from rpgsync.script import unreachable_pages
 from rpgsync.sync import ScriptError, Syncer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +130,9 @@ GAME = (ROOT / CONFIG["game"]).resolve()
 
 syncer = Syncer(Project(str(GAME), str(ROOT)), log=lambda *_: None)
 UNITS = [u for u in syncer.units() if Path(u.py_path).exists()]
+PLACE_UNITS = [u for u in UNITS if u.kind in ("map", "common", "troop", "maptree")]  # scripts that name places
+MAP_UNITS = [u for u in UNITS if u.kind == "map"]
+MAPS, MAP_SIZES = map_tree_maps(syncer.project)  # the maps of RPG_RT.lmt, their sizes
 
 
 def compile_unit(unit):
@@ -119,6 +152,19 @@ def test_engine_compatibility(unit):
     engine = target_engine(str(ROOT), syncer.project.context().engine)
     problems = check_specs(compile_unit(unit), engine, CONFIG.get("patches", []), CONFIG.get("allow_commands", []))
     assert not problems, "\\n".join(problems)
+
+
+@pytest.mark.parametrize("unit", PLACE_UNITS, ids=[u.name for u in PLACE_UNITS])
+@pytest.mark.skipif(MAPS is None, reason="no map tree")
+def test_map_references(unit):
+    problems = map_reference_problems(compile_unit(unit), MAPS or {}, MAP_SIZES)
+    assert not problems, "\\n".join("line %s: %s" % (line, problem) for line, problem in problems)
+
+
+@pytest.mark.parametrize("unit", MAP_UNITS, ids=[u.name for u in MAP_UNITS])
+def test_pages_reachable(unit):
+    for line, problem in unreachable_pages(compile_unit(unit)):
+        warnings.warn("%s:%s: %s" % (Path(unit.py_path).name, line, problem), stacklevel=1)
 
 
 # Example of a check of your own: uncomment it to make sure every message
@@ -158,6 +204,8 @@ untouched until you fix it.
 | --- | --- | --- |
 | `test_script_compiles` | every script compiles into valid game data | yes |
 | `test_engine_compatibility` | no RPG Maker 2003-only command in a 2000 game, no patch command (DynRPG, Maniac, EasyRPG) unless declared, no DynParams comment that breaks the game | yes |
+| `test_map_references` | teleports, vehicle locations, teleport and escape targets and new game start positions go to maps of the map tree, inside them | no |
+| `test_pages_reachable` | warns about event pages that are never active (a page after them holds whenever they do) | no (a warning) |
 | `test_message_width` | example, commented out: message rows fit the window (50 characters, 38 with a face, 4 rows) | no |
 | `test_types` | ty finds no wrong value (misspelled direction, trigger...) | no: run `uv run pytest` or `rpgsync check` |
 
@@ -234,6 +282,42 @@ def detect_patches(game_dir: str) -> list[str]:
     return found
 
 
+def game_types(project: Project) -> str:
+    """The content of database/game_types.py, which rpgsync.dsl reads when type checking."""
+    if project.has_dynparams():
+        why = "This game runs the DynParams plugin (DynPlugins/DynParams.dll):\na variable, read when the command runs."
+        body = "from rpgsync.dsl import Variable\n\nDynamic = Variable"
+    else:
+        why = "Nothing: this game does not run the DynParams plugin."
+        body = "from typing import Never\n\nDynamic = Never"
+    return GAME_TYPES.format(why=why, body=body)
+
+
+def update_scripts_project(project: Project) -> list[str]:
+    """Bring the scripts folder of a set-up game up to date with this rpgsync: the
+    Pylance settings of pyproject.toml, database/game_types.py.  Returns the written paths."""
+    root = Path(project.script_dir)
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return []  # not set up: reading a game never creates its scripts folder
+    written = []
+    text = pyproject.read_text(encoding="utf-8")
+    try:
+        configured = "pyright" in tomllib.loads(text).get("tool", {})
+    except tomllib.TOMLDecodeError:
+        configured = True  # a file being edited: left as it is
+    if not configured:
+        pyproject.write_text(text.rstrip("\n") + "\n\n" + PYRIGHT, encoding="utf-8")
+        written.append(str(pyproject))
+    path = root / "database" / "game_types.py"
+    content = game_types(project)
+    if not path.exists() or path.read_text(encoding="utf-8") != content:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        written.append(str(path))
+    return written
+
+
 def init_scripts_project(project: Project) -> list[str]:
     """Create pyproject.toml & co in the scripts folder (existing files are
     kept).  Returns the written paths."""
@@ -255,6 +339,7 @@ def init_scripts_project(project: Project) -> list[str]:
         ".vscode/settings.json": VSCODE_SETTINGS,
         ".vscode/extensions.json": VSCODE_EXTENSIONS,
         ".gitignore": GITIGNORE,
+        "database/game_types.py": game_types(project),
     }
     written = []
     for rel_path, content in files.items():

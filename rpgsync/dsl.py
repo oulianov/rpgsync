@@ -8,9 +8,12 @@ on hover, and type checkers (ty, pyright) flag wrong values while you type.
 Example::
 
     @event(9, "Guard", x=10, y=5)
-    def guard():
-        @page(sprite=("Actor1", 3), layer="same")
-        def page_1():
+    class Guard(Event):
+        sprite = ("Actor1", 3)
+        layer = "same"
+
+        def page_1(self):
+            \"\"\"Asks for the toll (stored in the game as the page's first comment)\"\"\"
             text("Halt!")
             if variables[1] >= variables[2]:
                 party.gold -= 100
@@ -21,8 +24,8 @@ Example::
                     this.move(move_away_from_player, frequency=6)
                     return
 
-        @page(when=switches[4], sprite=("Actor1", 3), layer="same")
-        def page_2():
+        @page(when=switches[4])
+        def page_2(self):
             text("Welcome back.")
 
 Conventions:
@@ -41,9 +44,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from typing import Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Literal, Never, Protocol, TypeVar, overload
 
 _F = TypeVar("_F", bound=Callable[..., object])
+_E = TypeVar("_E", bound="Event")
 
 # ==========================================================================
 # Accepted values
@@ -343,6 +347,18 @@ class Value:
 Number = int | Value
 """A number, or a value read from the game such as ``variables[3]``."""
 
+if TYPE_CHECKING:
+    # written by rpgsync into each game's Scripts/database: Variable when the game
+    # runs the DynParams plugin, else Never
+    from database.game_types import Dynamic  # type: ignore
+else:
+    Dynamic = Never
+
+Fixed = int | Dynamic
+"""A number that RPG Maker keeps as such in the command.  In a game that runs the
+DynParams plugin (DynPlugins/DynParams.dll), also a variable such as
+``variables.id``: its value is used when the command runs."""
+
 
 class Counter(Value):
     """A value changed with ``+=`` / ``-=`` (gold, item counts)."""
@@ -467,16 +483,16 @@ class Actor:
     can_act: Condition
     """In ``battle_condition(...)``: the hero can act this turn."""
 
-    def knows(self, skill: int) -> Condition:
+    def knows(self, skill: Fixed) -> Condition:
         """Condition: the hero has learned this skill."""
 
-    def has_equipped(self, item: int) -> Condition:
+    def has_equipped(self, item: Fixed) -> Condition:
         """Condition: the hero has this item equipped."""
 
-    def has_state(self, state: int) -> Condition:
+    def has_state(self, state: Fixed) -> Condition:
         """Condition: the hero has this state (poison, sleep...)."""
 
-    def uses_command(self, command: int) -> Condition:
+    def uses_command(self, command: Fixed) -> Condition:
         """In ``battle_condition(...)`` and troop page conditions: the hero uses this
         battle command (2003)."""
 
@@ -488,7 +504,7 @@ class Actor:
         every ``every`` turns (``every=0``: that turn only)."""
 
     def set_sprite(
-        self, charset: str, index: int | None = None, transparent: bool | None = None, *, extra: Extra = ()
+        self, charset: str, index: Fixed | None = None, transparent: bool | None = None, *, extra: Extra = ()
     ) -> None:
         """Change the hero's walking sprite.
 
@@ -498,7 +514,7 @@ class Actor:
             transparent: draw the hero semi-transparent.
         """
 
-    def set_face(self, faceset: str, index: int | None = None, *, extra: Extra = ()) -> None:
+    def set_face(self, faceset: str, index: Fixed | None = None, *, extra: Extra = ()) -> None:
         """Change the hero's face (used by messages and menus).
 
         Args:
@@ -600,17 +616,17 @@ transparency_down = MoveStep()
 """One step less transparent."""
 
 
-def switch_on(switch: int | Switch) -> MoveStep:
+def switch_on(switch: Fixed | Switch) -> MoveStep:
     """Move step: turn a switch ON: ``switch_on(switches.door_open)``."""
     return MoveStep()
 
 
-def switch_off(switch: int | Switch) -> MoveStep:
+def switch_off(switch: Fixed | Switch) -> MoveStep:
     """Move step: turn a switch OFF: ``switch_off(switches.door_open)``."""
     return MoveStep()
 
 
-def change_graphic(charset: str, index: SpriteIndex) -> MoveStep:
+def change_graphic(charset: str, index: SpriteIndex | Dynamic) -> MoveStep:
     """Move step: change the character's graphic to character ``index`` (0-7,
     see SpriteIndex) of the CharSet image ``charset`` (file name without
     extension)."""
@@ -637,7 +653,9 @@ class Character:
     facing: Direction
     """Test with ``this.facing == "up"``."""
 
-    def move(self, *steps: MoveStep, frequency: Frequency = 6, repeat: bool = False, skippable: bool = False) -> None:
+    def move(
+        self, *steps: MoveStep, frequency: Frequency | Dynamic = 6, repeat: bool = False, skippable: bool = False
+    ) -> None:
         """Move Event: give the character a route to follow.
 
         Between ``jump_start`` and ``jump_end`` only movement steps count.
@@ -655,7 +673,7 @@ class Character:
         """Set Event Location: move this event instantly.  x and y are both
         numbers or both variables[id]."""
 
-    def show_animation(self, animation: int, wait: bool = False, whole_map: bool = False) -> None:
+    def show_animation(self, animation: Fixed, wait: bool = False, whole_map: bool = False) -> None:
         """Show Battle Animation on this character (also works outside battle).
 
         Args:
@@ -669,10 +687,10 @@ class Character:
 
     def flash(
         self,
-        red: int | None = None,
-        green: int | None = None,
-        blue: int | None = None,
-        strength: int | None = None,
+        red: Fixed | None = None,
+        green: Fixed | None = None,
+        blue: Fixed | None = None,
+        strength: Fixed | None = None,
         duration: float | None = None,
         wait: bool | None = None,
         extra: Extra = (),
@@ -700,7 +718,7 @@ class PlayerCharacter(Character):
 
 
 class VehicleCharacter(Character):
-    def set_sprite(self, charset: str, index: int | None = None, *, extra: Extra = ()) -> None:
+    def set_sprite(self, charset: str, index: Fixed | None = None, *, extra: Extra = ()) -> None:
         """Change the vehicle's graphic (CharSet name and character 0-7)."""
 
 
@@ -714,7 +732,7 @@ class CommonEvent:
 
 
 class CommonEvents:
-    def __getitem__(self, key: int) -> CommonEvent: ...
+    def __getitem__(self, key: Fixed) -> CommonEvent: ...
 
 
 class CommonEventTable(CommonEvents):
@@ -774,10 +792,10 @@ class Enemy:
     def change_sp(self, amount: Number, extra: Extra = ()) -> None:
         """Change the enemy's SP (negative = lose)."""
 
-    def add_state(self, state: int, *, extra: Extra = ()) -> None:
+    def add_state(self, state: Fixed, *, extra: Extra = ()) -> None:
         """Inflict a state on the enemy."""
 
-    def remove_state(self, state: int, *, extra: Extra = ()) -> None:
+    def remove_state(self, state: Fixed, *, extra: Extra = ()) -> None:
         """Cure a state of the enemy."""
 
     def show(self, *, extra: Extra = ()) -> None:
@@ -785,7 +803,7 @@ class Enemy:
 
 
 class Enemies:
-    def __getitem__(self, key: int) -> Enemy: ...
+    def __getitem__(self, key: Fixed) -> Enemy: ...
 
 
 class Picture:
@@ -799,16 +817,16 @@ class Picture:
         x: Number = 0,
         y: Number = 0,
         scroll_with_map: bool | None = None,
-        magnify: int | None = None,
-        transparency: int | None = None,
+        magnify: Fixed | None = None,
+        transparency: Fixed | None = None,
         transparent_color: bool | None = None,
-        red: int | None = None,
-        green: int | None = None,
-        blue: int | None = None,
-        saturation: int | None = None,
+        red: Fixed | None = None,
+        green: Fixed | None = None,
+        blue: Fixed | None = None,
+        saturation: Fixed | None = None,
         effect: PictureEffect | None = None,
-        effect_power: int | None = None,
-        bottom_transparency: int | None = None,
+        effect_power: Fixed | None = None,
+        bottom_transparency: Fixed | None = None,
         extra: Extra = (),
     ) -> None:
         """Show Picture.
@@ -832,19 +850,19 @@ class Picture:
         *,
         x: Number = 0,
         y: Number = 0,
-        magnify: int | None = None,
-        transparency: int | None = None,
-        red: int | None = None,
-        green: int | None = None,
-        blue: int | None = None,
-        saturation: int | None = None,
+        magnify: Fixed | None = None,
+        transparency: Fixed | None = None,
+        red: Fixed | None = None,
+        green: Fixed | None = None,
+        blue: Fixed | None = None,
+        saturation: Fixed | None = None,
         effect: PictureEffect | None = None,
-        effect_power: int | None = None,
+        effect_power: Fixed | None = None,
         duration: float | None = None,
         wait: bool | None = None,
-        bottom_transparency: int | None = None,
-        p4: int | None = None,
-        p7: int | None = None,
+        bottom_transparency: Fixed | None = None,
+        p4: Fixed | None = None,
+        p7: Fixed | None = None,
         extra: Extra = (),
     ) -> None:
         """Move Picture: change position, zoom, transparency or tint over time.
@@ -861,7 +879,7 @@ class Picture:
 
 
 class Pictures:
-    def __getitem__(self, key: int) -> Picture: ...
+    def __getitem__(self, key: Fixed) -> Picture: ...
 
 
 class Party:
@@ -963,7 +981,7 @@ class ManiacPatch:
         time: Variable = ...,
         level: Variable = ...,
         hp: Variable = ...,
-        name_string: int = 0,
+        name_string: Fixed = 0,
         face1: ManiacValue = 0,
         face2: ManiacValue = 0,
         face3: ManiacValue = 0,
@@ -1068,7 +1086,7 @@ class ManiacPatch:
         self,
         *params: int,
         target: Literal["actor", "member", "party", "enemy", "troop"] = "actor",
-        info: int = 0,
+        info: Fixed = 0,
         target_id: ManiacValue = 0,
         first_var: Variable = ...,
         extra: Extra = (),
@@ -1172,7 +1190,7 @@ class ManiacPatch:
             "face_size",
         ] = "run_when_inactive",
         value: ManiacValue = 0,
-        value2: int = 0,
+        value2: Fixed = 0,
         extra: Extra = (),
         text: str = "",
     ) -> None:
@@ -1209,7 +1227,7 @@ class ManiacPatch:
         name_from: Literal["text", "string", "string_ref"] = "text",
         target: Literal["screen", "picture"] = "screen",
         picture: ManiacValue = 0,
-        name_string: int = 0,
+        name_string: Fixed = 0,
         dynamic: bool = False,
         opaque: bool = False,
         filename: str = "",
@@ -1249,11 +1267,11 @@ class ManiacPatch:
         on_open: bool = False,
         on_close: bool = False,
         on_char: bool = False,
-        event: int = 0,
-        info_var: int = 0,
-        info_string: int = 0,
-        number_args: int = 0,
-        string_args: int = 0,
+        event: Fixed = 0,
+        info_var: Fixed = 0,
+        info_string: Fixed = 0,
+        number_args: Fixed = 0,
+        string_args: Fixed = 0,
         name: str = "",
         extra: Extra = (),
         text: str = "",
@@ -1324,17 +1342,17 @@ bgm_looped = Condition()
 true right after loading a save)."""
 
 
-def randint(a: int, b: int) -> Value:
+def randint(a: Fixed, b: Fixed) -> Value:
     """A random number from a to b (inclusive), like random.randint."""
     return Value()
 
 
-def percent(value: int) -> Percent:
+def percent(value: Fixed) -> Percent:
     """n% of the target's HP, for enemies[i].change_hp()."""
     return Percent()
 
 
-def input_number(digits: Digits) -> Value:
+def input_number(digits: Digits | Dynamic) -> Value:
     """Input Number: the player types a number.
 
     ``variables[3] = input_number(digits=4)``
@@ -1360,19 +1378,19 @@ def event_id_at(x: Number, y: Number) -> Value:
 
 def key_input(
     *,
-    wait: bool | int = False,
-    directions: bool | int = False,
-    decision: bool | int = False,
-    cancel: bool | int = False,
-    numbers: bool | int = False,
-    operators: bool | int = False,
+    wait: bool | Fixed = False,
+    directions: bool | Fixed = False,
+    decision: bool | Fixed = False,
+    cancel: bool | Fixed = False,
+    numbers: bool | Fixed = False,
+    operators: bool | Fixed = False,
     time_variable: Variable | None = None,
-    count_time: bool | int = False,
-    shift: bool | int = False,
-    down: bool | int = False,
-    left: bool | int = False,
-    right: bool | int = False,
-    up: bool | int = False,
+    count_time: bool | Fixed = False,
+    shift: bool | Fixed = False,
+    down: bool | Fixed = False,
+    left: bool | Fixed = False,
+    right: bool | Fixed = False,
+    up: bool | Fixed = False,
     layout: Literal[2000, 2003] | None = None,
 ) -> Value:
     """Key Input Processing: ``variables[148] = key_input(down=True, up=True, wait=True)``.
@@ -1427,8 +1445,56 @@ class Route:
     """A custom move route for page(route=...)."""
 
 
-def event(id: int | None = None, name: str = "", x: int = 0, y: int = 0) -> Callable[[_F], Character]:
-    """A map event.
+class Event(Character):
+    """A map event: ``@event(30, "Gary", x=17, y=16)`` on ``class Gary(Event):``.
+    The event is a character of the map: ``Gary.move(...)``, ``Gary.x``.
+
+    Its pages are its ``page_1(self)``, ``page_2(self)``... methods, numbered
+    like the editor's tabs.  The active page is the last one whose ``when=``
+    holds; when none holds, the event is not on the map.  ``Gary.page_3()``
+    runs page 3 (Call Event); in Gary's pages, ``self`` is Gary.
+
+    The class attributes are the settings of every page, unless a page's
+    ``@page(...)`` says otherwise; a page without ``@page`` has no condition
+    and the class's settings.  A page's docstring is its first comment in the
+    game.
+    """
+
+    sprite: tuple[str, SpriteIndex] | None = None
+    """("CharSet", 0-7): the graphic of the pages (None: no graphic)."""
+    tile: int | None = None
+    """A tile of the chipset as the graphic of the pages, instead of a sprite."""
+    pattern: Pattern = "middle"
+    """Animation frame shown when standing still."""
+    translucent: bool = False
+    """Draw semi-transparent."""
+    trigger: Trigger = "action"
+    """How the pages start (action, touch, collision, autorun, parallel)."""
+    layer: Layer = "below"
+    """Below, same level as, or above the hero."""
+    overlap_forbidden: bool = False
+    """Other events cannot walk through it."""
+    animation: AnimationType = "non_continuous"
+    """How the sprite animates."""
+    move_type: MoveType = "stationary"
+    """Automatic movement; "custom" follows ``route``."""
+    frequency: Frequency = 3
+    """How often it moves (1-8)."""
+    speed: Speed = 3
+    """Movement speed (1 = 1/8 ... 4 = normal ... 6 = x4)."""
+    # direction and route are set on each page: @page(direction="left", route=route(...))
+
+
+class _EventDecorator(Protocol):
+    @overload
+    def __call__(self, cls: type[_E], /) -> _E: ...
+    @overload
+    def __call__(self, fn: Callable[[], None], /) -> Character: ...
+
+
+def event(id: int | None = None, name: str = "", x: int = 0, y: int = 0) -> _EventDecorator:
+    """A map event, on its class: ``@event(30, "Gary", x=17, y=16)`` then
+    ``class Gary(Event):`` (see Event).
 
     Args:
         id: event id; leave it out for a new event: the lowest free id is
@@ -1436,7 +1502,7 @@ def event(id: int | None = None, name: str = "", x: int = 0, y: int = 0) -> Call
         name: name shown in the editor.
         x, y: tile position on the map.
     """
-    return lambda fn: fn
+    return lambda fn: fn  # type: ignore[return-value]
 
 
 def page(
@@ -1465,8 +1531,11 @@ def page(
     timer: int | None = None,
     timer2: int | None = None,
 ) -> Callable[[_F], _F]:
-    """An event page.  Pages are listed in order; the last page whose
-    conditions hold is the active one.
+    """The condition and settings of an event page (a ``page_N`` function of
+    the event's class).  Pages are listed in order, page_1 first; the last page
+    whose conditions hold is the active one.  A setting left out is the class's
+    (see Event), else the default below; a page with no condition and the
+    class's settings needs no ``@page``.
 
     Args:
         when: conditions joined with ``and``: up to two ``switches[id]``,
@@ -1475,7 +1544,7 @@ def page(
             ``timer1.seconds <= n``, ``timer2.seconds <= n``.
         sprite: ("CharSet", 0-7), the event's graphic; the index counts the
             8 characters of the image left to right, top to bottom (see
-            SpriteIndex).
+            SpriteIndex).  ``sprite=None``: no graphic (when the class has one).
         tile: a tile of the chipset as graphic, instead of a sprite.
         direction: facing direction of the graphic.
         pattern: animation frame shown when standing still.
@@ -1487,8 +1556,9 @@ def page(
         move_type: automatic movement; "custom" follows ``route``.
         frequency: how often it moves (1-8).
         speed: movement speed (1 = 1/8 ... 4 = normal ... 6 = x4).
-        route: route(...) followed when move_type="custom".
-        id: page number when pages are not numbered 1, 2, 3...
+        route: route(...) followed when move_type="custom"; ``route=None``: no
+            route (when the class has one).
+        id: the page's stored number, when pages are not numbered 1, 2, 3...
         raw: the body is raw cmd(..., indent=N) lines (set by rpgsync).
         switch_b: the editor's second switch slot, for pages that leave the
             first one unchecked (``when`` puts a single switch in the first
@@ -1562,7 +1632,7 @@ def comment(*lines: str, split: bool = True) -> None:
     script does the same; DynRPG plugin calls are written ``dyn.function(...)``."""
 
 
-def face(faceset: str | None, index: int | None = None, right: bool | None = None, flip: bool | None = None) -> None:
+def face(faceset: str | None, index: Fixed | None = None, right: bool | None = None, flip: bool | None = None) -> None:
     """Set the face shown in messages (it narrows the text area).
 
     Args:
@@ -1589,7 +1659,7 @@ def message_options(
     """
 
 
-def show_choices(*options: str, cancel: CancelOption | None = None, summary: str | None = None) -> str:
+def show_choices(*options: str, cancel: CancelOption | Dynamic | None = None, summary: str | None = None) -> str:
     """Show Choices (up to 4), written as a match statement::
 
         match show_choices("Yes", "No"):
@@ -1657,24 +1727,24 @@ def equip(actor: ActorTarget, item: Number, *, extra: Extra = ()) -> None:
     """Equip an item (taken from the inventory)."""
 
 
-def unequip(actor: ActorTarget, slot: EquipSlot, p4: int | None = None, *, extra: Extra = ()) -> None:
+def unequip(actor: ActorTarget, slot: EquipSlot, p4: Fixed | None = None, *, extra: Extra = ()) -> None:
     """Remove equipment from one slot or all of them."""
 
 
-def add_state(actor: ActorTarget, state: int, *, extra: Extra = ()) -> None:
+def add_state(actor: ActorTarget, state: Fixed, *, extra: Extra = ()) -> None:
     """Inflict a state (dead, poison, sleep...)."""
 
 
-def remove_state(actor: ActorTarget, state: int, *, extra: Extra = ()) -> None:
+def remove_state(actor: ActorTarget, state: Fixed, *, extra: Extra = ()) -> None:
     """Cure a state."""
 
 
 def simulate_attack(
     actor: ActorTarget,
-    attack: int | None = None,
-    defense: int | None = None,
-    spirit: int | None = None,
-    variance: int | None = None,
+    attack: Fixed | None = None,
+    defense: Fixed | None = None,
+    spirit: Fixed | None = None,
+    variance: Fixed | None = None,
     store_damage: Variable | None = None,
     use_store_damage: bool | None = None,
     *,
@@ -1692,7 +1762,7 @@ def simulate_attack(
 
 def change_class(
     actor: ActorTarget,
-    class_id: int,
+    class_id: Fixed,
     reset_level: bool | None = None,
     skills: SkillMode | None = None,
     stats: StatMode | None = None,
@@ -1711,16 +1781,16 @@ def change_class(
     """
 
 
-def add_battle_command(actor: ActorTarget, command: int, *, extra: Extra = ()) -> None:
+def add_battle_command(actor: ActorTarget, command: Fixed, *, extra: Extra = ()) -> None:
     """Add a battle command to the hero's menu (2003)."""
 
 
-def remove_battle_command(actor: ActorTarget, command: int, *, extra: Extra = ()) -> None:
+def remove_battle_command(actor: ActorTarget, command: Fixed, *, extra: Extra = ()) -> None:
     """Remove a battle command (2003); command 0 removes all."""
 
 
 def enter_hero_name(
-    actor: int | None, charset: int | None = None, use_current_name: bool | None = None, *, extra: Extra = ()
+    actor: Fixed | None, charset: Fixed | None = None, use_current_name: bool | None = None, *, extra: Extra = ()
 ) -> None:
     """Open the name entry screen.
 
@@ -1739,10 +1809,10 @@ def enter_hero_name(
 def set_system_bgm(
     context: BgmContext,
     name: str,
-    fade: int | None = None,
-    volume: int | None = None,
-    tempo: int | None = None,
-    balance: int | None = None,
+    fade: Fixed | None = None,
+    volume: Fixed | None = None,
+    tempo: Fixed | None = None,
+    balance: Fixed | None = None,
     *,
     extra: Extra = (),
 ) -> None:
@@ -1752,9 +1822,9 @@ def set_system_bgm(
 def set_system_se(
     context: SeContext,
     name: str,
-    volume: int | None = None,
-    tempo: int | None = None,
-    balance: int | None = None,
+    volume: Fixed | None = None,
+    tempo: Fixed | None = None,
+    balance: Fixed | None = None,
     *,
     extra: Extra = (),
 ) -> None:
@@ -1780,7 +1850,7 @@ def set_transition(kind: TransitionKind, transition: Transition, *, extra: Extra
 # ==========================================================================
 
 
-def teleport(map: int, x: int, y: int, direction: TeleportDirection = "retain") -> None:
+def teleport(map: Fixed, x: Fixed, y: Fixed, direction: TeleportDirection = "retain") -> None:
     """Teleport the party to another map position."""
 
 
@@ -1797,7 +1867,7 @@ def toggle_vehicle(*, extra: Extra = ()) -> None:
 
 
 def set_vehicle_location(
-    vehicle: Literal["party", "boat", "ship", "airship"] | int,  # int: a value the editor cannot set
+    vehicle: Literal["party", "boat", "ship", "airship"] | Fixed,  # int: a value the editor cannot set
     map: Number,
     x: Number,
     y: Number,
@@ -1812,7 +1882,7 @@ def swap_events(first: Character, second: Character, *, extra: Extra = ()) -> No
     """Swap the positions of two events of the map."""
 
 
-def set_tileset(chipset: int, *, extra: Extra = ()) -> None:
+def set_tileset(chipset: Fixed, *, extra: Extra = ()) -> None:
     """Change the map's chipset (tileset)."""
 
 
@@ -1821,34 +1891,34 @@ def set_panorama(
     scroll_x: bool | None = None,
     scroll_y: bool | None = None,
     auto_scroll_x: bool | None = None,
-    speed_x: int | None = None,
+    speed_x: Fixed | None = None,
     auto_scroll_y: bool | None = None,
-    speed_y: int | None = None,
+    speed_y: Fixed | None = None,
     *,
     extra: Extra = (),
 ) -> None:
     """Change the panorama (parallax background) of the map."""
 
 
-def set_encounter_rate(steps: int, *, extra: Extra = ()) -> None:
+def set_encounter_rate(steps: Fixed, *, extra: Extra = ()) -> None:
     """Average number of steps between random battles (0 = none)."""
 
 
-def replace_tile(layer: Literal["lower", "upper"], old: int, new: int, *, extra: Extra = ()) -> None:
+def replace_tile(layer: Literal["lower", "upper"], old: Fixed, new: Fixed, *, extra: Extra = ()) -> None:
     """Replace every tile `old` by tile `new` on a layer of the map."""
 
 
 def add_teleport_target(
-    map: int, x: int, y: int, switch: int | None = None, use_switch: bool | None = None, *, extra: Extra = ()
+    map: Fixed, x: Fixed, y: Fixed, switch: Fixed | None = None, use_switch: bool | None = None, *, extra: Extra = ()
 ) -> None:
     """Add a destination for teleport skills (optionally turning a switch ON)."""
 
 
 def remove_teleport_target(
-    map: int,
-    x: int | None = None,
-    y: int | None = None,
-    switch: int | None = None,
+    map: Fixed,
+    x: Fixed | None = None,
+    y: Fixed | None = None,
+    switch: Fixed | None = None,
     use_switch: bool | None = None,
     *,
     extra: Extra = (),
@@ -1857,7 +1927,7 @@ def remove_teleport_target(
 
 
 def set_escape_target(
-    map: int, x: int, y: int, switch: int | None = None, use_switch: bool | None = None, *, extra: Extra = ()
+    map: Fixed, x: Fixed, y: Fixed, switch: Fixed | None = None, use_switch: bool | None = None, *, extra: Extra = ()
 ) -> None:
     """Set where escape skills lead (optionally turning a switch ON)."""
 
@@ -1885,10 +1955,10 @@ def show_screen(transition: Transition = "default") -> None:
 
 
 def tint_screen(
-    red: int | None = None,
-    green: int | None = None,
-    blue: int | None = None,
-    saturation: int | None = None,
+    red: Fixed | None = None,
+    green: Fixed | None = None,
+    blue: Fixed | None = None,
+    saturation: Fixed | None = None,
     duration: float | None = None,
     wait: bool | None = None,
     extra: Extra = (),
@@ -1897,10 +1967,10 @@ def tint_screen(
 
 
 def flash_screen(
-    red: int | None = None,
-    green: int | None = None,
-    blue: int | None = None,
-    strength: int | None = None,
+    red: Fixed | None = None,
+    green: Fixed | None = None,
+    blue: Fixed | None = None,
+    strength: Fixed | None = None,
     duration: float | None = None,
     wait: bool | None = None,
     mode: FlashMode | None = None,
@@ -1910,8 +1980,8 @@ def flash_screen(
 
 
 def shake_screen(
-    strength: int | None = None,
-    speed: int | None = None,
+    strength: Fixed | None = None,
+    speed: Fixed | None = None,
     duration: float | None = None,
     wait: bool | None = None,
     mode: FlashMode | None = None,
@@ -1920,19 +1990,19 @@ def shake_screen(
     """Shake Screen (strength and speed 1-9); mode begin/end shakes until stopped (2003)."""
 
 
-def pan_screen(direction: Direction, distance: int, speed: int = 3, wait: bool = False) -> None:
+def pan_screen(direction: Direction, distance: Fixed, speed: Fixed = 3, wait: bool = False) -> None:
     """Scroll the view by `distance` tiles away from the hero."""
 
 
-def reset_screen_pan(speed: int = 3, wait: bool = False, direction: Direction = "up", distance: int = 0) -> None:
+def reset_screen_pan(speed: Fixed = 3, wait: bool = False, direction: Direction = "up", distance: Fixed = 0) -> None:
     """Scroll the view back to the hero."""
 
 
-def lock_screen(direction: Direction = "up", distance: int = 0, speed: int = 0, wait: bool = False) -> None:
+def lock_screen(direction: Direction = "up", distance: Fixed = 0, speed: Fixed = 0, wait: bool = False) -> None:
     """Lock the view: it stops following the hero."""
 
 
-def unlock_screen(direction: Direction = "up", distance: int = 0, speed: int = 0, wait: bool = False) -> None:
+def unlock_screen(direction: Direction = "up", distance: Fixed = 0, speed: Fixed = 0, wait: bool = False) -> None:
     """Unlock the view: it follows the hero again."""
 
 
@@ -1945,7 +2015,7 @@ def weather(kind: WeatherKind, strength: Strength = "weak") -> None:
 # ==========================================================================
 
 
-def play_bgm(name: str, fade: int = 0, volume: int = 100, tempo: int = 100, balance: int = 50) -> None:
+def play_bgm(name: str, fade: Fixed = 0, volume: Fixed = 100, tempo: Fixed = 100, balance: Fixed = 50) -> None:
     """Play a music of the Music folder (MIDI, WAV, MP3, OGG).
 
     Args:
@@ -1956,7 +2026,7 @@ def play_bgm(name: str, fade: int = 0, volume: int = 100, tempo: int = 100, bala
     """
 
 
-def play_se(name: str, volume: int = 100, tempo: int = 100, balance: int = 50) -> MoveStep:
+def play_se(name: str, volume: Fixed = 100, tempo: Fixed = 100, balance: Fixed = 50) -> MoveStep:
     """Play a sound effect of the Sound folder ("(OFF)" stops all sounds).
     RPG_RT plays at most 4 sounds at once.  Also usable as a move step."""
     return MoveStep()
@@ -1975,7 +2045,13 @@ def play_memorized_bgm() -> None:
 
 
 def play_movie(
-    name: str, *, x: Number = 0, y: Number = 0, width: int | None = None, height: int | None = None, extra: Extra = ()
+    name: str,
+    *,
+    x: Number = 0,
+    y: Number = 0,
+    width: Fixed | None = None,
+    height: Fixed | None = None,
+    extra: Extra = (),
 ) -> None:
     """Play a movie (.avi) of the Movie folder at a position and size."""
 
@@ -1990,11 +2066,11 @@ def wait(seconds: float = 0, key: bool = False) -> None:
     ``wait(key=True)`` waits for a key press (2003)."""
 
 
-def label(id: int) -> None:
+def label(id: Fixed) -> None:
     """A jump target for goto(id); with duplicates only the first counts."""
 
 
-def goto(id: int) -> None:
+def goto(id: Fixed) -> None:
     """Jump to label(id)."""
 
 
@@ -2052,7 +2128,7 @@ def start_battle(
     first_strike: bool | None = None,
     condition: Literal["none", "initiative", "back_attack", "surround", "pincer"] | None = None,
     formation: Literal["terrain", "loose", "tight"] | None = None,
-    terrain: int | None = None,
+    terrain: Fixed | None = None,
     image: str | None = None,
     extra: Extra = (),
 ) -> str:
@@ -2078,9 +2154,9 @@ def open_shop(
     items: list[int],
     *,
     mode: Literal["buy_sell", "buy", "sell"] | None = None,
-    style: int | None = None,
+    style: Fixed | None = None,
     branches: bool | None = None,
-    p3: int | None = None,
+    p3: Fixed | None = None,
     extra: Extra = (),
 ) -> str:
     """Open a shop selling `items`.  For branches use
@@ -2093,7 +2169,7 @@ def open_shop(
     return ""
 
 
-def inn(price: int, *, style: int | None = None, branches: bool | None = None, extra: Extra = ()) -> str:
+def inn(price: Fixed, *, style: Fixed | None = None, branches: bool | None = None, extra: Extra = ()) -> str:
     """Offer a night at the inn.  For branches use ``match inn(50):`` with
     ``case "stayed":`` / ``case "declined":``.
 
@@ -2109,7 +2185,7 @@ def set_battle_background(name: str, *, extra: Extra = ()) -> None:
 
 
 def show_battle_animation(
-    animation: int, target: int, wait: bool | None = None, allies: bool | None = None, *, extra: Extra = ()
+    animation: Fixed, target: Fixed, wait: bool | None = None, allies: bool | None = None, *, extra: Extra = ()
 ) -> None:
     """Show a battle animation on an enemy (in battle; 2003 can target allies)."""
 
@@ -2118,13 +2194,13 @@ def end_battle(*, extra: Extra = ()) -> None:
     """End the current battle."""
 
 
-def battle_call_common_event(common_event: int, *, extra: Extra = ()) -> None:
+def battle_call_common_event(common_event: Fixed, *, extra: Extra = ()) -> None:
     """Call a common event from a battle (2003)."""
 
 
 def force_flee(
     who: Literal["party", "all_enemies", "enemy"],
-    enemy: int | None = None,
+    enemy: Fixed | None = None,
     ignore_conditions: bool | None = None,
     *,
     extra: Extra = (),
@@ -2132,7 +2208,7 @@ def force_flee(
     """Make the party or enemies flee (2003)."""
 
 
-def enable_combo(actor: int, command: int, times: int, *, extra: Extra = ()) -> None:
+def enable_combo(actor: Fixed, command: Fixed, times: Fixed, *, extra: Extra = ()) -> None:
     """Let a hero use a battle command several times per turn (2003)."""
 
 
@@ -2149,3 +2225,246 @@ def cmd(
     opens a block for commands that have one.  rpgsync uses it only for
     patch commands (Maniac, EasyRPG) and unusual data."""
     return nullcontext()
+
+
+# What `from rpgsync.dsl import *` gives the scripts (tests/test_scaffold.py keeps it
+# complete).  Left out: CommonEvents, which database/common_events.py defines, and
+# the typing helpers.
+__all__ = [
+    "Actor",
+    "ActorTarget",
+    "Actors",
+    "AnimationType",
+    "BgmContext",
+    "CancelOption",
+    "Character",
+    "CommandName",
+    "CommonEvent",
+    "CommonEventFunction",
+    "CommonEventTable",
+    "CommonEventTrigger",
+    "Condition",
+    "Counter",
+    "Digits",
+    "Direction",
+    "DynRPG",
+    "DynToken",
+    "Enemies",
+    "Enemy",
+    "EquipSlot",
+    "Event",
+    "Events",
+    "Extra",
+    "FaceIndex",
+    "FlashMode",
+    "Frequency",
+    "GameState",
+    "Item",
+    "Items",
+    "Layer",
+    "ManiacPatch",
+    "ManiacValue",
+    "MessagePosition",
+    "MoveStep",
+    "MoveType",
+    "N",
+    "NV",
+    "NVV",
+    "Number",
+    "Party",
+    "Pattern",
+    "Percent",
+    "Picture",
+    "PictureEffect",
+    "Pictures",
+    "PlayerCharacter",
+    "Route",
+    "SeContext",
+    "SkillMode",
+    "Speed",
+    "SpriteIndex",
+    "Stat",
+    "StatMode",
+    "Strength",
+    "Switch",
+    "SwitchRange",
+    "Switches",
+    "TeleportDirection",
+    "ThisEvent",
+    "Timer",
+    "Transition",
+    "TransitionKind",
+    "Trigger",
+    "TroopEventTable",
+    "V",
+    "VV",
+    "VVV",
+    "Value",
+    "Variable",
+    "VariableRange",
+    "Variables",
+    "Vehicle",
+    "VehicleCharacter",
+    "WeatherKind",
+    "actors",
+    "add_battle_command",
+    "add_state",
+    "add_teleport_target",
+    "airship",
+    "battle_call_common_event",
+    "battle_condition",
+    "bgm_looped",
+    "boat",
+    "break_loop",
+    "change_class",
+    "change_exp",
+    "change_graphic",
+    "change_hp",
+    "change_level",
+    "change_sp",
+    "change_stat",
+    "cmd",
+    "comment",
+    "common_event",
+    "cond",
+    "dyn",
+    "enable_combo",
+    "end_battle",
+    "enemies",
+    "enter_hero_name",
+    "equip",
+    "erase_screen",
+    "event",
+    "event_id_at",
+    "events",
+    "exit_game",
+    "face",
+    "face_away_from_player",
+    "face_down",
+    "face_left",
+    "face_player",
+    "face_random",
+    "face_right",
+    "face_up",
+    "fade_out_bgm",
+    "fatigue",
+    "flash_screen",
+    "force_flee",
+    "forget_skill",
+    "frequency_down",
+    "frequency_up",
+    "full_heal",
+    "game",
+    "game_over",
+    "goto",
+    "halt_all_movement",
+    "inn",
+    "input_number",
+    "items",
+    "jump_end",
+    "jump_start",
+    "key_input",
+    "label",
+    "learn_skill",
+    "lock_facing",
+    "lock_screen",
+    "maniac",
+    "memorize_bgm",
+    "memorize_location",
+    "message_options",
+    "move",
+    "move_away_from_player",
+    "move_down",
+    "move_down_left",
+    "move_down_right",
+    "move_forward",
+    "move_left",
+    "move_random",
+    "move_right",
+    "move_toward_player",
+    "move_up",
+    "move_up_left",
+    "move_up_right",
+    "n",
+    "nv",
+    "nvv",
+    "open_load_menu",
+    "open_main_menu",
+    "open_save_menu",
+    "open_shop",
+    "open_video_options",
+    "page",
+    "pan_screen",
+    "party",
+    "pause",
+    "percent",
+    "phasing_off",
+    "phasing_on",
+    "pictures",
+    "play_bgm",
+    "play_memorized_bgm",
+    "play_movie",
+    "play_se",
+    "player",
+    "randint",
+    "recall_location",
+    "remove_battle_command",
+    "remove_state",
+    "remove_teleport_target",
+    "replace_tile",
+    "reset_screen_pan",
+    "return_to_title",
+    "route",
+    "set_battle_background",
+    "set_encounter_rate",
+    "set_escape_target",
+    "set_panorama",
+    "set_system_bgm",
+    "set_system_graphics",
+    "set_system_se",
+    "set_tileset",
+    "set_transition",
+    "set_vehicle_location",
+    "shake_screen",
+    "ship",
+    "show_battle_animation",
+    "show_choices",
+    "show_screen",
+    "simulate_attack",
+    "speed_down",
+    "speed_up",
+    "start_animation",
+    "start_battle",
+    "started_by_action_key",
+    "stop_animation",
+    "swap_events",
+    "switch_off",
+    "switch_on",
+    "teleport",
+    "terrain_id",
+    "text",
+    "this",
+    "timer1",
+    "timer2",
+    "tint_screen",
+    "toggle_atb_mode",
+    "toggle_fullscreen",
+    "toggle_vehicle",
+    "transparency_down",
+    "transparency_up",
+    "troop",
+    "turn",
+    "turn_around",
+    "turn_left",
+    "turn_random",
+    "turn_right",
+    "unequip",
+    "unlock_facing",
+    "unlock_screen",
+    "v",
+    "vv",
+    "vvv",
+    "wait",
+    "wait_for_movement",
+    "weather",
+]

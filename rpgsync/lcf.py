@@ -322,11 +322,6 @@ SCHEMA: dict[str, dict[int, tuple[str, str]]] = {
         0x0C: ("event_commands", "commands"),
     },
     "TreeMap": {},
-    "MapInfo": {
-        0x01: ("name", "str"),
-        0x02: ("parent_map", "int"),
-        0x04: ("type", "int"),
-    },
 }
 
 # Default values (liblcf generator/csv/fields.csv), used when a chunk is absent.
@@ -362,7 +357,6 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "CommonEvent": {"name": b"", "trigger": 5, "switch_flag": False, "switch_id": 1},
     "Named": {"name": b""},
     "Map": {"chipset_id": 1, "width": 20, "height": 15, "save_count": 0, "save_count_2k3e": 0},
-    "MapInfo": {"name": b"", "parent_map": 0, "type": -1},
 }
 
 # Fields that store the byte size of the following field.
@@ -697,12 +691,14 @@ class LcfFile(BaseModel):
             if root_name is None:
                 raise LcfError("unsupported LCF file type %r" % header)
         if root_name == "TreeMap":
-            # The map tree is not chunked at top level; we only need map names.
+            # The map tree is not chunked at top level: see MapTree.
             return cls(header=header, root=Struct("TreeMap", [Chunk(-1, data[r.pos :])], False))
         root = read_struct(r, root_name)
         return cls(header=header, root=root, trailer=data[r.pos :])
 
     def to_bytes(self) -> bytes:
+        if self.root.name == "TreeMap":  # kept raw, see parse
+            return ber(len(self.header)) + self.header + b"".join(c.raw or b"" for c in self.root.chunks)
         return ber(len(self.header)) + self.header + write_struct(self.root) + self.trailer
 
     def save(self, path: str) -> None:
@@ -720,6 +716,51 @@ class LcfFile(BaseModel):
             if os.path.exists(tmp):
                 os.unlink(tmp)
             raise
+
+
+class MapTree(BaseModel):
+    """RPG_RT.lmt: the map tree.  Unlike the other files it is not one chunked
+    structure: the MapInfo array, the tree order (map ids as the editor lists
+    them), the selected node, then the start positions (a chunked Start)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    header: bytes = b"LcfMapTree"
+    maps: list[ArrayItem]
+    tree_order: list[int]
+    active_node: int = 0
+    start: Struct
+    trailer: bytes = b""  # bytes after the start positions (should be empty)
+
+    @classmethod
+    def load(cls, path: str) -> MapTree:
+        with open(path, "rb") as f:
+            return cls.parse(f.read())
+
+    @classmethod
+    def parse(cls, data: bytes) -> MapTree:
+        r = Reader(data)
+        header = r.take(r.ber())
+        if header != b"LcfMapTree" and not (len(header) == 10 and header.isalpha()):  # see LcfFile.parse
+            raise LcfError("not a map tree: %r" % header)
+        maps = read_array(r, "MapInfo")
+        order = [r.ber() for _ in range(r.ber())]
+        active = r.ber()
+        start = read_struct(r, "Start")
+        return cls(header=header, maps=maps, tree_order=order, active_node=active, start=start, trailer=data[r.pos :])
+
+    def to_bytes(self) -> bytes:
+        out = bytearray(ber(len(self.header)) + self.header)
+        out += write_array(self.maps)
+        out += ber(len(self.tree_order))
+        for map_id in self.tree_order:
+            out += ber(map_id)
+        out += ber(self.active_node)
+        out += write_struct(self.start)
+        return bytes(out) + self.trailer
+
+    def info(self, map_id: int) -> Struct | None:
+        return next((it.struct for it in self.maps if it.id == map_id), None)
 
 
 def read_map_tree_names(path: str) -> dict[int, bytes]:
@@ -740,14 +781,15 @@ def read_map_tree_names(path: str) -> dict[int, bytes]:
 
 
 def _register_db_schema() -> None:
-    """Add the database tables' structures to SCHEMA / DEFAULTS / SIZE_FIELDS.
+    """Add the database tables' structures (and the map tree's: MapInfo, Start)
+    to SCHEMA / DEFAULTS / SIZE_FIELDS.
 
     Structures already described above (CommonEvent, ...) are left alone;
     unexported tables (animations, terms, system, ...) stay raw.  The condition
     of troop pages is added too, for the troop events (it is not a table field)."""
     from . import dbschema
 
-    for sname in [*dbschema.MODEL_STRUCTS, "TroopPageCondition"]:
+    for sname in [*dbschema.MODEL_STRUCTS, "TroopPageCondition"]:  # (and the map tree's)
         if sname in SCHEMA:
             continue
         fields: dict[int, tuple[str, str]] = {}
@@ -763,7 +805,10 @@ def _register_db_schema() -> None:
                 continue
             fields[f.id] = (f.name, f.kind)
             if f.kind in ("int", "bool") and f.default == f.default_2k3:
-                defaults[f.name] = f.default
+                d = f.default
+                if f.model.startswith("enum:") and isinstance(d, str):
+                    d = dbschema.ENUMS[f.model[5:]][d]
+                defaults[f.name] = d
             elif f.kind == "str":
                 defaults[f.name] = f.default.encode("ascii")
             elif f.kind in VECTOR_FORMATS:

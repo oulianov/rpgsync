@@ -169,6 +169,8 @@ def evaluate(node: ast.AST):
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name) and node.value.id in ("variables", "switches", "common_events"):
             return _named_ref(node)
+        if isinstance(node.value, ast.Name) and node.value.id == "maps":
+            return _map_id(node)
         return Attr(obj=evaluate(node.value), name=node.attr, node=node)
     if isinstance(node, ast.Compare):
         if len(node.ops) != 1:
@@ -270,17 +272,75 @@ def is_int(v) -> bool:
 _NONE: Mapping = MappingProxyType({})
 _EVENT_NAMES: ContextVar[Mapping[int, str]] = ContextVar("event_names", default=_NONE)  # id -> name (decompile)
 _EVENT_IDS: ContextVar[Mapping[str, int | None]] = ContextVar("event_ids", default=_NONE)  # name -> id (compile)
+# event name -> its page functions: name -> page number (compile: gary.accusation() is Call Event page 3)
+_EVENT_PAGES: ContextVar[Mapping[str, Mapping[str, int]]] = ContextVar("event_pages", default=_NONE)
+_EVENT_PAGE_COUNTS: ContextVar[Mapping[int, int]] = ContextVar(
+    "event_page_counts", default=_NONE
+)  # id -> pages (decompile)
 
 
 @contextmanager
-def map_events(names: dict[int, str] | None = None, ids: dict[str, int | None] | None = None):
+def map_events(
+    names: dict[int, str] | None = None,
+    ids: dict[str, int | None] | None = None,
+    pages: dict[str, dict[str, int]] | None = None,
+    page_counts: dict[int, int] | None = None,
+):
     """Make the events of one map file available by name while converting it."""
     t1, t2 = _EVENT_NAMES.set(names or {}), _EVENT_IDS.set(ids or {})
+    t3, t4 = _EVENT_PAGES.set(pages or {}), _EVENT_PAGE_COUNTS.set(page_counts or {})
     try:
         yield
     finally:
         _EVENT_NAMES.reset(t1)
         _EVENT_IDS.reset(t2)
+        _EVENT_PAGES.reset(t3)
+        _EVENT_PAGE_COUNTS.reset(t4)
+
+
+# The event whose pages are being converted: (class name, id); ``self`` in its pages
+_SELF_EVENT: ContextVar[tuple[str, int | None] | None] = ContextVar("self_event", default=None)
+
+
+@contextmanager
+def current_event(name: str, eid: int | None):
+    """Convert the pages of one event: ``self`` is that event."""
+    token = _SELF_EVENT.set((name, eid))
+    try:
+        yield
+    finally:
+        _SELF_EVENT.reset(token)
+
+
+def _event_of(t) -> str | None:
+    """The class name of the map event a Sym names (``self``: the current event)."""
+    if not isinstance(t, Sym) or t.name in CHARACTER_IDS:
+        return None
+    if t.name == "self":
+        cur = _SELF_EVENT.get()
+        return cur[0] if cur else None
+    return t.name if t.name in _EVENT_IDS.get() else None
+
+
+_PAGE_NAME = re.compile(r"page_(\d+)")
+
+
+def page_number(event: str, name: str, node=None) -> int | None:
+    """``gary.page_3()``: the number of the page `name` of the map event `event` (its
+    position in the script, page_N otherwise), None when `name` is not a page."""
+    pages = _EVENT_PAGES.get().get(event)
+    if pages is not None and name in pages:
+        return pages[name]
+    m = _PAGE_NAME.fullmatch(name)
+    if m is None:
+        return None
+    if pages is not None:
+        raise CompileError(
+            "%s has no %s (its pages: %s); %s.call(%s) runs a page by its number"
+            % (event, name, ", ".join(pages) or "none", event, m.group(1)),
+            node,
+        )
+    return int(m.group(1))
 
 
 _DB_NAMES: ContextVar[Mapping[str, Mapping[int, str]]] = ContextVar("db_names", default=_NONE)
@@ -312,6 +372,20 @@ def sw_src(n: int) -> str:
     return "switches.%s" % name if name else "switches[%d]" % n
 
 
+def map_src(n: int) -> str:
+    """A map id as written in scripts: ``maps.relm`` (its attribute in database/map_tree.py)."""
+    name = _DB_NAMES.get().get("maps", _NONE).get(n)
+    return "maps.%s" % name if name else str(n)
+
+
+def _map_id(node: ast.Attribute) -> int:
+    """``maps.relm`` -> the id of that map"""
+    for n, name in _DB_NAMES.get().get("maps", _NONE).items():
+        if name == node.attr:
+            return n
+    raise CompileError("no map named %r in database/map_tree.py (deleted, or renamed there?)" % node.attr, node)
+
+
 def _named_ref(node: ast.Attribute) -> Ref:
     """``variables.code_voulu`` -> Ref(variables, 32)"""
     coll = node.value.id  # type: ignore[attr-defined]
@@ -328,6 +402,9 @@ def event_name(cid: int) -> str | None:
 
 
 def char_src(cid: int) -> str:
+    cur = _SELF_EVENT.get()
+    if cur is not None and cur[1] == cid:
+        return "self"
     return CHARACTERS.get(cid) or event_name(cid) or "events[%d]" % cid
 
 
@@ -336,6 +413,11 @@ def char_id(v) -> int | None:
     if isinstance(v, Sym):
         if v.name in CHARACTER_IDS:
             return CHARACTER_IDS[v.name]
+        cur = _SELF_EVENT.get()
+        if v.name == "self" and cur is not None:
+            if cur[1] is None:
+                raise _err("event %s has no id yet: give it one in @event(...) to use self" % cur[0], v)
+            return cur[1]
         ids = _EVENT_IDS.get()
         if v.name in ids:
             if ids[v.name] is None:
@@ -788,6 +870,10 @@ def decode_stmt(c: Command, ctx: Ctx, in_loop: bool = False) -> str | None:
         if kind == 0 and b == 0:
             return "%s()" % ce_src(a)
         if kind == 1:
+            cur = _SELF_EVENT.get()
+            name = "self" if cur is not None and cur[1] == a else event_name(a)
+            if name and 1 <= b <= _EVENT_PAGE_COUNTS.get().get(a, 0):
+                return "%s.page_%d()" % (name, b)  # a page of this event, or of a named event of this map
             return "%s.call(%d)" % (char_src(a), b)
         if kind == 2:
             return "events[%s].call(%s)" % (var_src(a), var_src(b))
@@ -967,6 +1053,15 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
         if cmd is not None:
             return cmd
         t = call.target
+        event = _event_of(t)
+        if event is not None:
+            n = page_number(event, call.name, call.node)
+            if n is not None:  # Gary.page_3(), self.page_3(): Call Event
+                K.Args(call, [])
+                return C(12330, [1, need_char(t), n])
+        if isinstance(t, Sym) and t.name == "this" and _PAGE_NAME.fullmatch(call.name):
+            n = _PAGE_NAME.fullmatch(call.name).group(1)  # type: ignore[union-attr]
+            raise _err("this is whichever event runs the code: this.call(%s) runs its page %s" % (n, n), call)
         if isinstance(t, Sym) and t.name == "dyn":
             return C(12410, [], ctx.enc(dynrpg_text(call), stmt))
         if t is None:

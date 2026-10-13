@@ -140,6 +140,35 @@ class Unit:
         """The script once its specs are written into `data` (labels to update...)."""
         return text
 
+    def import_note(self) -> str | None:
+        """What after_import changed in the script, for the sync's message."""
+        return None
+
+    def export_warnings(self, data: bytes, old_text: str, new_text: str, st: dict | None) -> list[str]:
+        """Things to check in a script regenerated from the game (`old_text`: the script
+        before, as the last sync left it)."""
+        return []
+
+    def export_note(self, data: bytes, st: dict | None) -> str | None:
+        """Why the script is regenerated, when the game file itself did not change."""
+        return None
+
+    def watched(self) -> list[str]:
+        """Files whose change may change the script (watch syncs the unit again)."""
+        return [self.bin_path, self.py_path]
+
+    def state_extra(self) -> dict:
+        """More to remember of the last sync (see bin_changed)."""
+        return {}
+
+    def files_before_write(self, syncer: Syncer) -> list[str]:
+        """Write the files the new game data refers to (the maps a map tree adds)
+        -> their paths, removed again if the game file cannot be written."""
+        return []
+
+    def files_after_write(self, syncer: Syncer) -> None:
+        """Remove the files the new game data dropped (the maps a map tree deletes)."""
+
     def compile_part(self, src: str, whole: str) -> list:
         """Specs of the entries left in `src` (the others blanked out of `whole`)."""
         return self.compile(src)
@@ -239,6 +268,25 @@ class MapUnit(Unit):
         name = self.project.map_names().get(self.map_id)
         return "%s%s" % (self.name, " - " + name if name else "")
 
+    def watched(self):
+        return [self.bin_path, self.py_path, self.project.lmt_path]  # the title is the map tree's name
+
+    def state_extra(self):
+        return {"title": self.title()}
+
+    def bin_changed(self, data, st):
+        # renamed in the map tree: the script's title changes (states of an older
+        # rpgsync have no title: not a change)
+        return super().bin_changed(data, st) or (st is not None and st.get("title", self.title()) != self.title())
+
+    def decompile_since(self, data, text, st):
+        return _retitle(super().decompile_since(data, text, st), self.title())
+
+    def export_note(self, data, st):
+        if st is not None and st.get("bin") == self.fingerprint(data):
+            return "renamed in the map tree -> new title in %s" % os.path.basename(self.py_path)
+        return None
+
     def decompile(self, data):
         # the parsed map is not kept while formatting (decoded, a big map weighs ~90 MB)
         text = S.decompile_map(
@@ -256,14 +304,41 @@ class MapUnit(Unit):
         return {it.id: sha(write_struct(it.struct)) for it in LcfFile.parse(data).root.get("events")}
 
     def layout(self, data):
-        # an event refers to the others by their names; the title heads the script
+        # an event refers to the others by their names (the title is set apart, see _retitle)
         names = [(it.id, it.struct.get("name")) for it in LcfFile.parse(data).root.get("events")]
-        return _layout_sha(self.project, FORMAT, self.title(), names)
+        return _layout_sha(self.project, FORMAT, names)
 
     def entry_lines(self, data, ids):
         return S.decompile_map_events(LcfFile.parse(data).root, self.project.context(), ids)
 
+    def after_import(self, text, specs, data):
+        self._note = None
+        if S.old_event_form(text):  # events as an older rpgsync wrote them
+            self._note = "events rewritten as classes"
+            return self.decompile(data)
+        new_text, renamed = S.rename_pages(text)
+        if renamed:
+            self._note = "pages named by their number: %s" % ", ".join(renamed)
+        return new_text
+
+    def import_note(self):
+        return getattr(self, "_note", None)
+
+    def export_warnings(self, data, old_text, new_text, st):
+        # Call Event holds a page number: pages moved in the editor change what it runs
+        if not st or not st.get("entries") or S.old_event_form(old_text):
+            return []
+        hashes = self.entry_hashes(data)
+        changed = {eid for eid, h in hashes.items() if st["entries"].get(str(eid)) not in (None, h)}
+        if not changed:
+            return []
+        root = LcfFile.parse(data).root
+        ctx = self.project.context()
+        return S.renumbered_page_calls(old_text, new_text, root, changed, ctx, os.path.basename(self.py_path))
+
     def compile_incremental(self, text, base):
+        if S.page_renames(text):
+            return None  # pages renamed or moved: the calls to them are compiled anew everywhere
         part = S.incremental_source(text, base, "event", "")
         if part is None:
             return None
@@ -505,9 +580,130 @@ class DatabaseUnit(Unit):
         return f.to_bytes(), summary
 
 
+class MapTreeUnit(Unit):
+    """The map tree (RPG_RT.lmt) <-> Scripts/database/map_tree.py: the maps and areas,
+    their properties and order, and where a new game starts.  Adding a map creates
+    its file, removing one deletes its file and its script (see maptree.py)."""
+
+    kind = "maptree"
+    name = "database/map_tree"
+
+    def __init__(self, project: Project):
+        super().__init__(project)
+        self.bin_path = project.lmt_path
+        self.py_path = project.map_tree_script
+        self.new_names: dict[int, str] = {}
+        self.changes = None  # maptree.TreeChanges of the last apply
+
+    def decompile(self, data):
+        from . import maptree
+
+        # attribute names come from the current file: event scripts use them
+        keep = dict(self.new_names)
+        text = read_bytes(self.py_path)
+        if text is not None:
+            keep.update(maptree.read_identifiers(text.decode("utf-8", "replace")))
+        return self.formatted(maptree.decompile_map_tree(data, self.project.context(), keep))
+
+    def compile(self, text):
+        from . import maptree
+
+        return maptree.compile_map_tree(text, self.project.context(), self.py_path)
+
+    def compile_checked(self, text, data=None, base=None):
+        from . import db, maptree
+
+        specs, assigned = super().compile_checked(text, data, base)
+        if assigned:  # the new maps take their place in the tree, with the maps under them
+            entries = [s for s in specs if isinstance(s, db.MapInfo)]
+            order = next(s for s in specs if isinstance(s, maptree.TreeOrder))
+            maptree.resolve_parents(entries, order.pending)
+            order = maptree.order_of(entries, flat=order.flat)
+            specs = [order if isinstance(s, maptree.TreeOrder) else s for s in specs]
+        # maps that just got an id keep the attribute name they were given
+        self.new_names = {new_id: s._ident for s, new_id in assigned if getattr(s, "_ident", None)}
+        return specs, assigned
+
+    def specs_from_bin(self, data):
+        from . import maptree
+        from .lcf import MapTree
+
+        return maptree.specs_from_bin(MapTree.parse(data), self.project.context())
+
+    def after_import(self, text, specs, data):
+        from . import maptree
+
+        if any(isinstance(s, maptree.TreeOrder) and s.flat for s in specs):
+            return self.decompile(data)  # flat, as an older rpgsync wrote it: now nested
+        # "# New game: ..." follows new start positions and renames
+        return maptree.refresh_comments(text, data, self.project.context())
+
+    def fingerprint(self, data):
+        from . import maptree
+
+        return "missing" if data is None else sha(maptree.fingerprint(data))
+
+    def existing_ids(self, data):
+        # a new map takes no id of the tree, nor of a map file or a script left behind
+        from .lcf import MapTree
+
+        ids = {it.id for it in MapTree.parse(data).maps} | set(self.project.map_paths())
+        for name in os.listdir(self.project.script_dir) if os.path.isdir(self.project.script_dir) else []:
+            m = re.fullmatch(r"Map(\d{4})\.py", name)
+            if m:
+                ids.add(int(m.group(1)))
+        return sorted(ids)
+
+    def apply(self, data, specs):
+        from . import maptree
+        from .lcf import MapTree
+
+        tree = MapTree.parse(data)
+        ctx = self.project.context()
+        self.changes = maptree.apply_map_tree(tree, specs, ctx, ctx.engine)
+        summary = dict(self.changes.summary)
+        if self.changes.created:
+            summary["created"] = self.changes.created
+        if self.changes.deleted:
+            summary["deleted"] = self.changes.deleted
+        return tree.to_bytes(), summary
+
+    def files_before_write(self, syncer):
+        from .maptree import blank_map
+
+        made = []
+        existing = self.project.map_paths()
+        for mid in self.changes.created if self.changes else []:
+            if mid in existing:
+                continue  # a map file left out of the tree: the new entry takes it back
+            path = os.path.join(self.project.game_dir, "Map%04d.lmu" % mid)
+            write_atomic(path, blank_map())
+            made.append(path)
+        return made
+
+    def files_after_write(self, syncer):
+        existing = self.project.map_paths()
+        for mid in self.changes.deleted if self.changes else []:
+            for path in (existing.get(mid), self.project.script_for_map(mid)):
+                if path and os.path.exists(path):
+                    syncer.backup(path)
+                    os.remove(path)
+            syncer.state.forget("Map%04d" % mid)
+        self.changes = None
+
+
+def _retitle(text: str, title: str) -> str:
+    """The script with this title on its first line (the map renamed in the map tree)."""
+    first, sep, rest = text.partition("\n")
+    line = '"""%s"""' % title.replace('"""', "'''")
+    if first.startswith('"""Map') and first.endswith('"""') and first != line:
+        return line + sep + rest
+    return text
+
+
 # Version of the script layout.  Scripts written by an older rpgsync are
 # regenerated once (when they have no unsynced edits) so they get the new layout.
-FORMAT = 4
+FORMAT = 8
 
 
 def _layout_sha(project: Project, *key) -> str:
@@ -559,7 +755,7 @@ def insert_ids(text: str, assigned, decorator: str) -> str:
     edits = []
     by_line = {spec.lineno: new_id for spec, new_id in assigned}
     for stmt in ast.walk(tree):
-        if isinstance(stmt, ast.FunctionDef) and stmt.lineno in by_line:
+        if isinstance(stmt, (ast.FunctionDef, ast.ClassDef)) and stmt.lineno in by_line:
             for d in stmt.decorator_list:
                 if isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == decorator:
                     sep = ", " if (d.args or d.keywords) else ""
@@ -599,6 +795,7 @@ class State:
             "ctx": self.project.context_signature(),
             "format": FORMAT,
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            **unit.state_extra(),
         }
         hashes = unit.entry_hashes(bin_data)
         if hashes is not None:  # to regenerate only the entries the game changes next
@@ -610,6 +807,15 @@ class State:
         with open(base, "w", encoding="utf-8") as f:
             f.write(py_text)
         self.save()
+
+    def forget(self, name: str) -> None:
+        """Drop a unit whose files are gone (a deleted map)."""
+        if self.data.pop(name, None) is not None:
+            self.save()
+        try:
+            os.remove(os.path.join(self.base_dir, name + ".py"))
+        except OSError:
+            pass
 
     def base_text(self, unit: Unit) -> str | None:
         try:
@@ -667,6 +873,8 @@ class Syncer:
         out += [DatabaseUnit(self.project, t) for t in self._tables[1]]
         if "troops" in self._tables[1]:  # after troops.py: a troop it adds can get battle events in the same pass
             out.append(TroopEventsUnit(self.project))
+        if os.path.exists(self.project.lmt_path):  # before the maps: the maps it adds are synced next pass
+            out.append(MapTreeUnit(self.project))
         for map_id, path in self.project.map_paths().items():
             out.append(MapUnit(self.project, map_id, path))
         return out
@@ -701,8 +909,15 @@ class Syncer:
         if LcfFile.parse(data).to_bytes() != data:
             raise RuntimeError("internal error: generated %s does not re-read identically" % unit.bin_path)
         check_unchanged(unit.bin_path, expect)
-        self.backup(unit.bin_path)
-        write_atomic(unit.bin_path, data)
+        made = unit.files_before_write(self)
+        try:
+            self.backup(unit.bin_path)
+            write_atomic(unit.bin_path, data)
+        except BaseException:
+            for path in made:
+                os.remove(path)
+            raise
+        unit.files_after_write(self)
         if unit.kind == "common":
             self.project.context(refresh=True)
 
@@ -716,6 +931,15 @@ class Syncer:
             if summary.get(k):
                 note = notes.get(what, "") if k == "removed" else ""
                 parts.append("%s %s %s%s" % (k, what, ", ".join(map(str, summary[k])), note))
+        if summary.get("order"):
+            parts.append("new tree order")
+        if summary.get("start"):
+            parts.append("new start positions")
+        if summary.get("created"):
+            parts.append("created %s" % ", ".join("Map%04d.lmu" % m for m in summary["created"]))
+        if summary.get("deleted"):
+            files = ["Map%04d.lmu and Map%04d.py" % (m, m) for m in summary["deleted"]]
+            parts.append("deleted %s (backed up in .rpgsync/history)" % ", ".join(files))
         return "; ".join(parts) or "no changes"
 
     def check_engine(self, unit: Unit, specs: list, data: bytes) -> list[str]:
@@ -752,9 +976,11 @@ class Syncer:
             return Result(unit=unit.name, action="none", message="cannot sync yet (%s): trying again" % e, retry=True)
 
     def _sync(self, unit: Unit, prefer: str | None) -> Result:
-        what = {"map": "event", "common": "common event", "troop": "troop"}.get(unit.kind, "entry")
+        what = {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(unit.kind, "entry")
         data = read_bytes(unit.bin_path)
         if data is None:
+            if unit.kind == "map" and not os.path.exists(unit.py_path):
+                return Result(unit=unit.name, action="none")  # a map deleted in this pass
             return Result(unit=unit.name, action="none", message="game file missing")
         raw = read_bytes(unit.py_path)  # compared before writing: an edit made meanwhile is never overwritten
         text = None if raw is None else raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
@@ -795,15 +1021,15 @@ class Syncer:
             )
         if bin_changed and not py_changed:
             new_text = unit.decompile_since(data, text, st)
+            warnings = unit.export_warnings(data, text, new_text, st)
             self.write_script(unit, new_text, raw)
             self.state.record(unit, data, new_text)
             self._failed.pop(unit.name, None)
-            return Result(
-                unit=unit.name,
-                action="export",
-                message="%s changed in the editor -> regenerated %s"
-                % (os.path.basename(unit.bin_path), os.path.basename(unit.py_path)),
+            message = unit.export_note(data, st) or "%s changed in the editor -> regenerated %s" % (
+                os.path.basename(unit.bin_path),
+                os.path.basename(unit.py_path),
             )
+            return Result(unit=unit.name, action="export", message="\n  ".join([message, *warnings]))
 
         if self._failed.get(unit.name) == py_hash and prefer is None:
             return Result(unit=unit.name, action="none")  # same broken script as before; already reported
@@ -850,10 +1076,11 @@ class Syncer:
             new_data, summary = unit.apply(data, specs)
         except ValueError as e:  # e.g. size lowered below an entry still in use
             self._failed[unit.name] = py_hash
-            return Result(unit=unit.name, action="error", message="%s: %s" % (unit.py_path, e))
+            line = ":%d" % e.lineno if getattr(e, "lineno", None) else ""  # type: ignore[attr-defined]
+            return Result(unit=unit.name, action="error", message="%s%s: %s" % (unit.py_path, line, e))
         if new_data != data:
             self.write_bin(unit, new_data, data)
-        if assigned and not conflicts and unit.kind != "database":
+        if assigned and not conflicts and unit.kind not in ("database", "maptree"):
             text = insert_ids(text, assigned, unit.decorator or "event")
             check_unchanged(unit.py_path, raw)
             write_atomic(unit.py_path, text.encode("utf-8"))
@@ -891,7 +1118,7 @@ class Syncer:
                 )
                 return Result(unit=unit.name, action="conflict", message=msg)
             return Result(unit=unit.name, action="merge", message=msg)
-        if unit.kind == "database" and (summary.get("added") or summary.get("removed") or assigned):
+        if unit.kind in ("database", "maptree") and (summary.get("added") or summary.get("removed") or assigned):
             # show new entries with their id and the editor's defaults for omitted fields
             canonical = unit.decompile(new_data)
             if assigned or [s.key() for s in unit.compile(canonical)] != [s.key() for s in specs]:
@@ -905,6 +1132,9 @@ class Syncer:
         )
         if assigned:
             msg += " (new ids: %s)" % ", ".join(str(i) for _, i in assigned)
+        note = unit.import_note()
+        if note:
+            msg += "; " + note
         return Result(unit=unit.name, action="import", message=msg)
 
     def merge(self, unit: Unit, script_specs: list, data: bytes) -> tuple[list, list[int]]:
@@ -948,11 +1178,11 @@ class Syncer:
         first = first_pass
         if not first_pass:
             for unit in self.units():
-                seen[unit.name] = (_stat(unit.bin_path), _stat(unit.py_path))
+                seen[unit.name] = tuple(map(_stat, unit.watched()))
         while True:
             units = self.units()
             for unit in units:
-                sig = (_stat(unit.bin_path), _stat(unit.py_path))
+                sig = tuple(map(_stat, unit.watched()))
                 if first or seen.get(unit.name) != sig:
                     # debounce: act once a file has been stable for one interval
                     if pending.get(unit.name) == sig or first:
@@ -962,7 +1192,7 @@ class Syncer:
                         if not (r.retry and retried.get(unit.name) == r.message):
                             self.report(r)  # a retry reported once, not on every pass
                         retried[unit.name] = r.message if r.retry else None
-                        sig = (_stat(unit.bin_path), _stat(unit.py_path))
+                        sig = tuple(map(_stat, unit.watched()))
                         if r.retry:
                             seen.pop(unit.name, None)  # sync it again once its files settle
                         else:

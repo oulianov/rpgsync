@@ -636,7 +636,9 @@ def _teleport():
         kw = []
         if n == 4 and c.params[3]:
             kw.append(("direction", enum_name(TELEPORT_DIRECTIONS, c.params[3])))
-        return render_call("teleport", c.params[:3], kw)
+        from .pyexpr import map_src
+
+        return render_call("teleport", [Raw(src=map_src(c.params[0])), *c.params[1:3]], kw)
 
     def enc(call, ctx):
         a = Args(call, ["map", "x", "y", "direction"])

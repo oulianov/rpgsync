@@ -104,8 +104,8 @@ def test_new_event_gets_id_written_back(exported2003):
     before = set(_events(unit.bin_path))
     with open(unit.py_path, "a", encoding="utf-8") as f:
         f.write(
-            '\n\n@event(name="Guide", x=8, y=6)\ndef guide():\n'
-            '    @page(sprite=("Actor1", 0))\n    def page_1():\n        text("Hello!")\n'
+            '\n\n@event(name="Guide", x=8, y=6)\nclass Guide(Event):\n'
+            '    @page(sprite=("Actor1", 0))\n    def page_1(self):\n        text("Hello!")\n'
         )
     r = syncer.sync(unit)
     assert r.action == "import", r.message
@@ -259,7 +259,9 @@ def test_map_events_by_name(exported2003):
     syncer, unit = _setup(exported2003)
     text = open(unit.py_path, encoding="utf-8").read()
     name, eid = next(
-        (n, int(i)) for i, n in re.findall(r"@event\((\d+), .*\)\ndef (\w+)\(", text) if not n.startswith("ev_")
+        (n, int(i))
+        for i, n in re.findall(r"@event\((\d+), .*\)\nclass (\w+)\(Event\)", text)
+        if not re.fullmatch(r"Event\d+", n)
     )
     line = next(ln for ln in text.splitlines() if "variables.variable_0001 = 9999999" in ln)
     indent = line[: len(line) - len(line.lstrip())]
@@ -271,11 +273,11 @@ def test_map_events_by_name(exported2003):
     syncer.sync(unit, "game")
     assert "%s.show_animation(1)" % name in open(unit.py_path, encoding="utf-8").read()
     # an event without id cannot be referred to yet
-    _edit(unit.py_path, "%s.show_animation(1)" % name, "newcomer.show_animation(1)")
+    _edit(unit.py_path, "%s.show_animation(1)" % name, "Newcomer.show_animation(1)")
     with open(unit.py_path, "a", encoding="utf-8") as f:
-        f.write('\n\n@event(name="Newcomer", x=1, y=1)\ndef newcomer():\n    pass\n')
+        f.write('\n\n@event(name="Newcomer", x=1, y=1)\nclass Newcomer(Event):\n    pass\n')
     r = syncer.sync(unit)
-    assert r.action == "error" and "newcomer has no id yet" in r.message
+    assert r.action == "error" and "Newcomer has no id yet" in r.message
 
 
 def test_variable_names_belong_to_the_scripts(exported2003):

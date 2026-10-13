@@ -88,7 +88,7 @@ class Field(BaseModel):
     name: str
     default: Any = 0
     kind: str = "int"
-    # int | bool | tenths | ms | enum | enum_m1 | xy (mode,x,y) | mxy (mode,map,x,y)
+    # int | map (a map id, maps.<name>) | bool | tenths | ms | enum | enum_m1 | xy (mode,x,y) | mxy (mode,map,x,y)
     # | actor (mode,id) | value (type,v) | sign (hidden 0/1 for a signed value)
     # | char | var | const (hidden, must equal default) | optid / optvar (flag,id)
     # | amount3 (type 0 const / 1 var / 2 percent, value; signed) | branches (handler flag)
@@ -251,6 +251,8 @@ class Spec(BaseModel):
         k = f.kind
         if k == "int":
             return str(v)
+        if k == "map":
+            return P.map_src(v)
         if k in ("bool", "branches"):
             return {0: "False", 1: "True"}.get(v)
         if k == "tenths":
@@ -299,7 +301,7 @@ class Spec(BaseModel):
         if k == "mxy":
             mode, m, x, y = chunk
             return {
-                0: (str(m), str(x), str(y)),
+                0: (P.map_src(m), str(x), str(y)),
                 1: (P.var_src(m), P.var_src(x), P.var_src(y)),
             }.get(mode)
         if k == "actor":
@@ -864,14 +866,14 @@ SPECS: list[Spec] = [
     Spec(
         code=11810,
         name="add_teleport_target",
-        fields=[const(0), P_("map"), P_("x"), P_("y"), F("switch", None, "optid")],
+        fields=[const(0), P_("map", "map"), P_("x"), P_("y"), F("switch", None, "optid")],
     ),
     Spec(
         code=11810,
         name="remove_teleport_target",
-        fields=[const(1), P_("map"), F("x", 0), F("y", 0), F("switch", None, "optid")],
+        fields=[const(1), P_("map", "map"), F("x", 0), F("y", 0), F("switch", None, "optid")],
     ),
-    Spec(code=11830, name="set_escape_target", fields=[P_("map"), P_("x"), P_("y"), F("switch", None, "optid")]),
+    Spec(code=11830, name="set_escape_target", fields=[P_("map", "map"), P_("x"), P_("y"), F("switch", None, "optid")]),
     # -- shops, inns, battles (used with `match` when they have branches) ---------------------
     Spec(
         code=10710,

@@ -81,8 +81,10 @@ with `@`.
     form when it compiles back to the same commands. Everything else (a stat
     chosen by a variable, parameters built across other commands, other spellings)
     stays as `dyn.*` lines with hints.
-  - **Type check:** `rpgsync check` leaves out ty's complaints about a `Variable`
-    where the DSL takes an `int`; the compiler has checked them.
+  - **Type check:** where a command keeps a fixed number, the DSL takes a
+    `Fixed`: `int`, plus `Variable` in a game that runs DynParams. rpgsync
+    writes which one into `Scripts/database/game_types.py`, which ty and Pylance
+    read, so they flag a variable there only in games without the plugin.
 
 - **DynParams hints:** each `dyn.dynparams_add_param(...)` gets a hint naming
   the parameter it overwrites, and `dyn.dynparams_overwrite_next()` the command

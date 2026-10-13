@@ -357,7 +357,7 @@ def _default_lcf(f: FieldDef, engine: str) -> Any:
     if f.model == "equip":
         return IntVector([0] * 5)
     if f.kind in ("i16vec", "i32vec", "u8vec"):
-        return IntVector()
+        return IntVector(d if isinstance(d, list) else [])  # e.g. a map's area rectangle: 4 zeros
     if f.kind.startswith("S:"):
         return new_struct(f.kind[2:], engine)
     if f.kind.startswith("A:"):

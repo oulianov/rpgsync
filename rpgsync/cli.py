@@ -45,10 +45,18 @@ from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, T
 from rich.text import Text
 
 from .compat import check_specs, check_warnings, load_rules, target_engine
+from .maptree import map_reference_problems, map_tree_maps, tree_problems
 from .project import Project
-from .scaffold import init_scripts_project
-from .script import CompileError, compile_common_events_source, compile_map_source, compile_troop_events_source
+from .scaffold import init_scripts_project, update_scripts_project
+from .script import (
+    CompileError,
+    compile_common_events_source,
+    compile_map_source,
+    compile_troop_events_source,
+    unreachable_pages,
+)
 from .sync import Result, ScriptError, Syncer, Unit, read_bytes, sha
+from .venv import repair as repair_venv
 
 EDITORS_HELP = (
     "With the RPG Maker 2000/2003 editor: [bold]rpgsync pull[/bold], edit the Python files, "
@@ -273,7 +281,13 @@ def _open(project: str | None) -> CliSyncer:
         loc = _locate(project)
     except ProjectNotFound as e:
         raise _fail(str(e)) from None
-    return CliSyncer(Project(loc.game, loc.scripts))
+    project = Project(loc.game, loc.scripts)
+    # a game folder copied or renamed: its scripts' commands still run the old one's
+    old = repair_venv(project.script_dir)
+    if old:
+        UI(err=True).print("repaired the scripts' Python environment, made in %s" % old, kind="info")
+    update_scripts_project(project)  # files that an older rpgsync did not write
+    return CliSyncer(project)
 
 
 def _interactive() -> bool:
@@ -659,12 +673,26 @@ def locate(
     command: Annotated[
         int | None, typer.Option("--command", help="A command of the list, from 0 (as in the editor).")
     ] = None,
+    map_tree: Annotated[
+        int | None,
+        typer.Option("--map-tree", help="A map or area of database/map_tree.py instead (0: the start positions)."),
+    ] = None,
 ):
-    """Print FILE:LINE where a script writes an event, its page or one of its commands
-    (for editors: open the script there). Writes nothing."""
+    """Print FILE:LINE where a script writes an event, its page or one of its commands, a
+    map (--map alone) or a map's entry in the map tree (for editors: open the script
+    there). Writes nothing."""
     syncer = _open(project)
     proj = syncer.project
     ctx = proj.context()
+    if map_tree is not None:
+        print("%s:%d" % _locate_tree_entry(proj, map_tree))
+        return
+    if map is not None and event is None and common_event is None and troop is None:
+        path = proj.script_for_map(map)
+        if not os.path.isfile(path):
+            raise _fail("no script %s: run rpgsync first" % path)
+        print("%s:1" % os.path.abspath(path))
+        return
     if troop is not None:
         path = proj.troop_events_script
     elif common_event is not None:
@@ -710,6 +738,27 @@ def locate(
     print("%s:%d" % (os.path.abspath(path), line))
 
 
+def _locate_tree_entry(proj: Project, map_id: int) -> tuple[str, int]:
+    """map_tree.py and the line of a map's entry (0: of `start`)."""
+    from .maptree import StartSpec, compile_map_tree
+
+    path = proj.map_tree_script
+    if not os.path.isfile(path):
+        raise _fail("no script %s: run rpgsync first" % path)
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    try:
+        specs = compile_map_tree(src, proj.context(), path)
+    except CompileError as e:
+        raise _fail("%s:%s: %s" % (path, e.lineno or 1, e)) from None
+    for s in specs:
+        if map_id == 0 and isinstance(s, StartSpec):
+            return os.path.abspath(path), s.lineno or 1
+        if map_id != 0 and getattr(s, "id", None) == map_id and s.lineno:
+            return os.path.abspath(path), s.lineno
+    raise _fail("map %d is not in %s" % (map_id, path))
+
+
 def status(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt = False):
     """Show what is pending on each side, without writing anything."""
     syncer = _open(project)
@@ -721,8 +770,13 @@ def status(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOp
     ui.echo("")
 
     found = _status(syncer, list(_units(syncer, map, no_common)))
+    found["tree"] = []
+    if not map and os.path.exists(syncer.project.lmt_path):
+        proj = syncer.project
+        tree_errors, tree_warnings = tree_problems(proj.game_dir, proj.script_dir, proj.encoding)
+        found["tree"] = [StatusLine(name=p) for p in tree_errors + tree_warnings]
     listed = [line for k in ("script", "game", "both", "unsynced") for line in found[k]]
-    if not listed and not found["errors"] and not found["new"]:
+    if not listed and not found["errors"] and not found["new"] and not found["tree"]:
         ui.print(("All files are synced", "bold green"), kind="ok")
         return
     w = max((len(line.name) for line in listed), default=0)
@@ -739,8 +793,16 @@ def status(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOp
         ),
         ("error", "Scripts with errors (fix them before they can be synced):", "", "red"),
         ("new", "Not exported yet (`rpgsync pull` creates them):", "", "green"),
+        ("warning", "Map tree (maps, map files and scripts that don't match):", "", "yellow"),
     )
-    keys = {"script": "script", "game": "game", "merge": "both", "conflict": "unsynced", "error": "errors"}
+    keys = {
+        "script": "script",
+        "game": "game",
+        "merge": "both",
+        "conflict": "unsynced",
+        "error": "errors",
+        "warning": "tree",
+    }
     for kind, title, label, style in sections:
         lines = found[keys.get(kind, kind)]
         if lines:
@@ -760,9 +822,11 @@ def check(
     """Compile every script, check engine compatibility and types (ty), without writing anything."""
     syncer = _open(project)
     ui, err = syncer.ui, UI(err=True)
-    engine = target_engine(syncer.project.script_dir, syncer.project.context().engine)
-    declared, allow = load_rules(syncer.project.script_dir)
+    proj = syncer.project
+    engine = target_engine(proj.script_dir, proj.context().engine)
+    declared, allow = load_rules(proj.script_dir)
     errors = warnings = 0
+    tree_maps, sizes = map_tree_maps(proj)
     for u in _units(syncer, map, no_common):
         if not os.path.exists(u.py_path):
             continue
@@ -780,8 +844,28 @@ def check(
         for problem in check_warnings(specs, engine, patches or declared, allow):
             err.print((u.py_path, "cyan"), ": ", (problem, "yellow"), kind="warning")
             warnings += 1
+        if u.kind == "map":
+            # the active page is the last one whose conditions hold: pages after it may hide it
+            for line, problem in unreachable_pages(specs):
+                where = "%s:%d" % (u.py_path, line) if line else u.py_path
+                err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
+                warnings += 1
+        if tree_maps is not None and u.kind in ("map", "common", "troop", "maptree"):
+            # teleports (vehicles, teleport / escape targets, start positions) to maps of the game, inside them
+            for line, problem in map_reference_problems(specs, tree_maps, sizes):
+                where = "%s:%d" % (u.py_path, line) if line else u.py_path
+                err.print((where, "cyan"), ": ", (problem, "red"), kind="error")
+                errors += 1
+    if tree_maps is not None and not map:
+        tree_errors, tree_warnings = tree_problems(proj.game_dir, proj.script_dir, proj.encoding)
+        for problem in tree_errors:
+            err.print(("RPG_RT.lmt", "cyan"), ": ", (problem, "red"), kind="error")
+        for problem in tree_warnings:
+            err.print(("RPG_RT.lmt", "cyan"), ": ", (problem, "yellow"), kind="warning")
+        errors += len(tree_errors)
+        warnings += len(tree_warnings)
     if not no_types:
-        errors += _check_types(syncer.project.script_dir, ui, err, syncer.project.context().dynparams)
+        errors += _check_types(syncer.project.script_dir, ui, err)
     warned = ("%d warning(s)" % warnings, "bold yellow") if warnings else None
     if errors:
         ui.print(("%d problem(s)" % errors, "bold red"), *([", ", warned] if warned else []), kind="error")
@@ -799,10 +883,10 @@ def _ty(script_dir: str) -> str | None:
     return shutil.which("ty")
 
 
-def _check_types(script_dir: str, ui: UI, err: UI, dynparams: bool = False) -> int:
+def _check_types(script_dir: str, ui: UI, err: UI) -> int:
     """Run ty on the scripts folder; print its diagnostics.  -> number of problems
-    With DynParams a variable may stand where the DSL takes a number: the
-    compiler checked those, ty's complaints about them are left out."""
+    (With DynParams, database/game_types.py lets a variable stand where the DSL
+    takes a fixed number.)"""
     ty = _ty(script_dir)
     if ty is None:
         ui.print("type check skipped: ty is not installed (run `uv sync` in %s)" % script_dir, kind="info")
@@ -813,12 +897,6 @@ def _check_types(script_dir: str, ui: UI, err: UI, dynparams: bool = False) -> i
         cmd += ["--python", venv]
     result = subprocess.run(cmd, cwd=script_dir, capture_output=True, text=True, errors="replace", check=False)
     lines = [ln for ln in result.stdout.splitlines() if ln.strip() and not ln.startswith(("Found ", "All checks"))]
-    if dynparams:
-        lines = [
-            ln
-            for ln in lines
-            if not ("invalid-argument-type" in ln and ("type `Variable`" in ln or "found `Variable`" in ln))
-        ]
     if result.returncode == 0 or not lines:
         return 0
     for line in lines:

@@ -20,6 +20,7 @@ import ast
 import bisect
 import copy
 import functools
+import inspect
 import io
 import itertools
 import keyword
@@ -713,6 +714,10 @@ def _is_docstring(stmt: ast.stmt) -> bool:
     return isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
 
 
+# Compiling the pages of a map: a string alone in a page is an error (elsewhere ignored)
+_STRAY_STRINGS: ContextVar[bool] = ContextVar("stray_strings", default=False)
+
+
 def compile_statements(
     stmts: list[ast.stmt], ctx: Ctx, indent: int, start: int | None = None, own_comments: bool = True
 ) -> list[Command]:
@@ -793,7 +798,11 @@ def _compile_stmt(stmt: ast.stmt, nxt: ast.stmt | None, ctx: Ctx, indent: int) -
     def C(code, params=(), string=b""):
         return Command(code=code, indent=indent, params=list(params), string=string)
 
-    if isinstance(stmt, ast.Pass) or _is_docstring(stmt):
+    if isinstance(stmt, ast.Pass):
+        return []
+    if _is_docstring(stmt):
+        if _STRAY_STRINGS.get():  # a page's docstring is compiled apart (_compile_page)
+            raise CompileError("a string alone does nothing: text(...) shows a message, # writes a comment", stmt)
         return []
 
     if isinstance(stmt, ast.If) and isinstance(stmt.test, ast.BoolOp) and isinstance(stmt.test.op, ast.And):
@@ -1301,6 +1310,38 @@ PAGE_DEFAULTS = {
 }
 
 
+# A page's settings when nothing sets them (RPG Maker's defaults), and the settings an
+# event class may hold for all its pages.  Not route: route() would then be shadowed in
+# the class body, where @page(route=route(...)) is written; not direction: gary.direction
+# is where the event faces now (a character's attribute).
+PAGE_BASE: dict[str, Any] = {**PAGE_DEFAULTS, "graphic": (b"", 0), "route": ([], True, False)}
+CLASS_SETTINGS = (
+    "sprite",
+    "tile",
+    "trigger",
+    "pattern",
+    "translucent",
+    "layer",
+    "overlap_forbidden",
+    "animation",
+    "move_type",
+    "frequency",
+    "speed",
+)
+_CLASS_PROPS = (
+    "graphic",
+    "trigger",
+    "pattern",
+    "translucent",
+    "layer",
+    "overlap_forbidden",
+    "animation",
+    "move_type",
+    "frequency",
+    "speed",
+)
+
+
 class PageSpec:
     """One event page: its properties (see page_props_from_struct) and commands.
 
@@ -1356,6 +1397,7 @@ class EventSpec(BaseModel):
     y: int
     pages: SkipValidation[list[PageSpec]]  # a plain class, already checked: not copied nor re-validated
     lineno: int | None = None
+    ident: str | None = None  # the event's class name in the script
 
     def key(self):
         return (self.id, self.name, self.x, self.y, tuple(p.key() for p in self.pages))
@@ -1399,7 +1441,7 @@ def split_entries(text: str, decorator: str, indent: str) -> tuple[list[str], di
         end, body = start + 1, False
         while end < limit:
             line = lines[end]
-            if not body and line.startswith(indent + "def "):
+            if not body and (line.startswith(indent + "def ") or line.startswith(indent + "class ")):
                 body = True  # the decorator (maybe over several lines) ends here
             elif body and line.strip() and len(line) - len(line.lstrip()) <= len(indent):
                 break
@@ -1534,7 +1576,10 @@ def page_props_from_struct(p: Struct) -> dict[str, Any]:
     }
 
 
-def page_kwargs_src(props: dict[str, Any], ctx: Ctx) -> list[tuple[str, Any]]:
+def page_kwargs_src(props: dict[str, Any], ctx: Ctx, base: dict[str, Any] | None = None) -> list[tuple[str, Any]]:
+    """The keywords of @page(...): the conditions, and the settings that differ from
+    `base` (the event class's settings, RPG Maker's defaults without one)."""
+    base = base or PAGE_BASE
     kw: list[tuple[str, Any]] = []
     c = props["condition"]
     second_switch_only = "switch_b" in c and "switch_a" not in c  # editor's 2nd switch slot, 1st unused
@@ -1555,10 +1600,13 @@ def page_kwargs_src(props: dict[str, Any], ctx: Ctx) -> list[tuple[str, Any]]:
             if k in c:
                 kw.append((k, c[k]))
     name, index = props["graphic"]
-    if name:
-        kw.append(("sprite", (ctx.dec(name), index)))
-    elif index:
-        kw.append(("tile", index))
+    if props["graphic"] != base["graphic"]:
+        if name:
+            kw.append(("sprite", (ctx.dec(name), index)))
+        elif index:
+            kw.append(("tile", index))
+        else:
+            kw.append(("sprite", None))  # no graphic, where the class has one
     enums = {
         "direction": K.DIRECTIONS,
         "pattern": PATTERNS,
@@ -1580,10 +1628,12 @@ def page_kwargs_src(props: dict[str, Any], ctx: Ctx) -> list[tuple[str, Any]]:
         "speed",
     ):
         v = props[k]
-        if v != PAGE_DEFAULTS[k]:
+        if v != base[k]:
             kw.append((k, K.enum_name(enums[k], v) if k in enums else v))
     moves, repeat, skippable = props["route"]
-    if moves or not repeat or skippable:
+    if props["route"] == PAGE_BASE["route"] and base["route"] != PAGE_BASE["route"]:
+        kw.append(("route", None))
+    elif props["route"] != base["route"]:
         rkw = []
         if not repeat:
             rkw.append(("repeat", False))
@@ -1593,8 +1643,12 @@ def page_kwargs_src(props: dict[str, Any], ctx: Ctx) -> list[tuple[str, Any]]:
     return kw
 
 
-def page_props_from_call(call: Call, ctx: Ctx) -> tuple[dict[str, Any], int | None, bool]:
-    """-> (props, explicit page id, raw flag)"""
+def page_props_from_call(
+    call: Call, ctx: Ctx, base: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], int | None, bool]:
+    """-> (props, explicit page id, raw flag).  A setting left out is `base`'s (the
+    event class's settings), RPG Maker's default without one."""
+    base = base or PAGE_BASE
     legacy = {"switch_a", "switch_b", "variable", "item", "actor", "timer", "timer2"}
     allowed = {"id", "raw", "when", "sprite", "tile", "route"} | legacy | set(PAGE_DEFAULTS)
     if call.args:
@@ -1627,31 +1681,33 @@ def page_props_from_call(call: Call, ctx: Ctx) -> tuple[dict[str, Any], int | No
                 raise CompileError("page(): unknown comparison %r" % op, call.node)
             op = P.COMPARE.index(op)
         cond["variable"] = (v[0], op, v[2])
-    graphic = (b"", 0)
+    graphic = base["graphic"]
     if a.get("sprite") is not None:
         s = a.get("sprite")
         if not (isinstance(s, tuple) and len(s) == 2 and isinstance(s[0], str) and isinstance(s[1], int)):
-            raise CompileError('page(): sprite must be ("CharSetName", index)', call.node)
+            raise CompileError('%s(): sprite must be ("CharSetName", index)' % call.name, call.node)
         graphic = (ctx.enc(s[0], call.node), s[1])
     elif a.get("tile") is not None:
         graphic = (b"", a.int("tile"))
+    elif "sprite" in call.kwargs or "tile" in call.kwargs:
+        graphic = (b"", 0)  # sprite=None: no graphic
     props = {
         "condition": cond,
         "graphic": graphic,
-        "direction": a.enum("direction", K.DIRECTIONS, PAGE_DEFAULTS["direction"]),
-        "pattern": a.enum("pattern", PATTERNS, PAGE_DEFAULTS["pattern"]),
-        "translucent": a.bool("translucent", False),
-        "move_type": a.enum("move_type", MOVE_TYPES, PAGE_DEFAULTS["move_type"]),
-        "frequency": a.int("frequency", PAGE_DEFAULTS["frequency"]),
-        "trigger": a.enum("trigger", TRIGGERS, PAGE_DEFAULTS["trigger"]),
-        "layer": a.enum("layer", LAYERS, PAGE_DEFAULTS["layer"]),
-        "overlap_forbidden": a.bool("overlap_forbidden", False),
-        "animation": a.enum("animation", ANIMATIONS, PAGE_DEFAULTS["animation"]),
-        "speed": a.int("speed", PAGE_DEFAULTS["speed"]),
+        "direction": a.enum("direction", K.DIRECTIONS, base["direction"]),
+        "pattern": a.enum("pattern", PATTERNS, base["pattern"]),
+        "translucent": a.bool("translucent", base["translucent"]),
+        "move_type": a.enum("move_type", MOVE_TYPES, base["move_type"]),
+        "frequency": a.int("frequency", base["frequency"]),
+        "trigger": a.enum("trigger", TRIGGERS, base["trigger"]),
+        "layer": a.enum("layer", LAYERS, base["layer"]),
+        "overlap_forbidden": a.bool("overlap_forbidden", base["overlap_forbidden"]),
+        "animation": a.enum("animation", ANIMATIONS, base["animation"]),
+        "speed": a.int("speed", base["speed"]),
     }
     route = a.get("route")
     if route is None:
-        props["route"] = ([], True, False)
+        props["route"] = PAGE_BASE["route"] if "route" in call.kwargs else base["route"]
     else:
         if not K.is_call(route, "route"):
             raise CompileError("page(): route must be route(move_up, ..., repeat=True)", call.node)
@@ -1761,6 +1817,12 @@ HEADER_NOTE = """\
 # starts a new one); comments at the end of a code line are not kept."""
 
 
+PAGES_NOTE = """\
+# Each event is a class whose pages are page_1, page_2... (the editor's tabs); the
+# active page is the last one whose when= holds (none: the event is not there).
+# The class attributes (sprite, layer...) are the settings of every page unless its
+# @page(...) says otherwise; a page's docstring is its first comment in the game."""
+
 _GENERIC_NAME = re.compile(r"^(EV|CE)?\d*$", re.I)
 
 
@@ -1771,13 +1833,15 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", ascii_name.lower()).strip("_")
 
 
-# Event scripts take variables / switches from the database files, so that
+# Event scripts take variables / switches / maps from the database files, so that
 # ``variables.code_voulu`` is the attribute defined in database/variables.py.
 DSL_IMPORT = """from rpgsync.dsl import *
 from database.common_events import common_events
+from database.map_tree import maps
 from database.switches import switches
 from database.variables import variables"""
 CE_IMPORT = """from rpgsync.dsl import *
+from database.map_tree import maps
 from database.switches import switches
 from database.variables import variables"""
 
@@ -1797,7 +1861,10 @@ def _entry_function_names(text: str, decorator: str, indent: str) -> dict[int, s
     lines, entries = found
     out = {}
     for eid, (a, b) in entries.items():
-        m = next((re.match(r"\s*def (\w+)\(", l) for l in lines[a:b] if l.lstrip().startswith("def ")), None)
+        m = next(
+            (re.match(r"\s*(?:def|class) (\w+)\(", l) for l in lines[a:b] if l.lstrip().startswith(("def ", "class "))),
+            None,
+        )
         if m is None:
             return None
         out[eid] = m.group(1)
@@ -1854,34 +1921,34 @@ def common_event_names(
     return out
 
 
-def function_names(items: list[ArrayItem], ctx: Ctx, prefix: str) -> dict[int, str]:
-    """Readable, unique function names for events / common events."""
+def class_names(items: list[ArrayItem], ctx: Ctx) -> dict[int, str]:
+    """Class names of a map's events: "Haru Intro" -> HaruIntro; Event12 for an event of
+    the editor's default name (EV0012), or one that gives no name."""
     from . import dsl
 
-    reserved = set(dir(dsl)) | set(keyword.kwlist) | {"page"}
-    slugs = {}
+    reserved = set(dsl.__all__) | set(keyword.kwlist)  # what `from rpgsync.dsl import *` brings
+    caps = {}
     for it in items:
         name = ctx.dec(it.struct.get("name")).strip()
         slug = "" if _GENERIC_NAME.match(name) else _slug(name)
-        if not slug or slug[0].isdigit() or slug in reserved:
-            slug = ""
-        slugs[it.id] = slug
+        cap = "".join(w[:1].upper() + w[1:] for w in slug.split("_") if w)
+        caps[it.id] = cap if cap and not cap[0].isdigit() and cap not in reserved else ""
     counts: dict[str, int] = {}
-    for slug in slugs.values():
-        counts[slug] = counts.get(slug, 0) + 1
-    out = {}
-    for iid, slug in slugs.items():
-        if not slug:
-            out[iid] = "%s_%d" % (prefix, iid)
-        elif counts[slug] > 1:
-            out[iid] = "%s_%d" % (slug, iid)
-        else:
-            out[iid] = slug
+    for cap in caps.values():
+        counts[cap] = counts.get(cap, 0) + 1
+    out: dict[int, str] = {}
+    used: set[str] = set()
+    for iid, cap in caps.items():
+        name = "Event%d" % iid if not cap else cap if counts[cap] == 1 else "%s%d" % (cap, iid)
+        while name in used:  # "Event 12" next to a default-named event 12...
+            name += "_%d" % iid
+        out[iid] = name
+        used.add(name)
     return out
 
 
 def decompile_map(m: Struct, ctx: Ctx, title: str, target: str) -> str:
-    out = ['"""%s"""' % title.replace('"""', "'''"), HEADER_NOTE.format(target=target), _dsl_import(ctx)]
+    out = ['"""%s"""' % title.replace('"""', "'''"), HEADER_NOTE.format(target=target), PAGES_NOTE, _dsl_import(ctx)]
     for lines in decompile_map_events(m, ctx).values():
         out.append("")
         out.append("")
@@ -1893,17 +1960,21 @@ def decompile_map_events(m: Struct, ctx: Ctx, ids: set[int] | None = None) -> di
     """id -> script lines of the map's events (only of `ids` when given), in map order.
     Each event is named and refers to the others exactly as in the whole script."""
     items = m.get("events")
-    names = function_names(items, ctx, "ev")
+    names = class_names(items, ctx)
     ctx.event_names = {
         it.id: ctx.dec(it.struct.get("name"))
         for it in items
         if not _GENERIC_NAME.match(ctx.dec(it.struct.get("name")).strip())
     }
     # named events are referred to by their function name: haru.move(...)
-    handles = {eid: names[eid] for eid in ctx.event_names if not names[eid].startswith("ev_")}
+    handles = {eid: names[eid] for eid in ctx.event_names if names[eid] != "Event%d" % eid}
+    counts = {it.id: len(it.struct.get("pages")) for it in items}  # gary.page_3() for the pages there are
     out = {}
     try:
-        with P.map_events(names=handles, ids={name: eid for eid, name in handles.items()}), P.db_names(ctx):
+        with (
+            P.map_events(names=handles, ids={name: eid for eid, name in handles.items()}, page_counts=counts),
+            P.db_names(ctx),
+        ):
             for item in items:
                 if ids is None or item.id in ids:
                     out[item.id] = decompile_event(item, ctx, names[item.id])
@@ -1913,32 +1984,113 @@ def decompile_map_events(m: Struct, ctx: Ctx, ids: set[int] | None = None) -> di
     return out
 
 
+def class_settings(pages: list[dict[str, Any]]) -> dict[str, Any]:
+    """The settings of an event's class (see PAGE_BASE): for each, the value most of its
+    pages have (ties: the earliest page's).  The pages state only what differs."""
+    base = dict(PAGE_BASE)
+    for k in _CLASS_PROPS:
+        counts: dict[Any, int] = {}
+        first: dict[Any, tuple[int, Any]] = {}
+        for i, props in enumerate(pages):
+            h = _hashable(props[k])
+            counts[h] = counts.get(h, 0) + 1
+            first.setdefault(h, (i, props[k]))
+        if counts:
+            best = max(counts, key=lambda h: (counts[h], -first[h][0]))
+            base[k] = first[best][1]
+    return base
+
+
+def _doc_line_ok(line: str) -> bool:
+    """A comment line a docstring can hold as it is (ruff leaves it alone too)."""
+    return (
+        line == line.strip()
+        and '"""' not in line
+        and "\\" not in line
+        and all(ch.isprintable() for ch in line)
+        and not line.startswith('"')
+        and not line.endswith('"')
+    )
+
+
+def _leading_doc(cmds: list[Command], ctx: Ctx, pad: str) -> tuple[list[str] | None, int]:
+    """A page's first comment as its docstring: (its lines, the number of commands it
+    stands for), or (None, 0) when the page does not start with a comment a docstring
+    gives back exactly (DynRPG / DynParams comments are commands, never docstrings)."""
+    if not cmds or cmds[0].code != 12410 or cmds[0].indent != 0 or cmds[0].params or cmds[0].string.startswith(b"@"):
+        return None, 0
+    k = 1
+    while k < len(cmds) and cmds[k].code == 22410 and cmds[k].indent == 0 and not cmds[k].params:
+        k += 1
+    texts = [ctx.dec(c.string) for c in cmds[:k]]
+    if not texts[0] or not all(_doc_line_ok(line) for line in texts):
+        return None, 0
+    if len(texts) == 1:
+        src = [pad + '"""%s"""' % texts[0]]
+    else:
+        src = [pad + '"""' + texts[0]] + [pad + line if line else "" for line in texts[1:]] + [pad + '"""']
+    try:
+        value = ast.literal_eval("\n".join(src).strip())
+        if inspect.cleandoc(value).split("\n") != texts or [ctx.enc(x) for x in texts] != [c.string for c in cmds[:k]]:
+            return None, 0
+    except (ValueError, SyntaxError, CompileError):
+        return None, 0
+    return src, k
+
+
+def _docstring_commands(doc: ast.Expr, ctx: Ctx) -> list[Command]:
+    """The Comment commands of a page's docstring (its first comment in the game)."""
+    out = []
+    for i, line in enumerate(inspect.cleandoc(doc.value.value).split("\n")):  # type: ignore[attr-defined]
+        c = Command(code=22410 if i else 12410, indent=0, string=ctx.enc(line, doc))
+        c.line = doc.lineno
+        out.append(c)
+    return out
+
+
 def decompile_event(item: ArrayItem, ctx: Ctx, fname: str | None = None) -> list[str]:
     e = item.struct
+    name = fname or "Event%d" % item.id
     lines = [
         "@event(%d, %s, x=%d, y=%d)" % (item.id, K.pystr(ctx.dec(e.get("name"))), e.get("x"), e.get("y")),
-        "def %s():" % (fname or "ev_%d" % item.id),
+        "class %s(Event):" % name,
     ]
+    with P.current_event(name, item.id):  # self in its pages
+        return lines + _event_body(item, ctx, len(lines))
+
+
+def _event_body(item: ArrayItem, ctx: Ctx, header: int) -> list[str]:
+    e = item.struct
+    lines: list[str] = []
     pages = e.get("pages")
-    for n, pg in enumerate(pages, 1):
-        props = page_props_from_struct(pg.struct)
-        kw = page_kwargs_src(props, ctx)
+    props = [page_props_from_struct(pg.struct) for pg in pages]
+    base = class_settings(props)
+    for k, v in page_kwargs_src({"condition": {}, **base}, ctx):
+        lines.append(INDENT + "%s = %s" % (k, K.lit(v)))
+    for n, (pg, pp) in enumerate(zip(pages, props), 1):
+        kw = page_kwargs_src(pp, ctx, base)
         if pg.id != n:
             kw.insert(0, ("id", pg.id))
-        body, structured = body_lines(list(pg.struct.get("event_commands")), ctx, 2)
+        cmds = list(pg.struct.get("event_commands"))
+        doc, k = _leading_doc(cmds, ctx, INDENT * 2)
+        body, structured = body_lines(cmds[k:], ctx, 2)
+        if doc is not None and not structured:  # a raw page keeps its comment as a command
+            doc = None
+            body, structured = body_lines(cmds, ctx, 2)
         if not structured:
             kw.append(("raw", True))
-        if n > 1:
+        if lines:
             lines.append("")
-        lines.append(INDENT + "@" + render_call("page", [], kw))
-        lines.append(INDENT + "def page_%d():" % n)
-        lines.extend(_body(body, INDENT * 2))
+        if kw:
+            lines.append(INDENT + "@" + render_call("page", [], kw))
+        lines.append(INDENT + "def page_%d(self):" % n)
+        lines.extend(doc + body if doc is not None else _body(body, INDENT * 2))
     if not pages:
         lines.append(INDENT + "pass")
     return lines
 
 
-def _decorator(fn: ast.FunctionDef, name: str) -> Call:
+def _decorator(fn: ast.FunctionDef | ast.ClassDef, name: str) -> Call:
     calls = [evaluate(d) for d in fn.decorator_list]
     calls = [c for c in calls if isinstance(c, Call) and c.name == name]
     if len(calls) != 1:
@@ -1948,38 +2100,65 @@ def _decorator(fn: ast.FunctionDef, name: str) -> Call:
 
 def compile_map_source(src: str, ctx: Ctx, filename: str = "<script>", names_src: str | None = None) -> list[EventSpec]:
     """names_src: the whole script, when `src` holds only some of its events (incremental
-    compile): the events refer to each other by function name."""
-    with P.map_events(ids=_event_function_ids(names_src or src)), P.db_names(ctx):
-        return _compile_map_source(src, ctx, filename)
+    compile): the events refer to each other (and to their pages) by name."""
+    ids, pages = _event_names(names_src or src)
+    token = _STRAY_STRINGS.set(True)
+    try:
+        with P.map_events(ids=ids, pages=pages), P.db_names(ctx):
+            return _compile_map_source(src, ctx, filename)
+    finally:
+        _STRAY_STRINGS.reset(token)
 
 
-def _event_function_ids(src: str) -> dict[str, int | None]:
-    """Function name -> id of the @event functions of a map script."""
+_EVENT_LINE = re.compile(r"(?:class|def) (\w+)\(")
+_PAGE_LINE = re.compile(r"    def (\w+)\(")  # a page of an event (class or function)
+
+
+def _event_names(src: str) -> tuple[dict[str, int | None], dict[str, dict[str, int]]]:
+    """(event name -> id, event name -> {page function name -> page number}) of the
+    events of a map script."""
     found = split_entries(src, "event", "")
-    if found is not None:  # every entry has a literal id: read the def lines only
+    if found is not None:  # every entry has a literal id: read the def / class lines only
         lines, entries = found
-        out: dict[str, int | None] = {}
+        ids: dict[str, int | None] = {}
+        pages: dict[str, dict[str, int]] = {}
         for eid, (a, b) in entries.items():
-            m = next((re.match(r"def (\w+)\(", l) for l in lines[a:b] if l.startswith("def ")), None)
-            if m is None:
+            i = next((i for i in range(a, b) if _EVENT_LINE.match(lines[i])), None)
+            if i is None:
                 break
-            out[m.group(1)] = eid
+            name = _EVENT_LINE.match(lines[i]).group(1)  # type: ignore[union-attr]
+            ids[name] = eid
+            own = pages.setdefault(name, {})
+            for line in lines[i + 1 : b]:
+                m = _PAGE_LINE.match(line)
+                if m and m.group(1) not in own:
+                    own[m.group(1)] = len(own) + 1
         else:
-            return out
+            return ids, pages
     try:
         tree = ast.parse(src)
     except SyntaxError:
-        return {}  # reported by the compiler
-    out: dict[str, int | None] = {}
+        return {}, {}  # reported by the compiler
+    ids = {}
+    pages = {}
     for stmt in tree.body:
-        if not isinstance(stmt, ast.FunctionDef):
+        if not isinstance(stmt, (ast.FunctionDef, ast.ClassDef)):
             continue
         for d in stmt.decorator_list:
             if isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "event":
                 arg = d.args[0] if d.args else next((k.value for k in d.keywords if k.arg == "id"), None)
                 ok = isinstance(arg, ast.Constant) and type(arg.value) is int
-                out[stmt.name] = arg.value if ok else None  # type: ignore[union-attr]
-    return out
+                ids[stmt.name] = arg.value if ok else None  # type: ignore[union-attr]
+                own = pages.setdefault(stmt.name, {})
+                for sub in stmt.body:
+                    if isinstance(sub, ast.FunctionDef) and sub.name not in own:
+                        own[sub.name] = len(own) + 1
+    return ids, pages
+
+
+def _event_function_ids(src: str) -> dict[str, int | None]:
+    """Event name (its class) -> id of the events of a map script."""
+    return _event_names(src)[0]
 
 
 def _compile_map_source(src: str, ctx: Ctx, filename: str = "<script>") -> list[EventSpec]:
@@ -1999,8 +2178,8 @@ def _compile_map_statements(statements: Iterable[ast.stmt], src: str, ctx: Ctx) 
     for stmt in statements:
         if _is_header_stmt(stmt):
             continue
-        if not isinstance(stmt, ast.FunctionDef):
-            raise CompileError("top level may only contain @event functions", stmt)
+        if not isinstance(stmt, (ast.ClassDef, ast.FunctionDef)):
+            raise CompileError("top level may only contain events: @event(...) on `class name(Event):`", stmt)
         dec = _decorator(stmt, "event")
         a = K.Args(dec, ["id", "name", "x", "y"])
         eid = a.get("id")
@@ -2010,19 +2189,17 @@ def _compile_map_statements(statements: Iterable[ast.stmt], src: str, ctx: Ctx) 
             raise CompileError("event id %d is used twice (also on line %d)" % (eid, seen[eid]), stmt)
         if eid is not None:
             seen[eid] = stmt.lineno
-        pages = []
-        for sub in stmt.body:
-            if isinstance(sub, ast.Pass) or (isinstance(sub, ast.Expr) and isinstance(sub.value, ast.Constant)):
-                continue
-            if not isinstance(sub, ast.FunctionDef):
-                raise CompileError("an @event function may only contain @page functions", sub)
-            pcall = _decorator(sub, "page")
-            props, pid, raw = page_props_from_call(pcall, ctx)
-            if raw:
-                cmds = compile_raw_statements(sub.body, ctx)
-            else:
-                cmds = compile_statements(sub.body, ctx, 0, sub.lineno)
-            pages.append(PageSpec(props=props, commands=cmds, id=pid, lineno=sub.lineno))
+        if isinstance(stmt, ast.ClassDef):
+            with P.current_event(stmt.name, eid):  # self in its pages
+                pages = _compile_event_class(stmt, ctx)
+        else:  # an @event function, as an older rpgsync wrote them
+            pages = []
+            for sub in stmt.body:
+                if isinstance(sub, ast.Pass) or _is_docstring(sub):
+                    continue
+                if not isinstance(sub, ast.FunctionDef):
+                    raise CompileError("an @event function may only contain @page functions", sub)
+                pages.append(_compile_page(sub, PAGE_BASE, ctx))
         events.append(
             EventSpec(
                 id=eid,
@@ -2031,9 +2208,143 @@ def _compile_map_statements(statements: Iterable[ast.stmt], src: str, ctx: Ctx) 
                 y=a.int("y", 0),
                 pages=pages,
                 lineno=stmt.lineno,
+                ident=stmt.name,
             )
         )
     return events
+
+
+# What only a page can set (in its @page(...))
+_PAGE_OWN = (
+    "when",
+    "route",
+    "direction",
+    "id",
+    "raw",
+    "switch_a",
+    "switch_b",
+    "variable",
+    "item",
+    "actor",
+    "timer",
+    "timer2",
+)
+
+# Names a page cannot have: what every event already has (gary.move(...), gary.x)
+_CHARACTER_NAMES = {"call", "flash", "move", "set_location", "show_animation"} | {
+    "map_id",
+    "x",
+    "y",
+    "direction",
+    "screen_x",
+    "screen_y",
+    "facing",
+}
+
+
+def _compile_event_class(stmt: ast.ClassDef, ctx: Ctx) -> list[PageSpec]:
+    """The pages of an event class: its settings (class attributes) apply to every page,
+    unless a page's @page(...) says otherwise."""
+    if (
+        stmt.keywords
+        or len(stmt.bases) != 1
+        or not (isinstance(stmt.bases[0], ast.Name) and stmt.bases[0].id == "Event")
+    ):
+        raise CompileError("an event is a class of Event: `class %s(Event):`" % stmt.name, stmt)
+    base = dict(PAGE_BASE)
+    settings: dict[str, int] = {}
+    functions: list[ast.FunctionDef] = []
+    for sub in stmt.body:
+        if isinstance(sub, ast.Pass):
+            continue
+        if _is_docstring(sub):
+            raise CompileError(
+                "an event has no description in RPG Maker: write it as the docstring of page_1, "
+                "or as a # comment in a page",
+                sub,
+            )
+        if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(sub.targets[0], ast.Name):
+            k = sub.targets[0].id
+            if k not in CLASS_SETTINGS:
+                hint = (
+                    "a page's own: write it in @page(%s=...)" % k
+                    if k in _PAGE_OWN
+                    else "the settings are %s" % ", ".join(CLASS_SETTINGS)
+                )
+                raise CompileError("%s is not a setting of the event's pages (%s)" % (k, hint), sub)
+            if k in settings:
+                raise CompileError("%s is set twice (also on line %d)" % (k, settings[k]), sub)
+            if {k, *settings} >= {"sprite", "tile"}:
+                raise CompileError("an event's pages have one graphic: sprite or tile, not both", sub)
+            settings[k] = sub.lineno
+            call = Call(name=stmt.name, args=[], kwargs={k: P.evaluate(sub.value)}, node=sub)
+            props = page_props_from_call(call, ctx, base)[0]
+            base = {key: v for key, v in props.items() if key != "condition"}
+            continue
+        if isinstance(sub, ast.FunctionDef):
+            functions.append(sub)
+            continue
+        raise CompileError("an event class holds its settings (sprite = ...) and its pages (def page_1(): ...)", sub)
+    pages: list[PageSpec] = []
+    names: dict[str, int] = {}
+    for sub in functions:
+        if sub.name in names:
+            raise CompileError("%s is defined twice (also on line %d)" % (sub.name, names[sub.name]), sub)
+        names[sub.name] = sub.lineno
+        if sub.name in _CHARACTER_NAMES:
+            raise CompileError(
+                "%s is what every event has (%s.%s): name the page page_%d"
+                % (sub.name, stmt.name, sub.name, len(names)),
+                sub,
+            )
+        a = sub.args
+        if (
+            a.posonlyargs
+            or a.vararg
+            or a.kwonlyargs
+            or a.kwarg
+            or a.defaults
+            or len(a.args) > 1
+            or (a.args and a.args[0].arg != "self")
+        ):
+            raise CompileError("a page takes self only: def %s(self):" % sub.name, sub)
+        pages.append(_compile_page(sub, base, ctx))
+    return pages
+
+
+def _page_call(fn: ast.FunctionDef) -> Call | None:
+    """The @page(...) of a page function; None without one (or a bare @page)."""
+    if not fn.decorator_list:
+        return None
+    if len(fn.decorator_list) == 1 and isinstance(fn.decorator_list[0], ast.Name) and fn.decorator_list[0].id == "page":
+        return None
+    calls = [P.evaluate(d) for d in fn.decorator_list]
+    if len(calls) != 1 or not (isinstance(calls[0], Call) and calls[0].name == "page"):
+        raise CompileError("a page's only decorator is @page(...)", fn)
+    return calls[0]
+
+
+def _compile_page(sub: ast.FunctionDef, base: dict[str, Any], ctx: Ctx) -> PageSpec:
+    call = _page_call(sub)
+    if call is None:
+        props, pid, raw = {"condition": {}, **base}, None, False
+    else:
+        props, pid, raw = page_props_from_call(call, ctx, base)
+    if raw:
+        cmds = compile_raw_statements(sub.body, ctx)
+    elif sub.body and _is_docstring(sub.body[0]):
+        # the docstring is the page's first comment in the game
+        doc = sub.body[0]
+        ci = ctx.comments
+        cmds = ci.take(sub.lineno, doc.lineno, doc.col_offset, 0, ctx) + _docstring_commands(doc, ctx)  # type: ignore[arg-type]
+        if len(sub.body) > 1:
+            cmds += compile_statements(sub.body[1:], ctx, 0, doc.end_lineno)
+        else:
+            end = ci.region_end(doc.end_lineno, doc.col_offset)
+            cmds += ci.take(doc.end_lineno, end, doc.col_offset, 0, ctx)
+    else:
+        cmds = compile_statements(sub.body, ctx, 0, sub.lineno)
+    return PageSpec(props=props, commands=cmds, id=pid, lineno=sub.lineno)
 
 
 def _is_header_stmt(stmt) -> bool:
@@ -2059,6 +2370,213 @@ def map_event_specs(m: Struct, ctx: Ctx, ids: set | None = None) -> list[EventSp
             for n, pg in enumerate(e.get("pages"), 1)
         ]
         out.append(EventSpec(id=item.id, name=bytes(e.get("name")), x=e.get("x"), y=e.get("y"), pages=pages))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Pages: named by their number, which page is active
+# --------------------------------------------------------------------------
+
+
+_OLD_EVENTS = re.compile(r"^def \w+\(|^class [a-z_]\w*\(Event\):|^    def \w+\(\):", re.M)
+
+
+def old_event_form(text: str) -> bool:
+    """A map script of an older rpgsync: @event functions, or event classes in lowercase
+    whose pages take no self."""
+    return _OLD_EVENTS.search(text) is not None
+
+
+def page_renames(text: str) -> dict[tuple[str, str], str] | None:
+    """(event, page function) -> page_<number>, for the page functions of a map script
+    not named by their number (new pages, moved pages); None when the script cannot be
+    read without parsing it (an event without a literal id...)."""
+    found = split_entries(text, "event", "")
+    if found is None:
+        return None
+    lines, entries = found
+    out = {}
+    for a, b in entries.values():
+        event, n = None, 0
+        for line in lines[a:b]:
+            if event is None:
+                m = _EVENT_LINE.match(line)
+                if m:
+                    event = m.group(1)
+                continue
+            m = _PAGE_LINE.match(line)
+            if m:
+                n += 1
+                if m.group(1) != "page_%d" % n:
+                    out[(event, m.group(1))] = "page_%d" % n
+    return out
+
+
+def rename_pages(text: str) -> tuple[str, list[str]]:
+    """The script with its page functions named by their number, and the calls to them
+    updated (``gary.accusation()`` -> ``gary.page_3()``).  -> (text, "gary.accusation ->
+    page_3"...)."""
+    renames = page_renames(text)
+    if not renames:
+        return text, []
+    lines, entries = split_entries(text, "event", "")  # type: ignore[misc]
+    own_calls = re.compile(r"\bself\.(\w+)\(")
+    for a, b in entries.values():
+        event = None
+        for i in range(a, b):
+            if event is None:
+                m = _EVENT_LINE.match(lines[i])
+                if m:
+                    event = m.group(1)
+                continue
+            m = _PAGE_LINE.match(lines[i])
+            if m and (event, m.group(1)) in renames:
+                lines[i] = lines[i].replace("def %s(" % m.group(1), "def %s(" % renames[(event, m.group(1))], 1)
+            elif "self." in lines[i]:  # self.accusation() in the event's own pages
+                lines[i] = own_calls.sub(
+                    lambda m, ev=event: "self.%s(" % renames.get((ev, m.group(1)), m.group(1)), lines[i]
+                )
+    out = "\n".join(lines)
+    events = sorted({event for event, _ in renames})
+    calls = re.compile(r"\b(%s)\.(\w+)\(" % "|".join(map(re.escape, events)))
+    out = calls.sub(lambda m: "%s.%s(" % (m.group(1), renames.get((m.group(1), m.group(2)), m.group(2))), out)
+    return out, ["%s.%s -> %s" % (event, old, new) for (event, old), new in renames.items()]
+
+
+def _first_moved(old: list, new: list) -> int | None:
+    """The first page whose number changed between two versions of an event's pages
+    (pages inserted, removed or moved; an edited page keeps its number)."""
+    for i in range(min(len(old), len(new))):
+        if old[i] != new[i] and (len(old) != len(new) or old[i] in new or new[i] in old):
+            return i
+    return len(new) if len(new) < len(old) else None
+
+
+def renumbered_page_calls(
+    old_text: str, new_text: str, m: Struct, changed: set[int], ctx: Ctx, fname: str
+) -> list[str]:
+    """Calls of a map script that keep their page number although the pages of their
+    event moved in the editor (Call Event holds a number): "Map0011.py:40: ..."."""
+    found = split_entries(old_text, "event", "")
+    if found is None:
+        return []
+    lines, entries = found
+    keep = {eid for eid in changed if eid in entries}
+    if not keep:
+        return []
+    part = list(lines)
+    for eid, (a, b) in entries.items():
+        if eid not in keep:
+            part[a:b] = [""] * (b - a)
+    try:
+        old = {s.id: [p.key() for p in s.pages] for s in compile_map_source("\n".join(part), ctx, names_src=old_text)}
+    except CompileError:
+        return []
+    new = {s.id: [p.key() for p in s.pages] for s in map_event_specs(m, ctx, ids=keep)}
+    moved = {
+        eid: i for eid in keep if eid in old and eid in new and (i := _first_moved(old[eid], new[eid])) is not None
+    }
+    if not moved:
+        return []
+    ids, _ = _event_names(new_text)
+    names = {eid: name for name, eid in ids.items() if eid is not None}
+    found_new = split_entries(new_text, "event", "")
+    ranges = found_new[1] if found_new else {}
+    out = []
+    new_lines = new_text.split("\n")
+    for eid, first in sorted(moved.items()):
+        name = names.get(eid, "events[%d]" % eid)
+        own = ranges.get(eid, (0, 0))
+        forms = [r"\b%s\.page_(\d+)\(\)" % re.escape(name), r"\b%s\.call\((\d+)\)" % re.escape(name)]
+        forms.append(r"\bevents\[%d\]\.call\((\d+)\)" % eid)
+        for n, line in enumerate(new_lines):
+            mine = [r"\bthis\.call\((\d+)\)", r"\bself\.page_(\d+)\(\)", r"\bself\.call\((\d+)\)"]
+            pats = forms + (mine if own[0] <= n < own[1] else [])
+            for pat in pats:
+                for hit in re.finditer(pat, line):
+                    if int(hit.group(1)) > first:
+                        out.append(
+                            "%s:%d: %s keeps its page number, but %s's pages changed in the editor: "
+                            "check it runs the page you want" % (fname, n + 1, hit.group(0), name)
+                        )
+    return out
+
+
+def _variable_values(op: int, x: int) -> tuple:
+    """The values a page's variable condition accepts: ("range", lo, hi) or ("not", x)."""
+    inf = float("inf")
+    return {
+        0: ("range", x, x),
+        1: ("range", x, inf),
+        2: ("range", -inf, x),
+        3: ("range", x + 1, inf),
+        4: ("range", -inf, x - 1),
+    }.get(op, ("not", x))
+
+
+def _accepts(p: tuple, q: tuple) -> bool:
+    """Every value p accepts, q accepts."""
+    if p[0] == "range" and q[0] == "range":
+        return p[1] <= p[2] and q[1] <= p[1] and p[2] <= q[2]
+    if p[0] == "range":
+        return p[1] <= p[2] and not (p[1] <= q[1] <= p[2])
+    return q[0] == "not" and p[1] == q[1]
+
+
+def _implies(p: dict, q: dict) -> bool:
+    """Whenever the conditions `p` of a page hold, the conditions `q` hold too."""
+    switches = {v for k, v in p.items() if k in ("switch_a", "switch_b")}
+    for k, v in q.items():
+        if k in ("switch_a", "switch_b"):
+            ok = v in switches
+        elif k in ("item", "actor"):
+            ok = p.get(k) == v
+        elif k in ("timer", "timer2"):  # the timer is at most v seconds
+            ok = k in p and p[k] <= v
+        elif k == "variable":
+            ok = (
+                "variable" in p
+                and p["variable"][0] == v[0]
+                and _accepts(_variable_values(*p["variable"][1:]), _variable_values(*v[1:]))
+            )
+        else:
+            ok = False
+        if not ok:
+            return False
+    return True
+
+
+def unreachable_pages(events: list) -> list[tuple[int | None, str]]:
+    """Pages that are never active: a page after them holds whenever they do (the active
+    page is the last one whose conditions hold).  Pages the map runs with Call Event
+    (whatever their conditions) are left out.  -> (line, problem)"""
+    called: set[tuple[int | None, int]] = set()
+    for ev in events:
+        for pg in getattr(ev, "pages", ()):
+            for c in pg.commands:
+                if c.code == 12330 and len(c.params) == 3 and c.params[0] == 1:
+                    called.add((ev.id if c.params[1] == P.CHARACTER_IDS["this"] else c.params[1], c.params[2]))
+                elif c.code == 12330 and len(c.params) == 3 and c.params[0] == 2:
+                    return []  # events[variables[..]].call(variables[..]): any page may run
+    out: list[tuple[int | None, str]] = []
+    for ev in events:
+        if not isinstance(ev, EventSpec):
+            continue
+        who = ev.ident or "events[%s]" % ev.id
+        conds = [pg.props["condition"] for pg in ev.pages]
+        for i, cond in enumerate(conds):
+            if (ev.id, i + 1) in called:
+                continue
+            j = next((j for j in range(i + 1, len(conds)) if _implies(cond, conds[j])), None)
+            if j is not None:
+                why = "no condition" if not conds[j] else "its conditions are among page_%d's" % (i + 1)
+                out.append(
+                    (
+                        ev.pages[i].lineno,
+                        "%s.page_%d is never active: page_%d, after it, holds whenever page_%d does (%s)"
+                        % (who, i + 1, j + 1, i + 1, why),
+                    )
+                )
     return out
 
 

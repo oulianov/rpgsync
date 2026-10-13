@@ -27,6 +27,7 @@ __all__ = [
     "BattlerAnimationWeapon",
     "Class",
     "DbModel",
+    "Encounter",
     "Enemy",
     "EnemyAction",
     "EnemyActionBasic",
@@ -38,12 +39,18 @@ __all__ = [
     "ItemTrajectory",
     "ItemType",
     "Learning",
+    "MapInfo",
+    "MapInfoBGMType",
+    "MapInfoMusicType",
+    "MapInfoTriState",
+    "Music",
     "Parameters",
     "Skill",
     "SkillScope",
     "SkillSpType",
     "SkillType",
     "Sound",
+    "Start",
     "State",
     "StateAffectType",
     "StateChangeType",
@@ -54,6 +61,7 @@ __all__ = [
     "TerrainBGAssociation",
     "TerrainBushDepth",
     "TerrainFlags",
+    "TreeMapMapType",
     "Troop",
     "TroopMember",
     "Variable",
@@ -136,6 +144,10 @@ TerrainBushDepth = Literal["normal", "third", "half", "full"]
 TerrainBGAssociation = Literal["background", "frame"]
 BattlerAnimationPoseAnimType = Literal["character", "battle"]
 BattlerAnimationSpeed = Literal["slow", "medium", "fast"]
+TreeMapMapType = Literal["root", "map", "area"]
+MapInfoMusicType = Literal["parent", "event", "specific"]
+MapInfoBGMType = Literal["parent", "terrain", "specific"]
+MapInfoTriState = Literal["parent", "allow", "forbid"]
 
 
 class TerrainFlags(DbModel):
@@ -1246,3 +1258,120 @@ class Variable(DbModel):
         ),
     )
     name: str = Field(default="", description="Name shown in the editor.")
+
+
+class Music(DbModel):
+    """A music track."""
+
+    name: str = Field(default="(OFF)", description="File in Music/ ('(OFF)' = none).")
+    fadein: int = Field(default=0, description="Fade in time in milliseconds.")
+    volume: int = Field(default=100, description="Volume in percent.")
+    tempo: int = Field(default=100, description="Tempo in percent.")
+    balance: int = Field(default=50, description="Balance (0 = left, 50 = center, 100 = right).")
+
+
+class Encounter(DbModel):
+    """A troop met at random on a map."""
+
+    id: int | None = Field(
+        default=None,
+        description="Element id; leave it out to use the position in the list (1-based).",
+    )
+    troop_id: int = Field(default=0, description="Troop.")
+
+
+class MapInfo(DbModel):
+    """A map or an area of the map tree (RPG_RT.lmt) and its map properties."""
+
+    id: int | None = Field(
+        default=None,
+        description=(
+            "Map id: the map's file is MapNNNN.lmu. Leave it out for a new map to get a free id."
+        ),
+    )
+    name: str = Field(default="", description="Name in the map tree.")
+    parent_map: int = Field(
+        default=0,
+        description=(
+            "Parent in the map tree, 0 = top level; 'parent' settings come from it (map id)."
+        ),
+    )
+    type: TreeMapMapType | int = Field(
+        default=-1,
+        description=(
+            "Map, or area: a rectangle of its parent map with its own encounters (one of 'root', "
+            "'map', 'area' or a number)."
+        ),
+    )
+    music_type: MapInfoMusicType | int = Field(
+        default="parent",
+        description=(
+            "Background music: the parent's, set by events, or `music` (one of 'parent', 'event', "
+            "'specific' or a number)."
+        ),
+    )
+    music: Music = Field(
+        default_factory=Music,
+        description="Background music when music_type='specific'.",
+    )
+    background_type: MapInfoBGMType | int = Field(
+        default="parent",
+        description=(
+            "Battle background: the parent's, the terrain's, or `background_name` (one of "
+            "'parent', 'terrain', 'specific' or a number)."
+        ),
+    )
+    background_name: str = Field(
+        default="",
+        description="Battle background file when background_type='specific'.",
+    )
+    teleport: MapInfoTriState | int = Field(
+        default="parent",
+        description=(
+            "Teleport skills: the parent's setting, allowed or forbidden (one of 'parent', "
+            "'allow', 'forbid' or a number)."
+        ),
+    )
+    escape: MapInfoTriState | int = Field(
+        default="parent",
+        description=(
+            "Escape skills: the parent's setting, allowed or forbidden (one of 'parent', 'allow', "
+            "'forbid' or a number)."
+        ),
+    )
+    save: MapInfoTriState | int = Field(
+        default="parent",
+        description=(
+            "Saving: the parent's setting, allowed or forbidden (one of 'parent', 'allow', "
+            "'forbid' or a number)."
+        ),
+    )
+    encounters: list[Encounter] = Field(default_factory=list, description="Troops met at random.")
+    encounter_steps: int = Field(
+        default=25,
+        description="Average steps between random encounters (0 = none).",
+    )
+    area_rect: list[int] = Field(
+        default_factory=lambda: [0, 0, 0, 0],
+        description="Area rectangle in tiles: left, top, right, bottom (0, 0, 0, 0 for a map).",
+    )
+
+
+class Start(DbModel):
+    """Where the party and the vehicles start a new game."""
+
+    party_map_id: int = Field(default=0, description="Map of the party (0 = not set; map id).")
+    party_x: int = Field(default=0, description="Party X.")
+    party_y: int = Field(default=0, description="Party Y.")
+    boat_map_id: int = Field(default=0, description="Map of the boat (0 = not placed; map id).")
+    boat_x: int = Field(default=0, description="Boat X.")
+    boat_y: int = Field(default=0, description="Boat Y.")
+    ship_map_id: int = Field(default=0, description="Map of the ship (0 = not placed; map id).")
+    ship_x: int = Field(default=0, description="Ship X.")
+    ship_y: int = Field(default=0, description="Ship Y.")
+    airship_map_id: int = Field(
+        default=0,
+        description="Map of the airship (0 = not placed; map id).",
+    )
+    airship_x: int = Field(default=0, description="Airship X.")
+    airship_y: int = Field(default=0, description="Airship Y.")
