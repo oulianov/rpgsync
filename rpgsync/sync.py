@@ -287,10 +287,17 @@ class MapUnit(Unit):
             return "renamed in the map tree -> new title in %s" % os.path.basename(self.py_path)
         return None
 
+    def _class_names(self) -> dict[int, tuple[str, str | None]]:
+        """The event classes of the current script: their names belong to it (renamed
+        with an IDE, or kept when the event is renamed in the script)."""
+        text = read_bytes(self.py_path)
+        return S.read_class_names(text.decode("utf-8", "replace")) if text is not None else {}
+
     def decompile(self, data):
         # the parsed map is not kept while formatting (decoded, a big map weighs ~90 MB)
+        root = LcfFile.parse(data).root
         text = S.decompile_map(
-            LcfFile.parse(data).root, self.project.context(), self.title(), os.path.basename(self.bin_path)
+            root, self.project.context(), self.title(), os.path.basename(self.bin_path), self._class_names()
         )
         return self.formatted(text)
 
@@ -309,7 +316,7 @@ class MapUnit(Unit):
         return _layout_sha(self.project, FORMAT, names)
 
     def entry_lines(self, data, ids):
-        return S.decompile_map_events(LcfFile.parse(data).root, self.project.context(), ids)
+        return S.decompile_map_events(LcfFile.parse(data).root, self.project.context(), ids, self._class_names())
 
     def after_import(self, text, specs, data):
         self._note = None

@@ -1921,24 +1921,70 @@ def common_event_names(
     return out
 
 
-def class_names(items: list[ArrayItem], ctx: Ctx) -> dict[int, str]:
+def read_class_names(text: str) -> dict[int, tuple[str, str | None]]:
+    """id -> (class name, event name its @event gives) of the event classes of a map
+    script, read from its lines (see _entry_function_names).  Events written as
+    functions (an older rpgsync) are left out."""
+    found = split_entries(text, "event", "")
+    if found is None:
+        return {}
+    lines, entries = found
+    out: dict[int, tuple[str, str | None]] = {}
+    for eid, (a, b) in entries.items():
+        at = next((i for i in range(a, b) if lines[i].startswith(("class ", "def "))), None)
+        m = re.match(r"class (\w+)\(", lines[at]) if at is not None else None
+        if m is None:
+            continue
+        name = None
+        try:  # the decorator alone: @event(39, "Gary", x=1, y=2)
+            call = ast.parse("\n".join(lines[a:at]) + "\ndef _(): pass").body[0].decorator_list[0]  # type: ignore[attr-defined]
+            arg = (
+                call.args[1] if len(call.args) > 1 else next((k.value for k in call.keywords if k.arg == "name"), None)
+            )
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                name = arg.value
+        except (SyntaxError, IndexError, AttributeError):
+            pass
+        out[eid] = (m.group(1), name)
+    return out
+
+
+def _class_cap(name: str, reserved: set[str]) -> str:
+    """ "Haru Intro" -> HaruIntro; "" for a default name (EV0012) or one that gives none."""
+    slug = "" if _GENERIC_NAME.match(name) else _slug(name)
+    cap = "".join(w[:1].upper() + w[1:] for w in slug.split("_") if w)
+    return cap if cap and not cap[0].isdigit() and cap not in reserved else ""
+
+
+def class_names(
+    items: list[ArrayItem], ctx: Ctx, keep: dict[int, tuple[str, str | None]] | None = None
+) -> dict[int, str]:
     """Class names of a map's events: "Haru Intro" -> HaruIntro; Event12 for an event of
-    the editor's default name (EV0012), or one that gives no name."""
+    the editor's default name (EV0012), or one that gives no name.  `keep`: the classes
+    of the current script (read_class_names).  Their names belong to it and stay, but
+    for a class still named after an event the editor renamed since: it follows."""
     from . import dsl
 
     reserved = set(dsl.__all__) | set(keyword.kwlist)  # what `from rpgsync.dsl import *` brings
-    caps = {}
-    for it in items:
-        name = ctx.dec(it.struct.get("name")).strip()
-        slug = "" if _GENERIC_NAME.match(name) else _slug(name)
-        cap = "".join(w[:1].upper() + w[1:] for w in slug.split("_") if w)
-        caps[it.id] = cap if cap and not cap[0].isdigit() and cap not in reserved else ""
-    counts: dict[str, int] = {}
-    for cap in caps.values():
-        counts[cap] = counts.get(cap, 0) + 1
     out: dict[int, str] = {}
     used: set[str] = set()
-    for iid, cap in caps.items():
+    fresh = []
+    for it in items:
+        name = ctx.dec(it.struct.get("name")).strip()
+        cls, old = (keep or {}).get(it.id, ("", None))
+        if old is not None and old.strip() != name:
+            cap = _class_cap(old.strip(), reserved)
+            if cls in (cap, "%s%d" % (cap, it.id), "Event%d" % it.id):
+                cls = ""  # named after its old name: follows the new one
+        if cls and cls.isidentifier() and cls not in reserved and cls not in used:
+            out[it.id] = cls
+            used.add(cls)
+        else:
+            fresh.append((it.id, _class_cap(name, reserved)))
+    counts: dict[str, int] = {}
+    for _, cap in fresh:
+        counts[cap] = counts.get(cap, 0) + 1
+    for iid, cap in fresh:
         name = "Event%d" % iid if not cap else cap if counts[cap] == 1 else "%s%d" % (cap, iid)
         while name in used:  # "Event 12" next to a default-named event 12...
             name += "_%d" % iid
@@ -1947,20 +1993,25 @@ def class_names(items: list[ArrayItem], ctx: Ctx) -> dict[int, str]:
     return out
 
 
-def decompile_map(m: Struct, ctx: Ctx, title: str, target: str) -> str:
+def decompile_map(
+    m: Struct, ctx: Ctx, title: str, target: str, keep: dict[int, tuple[str, str | None]] | None = None
+) -> str:
     out = ['"""%s"""' % title.replace('"""', "'''"), HEADER_NOTE.format(target=target), PAGES_NOTE, _dsl_import(ctx)]
-    for lines in decompile_map_events(m, ctx).values():
+    for lines in decompile_map_events(m, ctx, keep=keep).values():
         out.append("")
         out.append("")
         out.extend(lines)
     return "\n".join(out).rstrip() + "\n"
 
 
-def decompile_map_events(m: Struct, ctx: Ctx, ids: set[int] | None = None) -> dict[int, list[str]]:
+def decompile_map_events(
+    m: Struct, ctx: Ctx, ids: set[int] | None = None, keep: dict[int, tuple[str, str | None]] | None = None
+) -> dict[int, list[str]]:
     """id -> script lines of the map's events (only of `ids` when given), in map order.
-    Each event is named and refers to the others exactly as in the whole script."""
+    Each event is named and refers to the others exactly as in the whole script
+    (`keep`: its classes, see class_names)."""
     items = m.get("events")
-    names = class_names(items, ctx)
+    names = class_names(items, ctx, keep)
     ctx.event_names = {
         it.id: ctx.dec(it.struct.get("name"))
         for it in items

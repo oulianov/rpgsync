@@ -403,3 +403,44 @@ def test_function_events_are_rewritten_as_classes(exported2003):
         r'@event\(\d+, "Guide", x=8, y=6\)\nclass Guide\w*\(Event\):\n    sprite = \("Actor1", 0\)\n', text
     )
     assert syncer.sync(unit).action == "none"
+
+
+def _editor_edit(unit, name, fn):
+    """The editor saves the map with a change to the event named `name`."""
+    f = LcfFile.load(unit.bin_path)
+    fn(next(it for it in f.root.get("events") if it.struct.get("name") == name).struct)
+    f.save(unit.bin_path)
+
+
+@pytest.mark.parametrize(
+    "rename, cls",
+    [
+        (lambda t: t.replace('@event(300, "Gary"', '@event(300, "Gary Bis"'), "Gary"),  # the event, in the script
+        (lambda t: re.sub(r"\bGary\b(?!\")", "Witness", t), "Witness"),  # the class, with an IDE
+    ],
+)
+def test_class_names_belong_to_the_script(exported2003, rename, cls):
+    """An event regenerated after an editor change keeps the class name of the script:
+    the calls in the events left as they are still find it."""
+    syncer, unit = _setup(exported2003)
+    _append(unit, GARY.replace("@event(30, ", "@event(300, ") + "\n\n" + CALLER)
+    assert syncer.sync(unit).action == "import"
+    _write(unit.py_path, rename(_text(unit.py_path)))
+    assert syncer.sync(unit).action == "import"
+    name = b"Gary Bis" if "Gary Bis" in _text(unit.py_path) else b"Gary"
+    _editor_edit(unit, name, lambda st: st.set("x", 18))  # only Gary is regenerated
+    assert syncer.sync(unit).action == "export"
+    text = _text(unit.py_path)
+    assert re.search(r"@event\(300, .*\nclass %s\(Event\):" % cls, text)
+    assert "        %s.page_2()" % cls in text  # Ulysse, left as it was
+    assert syncer.sync(unit).action == "none"  # and it compiles
+
+
+def test_editor_rename_renames_the_class(exported2003):
+    syncer, unit = _setup(exported2003)
+    _append(unit, GARY.replace("@event(30, ", "@event(300, ") + "\n\n" + CALLER)
+    assert syncer.sync(unit).action == "import"
+    _editor_edit(unit, b"Gary", lambda st: st.set("name", b"Gary Bis"))
+    assert syncer.sync(unit).action == "export"
+    text = _text(unit.py_path)
+    assert "class GaryBis(Event):" in text and "GaryBis.page_2()" in text and "Gary.page" not in text
