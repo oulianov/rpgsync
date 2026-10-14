@@ -1432,10 +1432,24 @@ def split_entries(text: str, decorator: str, indent: str) -> tuple[list[str], di
     entry written at `indent`.  An entry runs from its decorator through its body, up to
     the next line indented no deeper than the decorator.  None when an entry has no
     literal id or an id appears twice: the caller then compiles everything."""
+    found = _entries(text, decorator, indent)
+    if found is None or any(eid is None for eid, _, _ in found[1]):
+        return None
+    return list(found[0]), {eid: (a, b) for eid, a, b in found[1]}  # type: ignore[misc]
+
+
+@functools.lru_cache(maxsize=8)  # a sync splits the same (large) script several times
+def _entries(
+    text: str, decorator: str, indent: str
+) -> tuple[tuple[str, ...], tuple[tuple[int | None, int, int], ...]] | None:
+    """split_entries, with the entries without a literal id (new ones) as id None:
+    (lines, ((id, first, end), ...)) in script order.  None when an id appears twice or
+    an entry has no body.  Shared by the callers: they get copies (split_entries)."""
     lines = text.split("\n")
     head = indent + "@" + decorator + "("
     starts = [n for n, line in enumerate(lines) if line.startswith(head)]
-    entries: dict[int, tuple[int, int]] = {}
+    entries: list[tuple[int | None, int, int]] = []
+    seen: set[int] = set()
     for k, start in enumerate(starts):
         limit = starts[k + 1] if k + 1 < len(starts) else len(lines)
         end, body = start + 1, False
@@ -1449,10 +1463,13 @@ def split_entries(text: str, decorator: str, indent: str) -> tuple[list[str], di
         if not body:
             return None
         m = re.match(r"\s*" + re.escape("@" + decorator) + r"\(\s*(\d+)\s*[,)]", "\n".join(lines[start:end]))
-        if m is None or int(m.group(1)) in entries:
+        eid = int(m.group(1)) if m else None
+        if eid is not None and eid in seen:
             return None
-        entries[int(m.group(1))] = (start, end)
-    return lines, entries
+        if eid is not None:
+            seen.add(eid)
+        entries.append((eid, start, end))
+    return tuple(lines), tuple(entries)
 
 
 def _skeleton(lines: list[str], entries: dict[int, tuple[int, int]]) -> list[str]:
@@ -1484,6 +1501,54 @@ def incremental_source(text: str, base: str, decorator: str, indent: str) -> tup
         if eid not in changed:
             part[a:b] = [""] * (b - a)
     return "\n".join(part), changed, [eid for eid in entries if eid not in changed]
+
+
+def map_incremental_source(text: str, base: str) -> tuple[str, list[int | None], list[int]] | None:
+    """incremental_source for a map script, which also takes events added (with or
+    without an id) or removed, and pages added, removed or moved.  An event refers to
+    the others by their names, and a Call Event holds a page number: besides the edited
+    events, the ones naming an event whose id or pages changed are compiled again.
+    -> (source, changed ids (None: a new event), unchanged ids); None: compile all."""
+    cur, old = _entries(text, "event", ""), _entries(base, "event", "")
+    if cur is None or old is None or any(eid is None for eid, _, _ in old[1]):
+        return None
+    (lines, entries), (base_lines, base_entries) = cur, old
+
+    def outside(lines, entries):  # what is not an event (blank lines don't count)
+        inside = {n for _, a, b in entries for n in range(a, b)}
+        return [line for n, line in enumerate(lines) if n not in inside and line.strip()]
+
+    if outside(lines, entries) != outside(base_lines, base_entries):
+        return None
+
+    def body(lines, a, b):  # the blank lines after an event change nothing
+        while b > a and not lines[b - 1].strip():
+            b -= 1
+        return lines[a:b]
+
+    before = {eid: body(base_lines, a, b) for eid, a, b in base_entries}
+    changed = [eid for eid, a, b in entries if eid is None or before.get(eid) != body(lines, a, b)]
+    removed = set(before) - {eid for eid, _, _ in entries}
+    if not changed and not removed:
+        return None
+    # the events whose id or pages changed, as the others name them
+    names, base_names = _event_names(text), _event_names(base)
+    moved = {
+        name
+        for name in set(names[0]) | set(base_names[0])
+        if names[0].get(name, -1) != base_names[0].get(name, -1) or names[1].get(name) != base_names[1].get(name)
+    }
+    if moved:
+        word = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, sorted(moved))))
+        changed += [
+            eid for eid, a, b in entries if eid not in changed and any(word.search(line) for line in lines[a + 1 : b])
+        ]
+    part = list(lines)
+    for eid, a, b in entries:
+        if eid not in changed:
+            part[a:b] = [""] * (b - a)
+    unchanged = [eid for eid, _, _ in entries if eid not in changed]
+    return "\n".join(part), changed, unchanged  # type: ignore[return-value]
 
 
 def differs_by_blank_lines_only(text: str, other: str, decorator: str, indent: str) -> bool:
@@ -2168,12 +2233,12 @@ _PAGE_LINE = re.compile(r"    def (\w+)\(")  # a page of an event (class or func
 def _event_names(src: str) -> tuple[dict[str, int | None], dict[str, dict[str, int]]]:
     """(event name -> id, event name -> {page function name -> page number}) of the
     events of a map script."""
-    found = split_entries(src, "event", "")
-    if found is not None:  # every entry has a literal id: read the def / class lines only
+    found = _entries(src, "event", "")
+    if found is not None:  # read the def / class lines only (a new event: id None)
         lines, entries = found
         ids: dict[str, int | None] = {}
         pages: dict[str, dict[str, int]] = {}
-        for eid, (a, b) in entries.items():
+        for eid, a, b in entries:
             i = next((i for i in range(a, b) if _EVENT_LINE.match(lines[i])), None)
             if i is None:
                 break

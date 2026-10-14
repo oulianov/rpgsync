@@ -344,14 +344,14 @@ class MapUnit(Unit):
         return S.renumbered_page_calls(old_text, new_text, root, changed, ctx, os.path.basename(self.py_path))
 
     def compile_incremental(self, text, base):
-        if S.page_renames(text):
-            return None  # pages renamed or moved: the calls to them are compiled anew everywhere
-        part = S.incremental_source(text, base, "event", "")
+        # events added or removed, pages moved: see map_incremental_source
+        part = S.map_incremental_source(text, base)
         if part is None:
             return None
         src, changed, unchanged = part
-        specs = S.compile_map_source(src, self.project.context(), self.py_path, names_src=text)
-        if sorted(s.id for s in specs) != sorted(changed):
+        specs = S.compile_map_source(src, self.project.context(), self.py_path, names_src=text) if changed else []
+        key = lambda i: (i is None, i or 0)  # noqa: E731
+        if sorted((s.id for s in specs), key=key) != sorted(changed, key=key):
             return None  # not the events we expected: compile everything
         return specs + [S.KeepSpec(id=eid) for eid in unchanged]
 
@@ -755,9 +755,28 @@ def _troops_sha(data: bytes | None, pages: bool) -> str:
 
 def insert_ids(text: str, assigned, decorator: str) -> str:
     """Write auto-assigned ids into the decorators of new events (top-level
-    functions of a map, methods of the CommonEvents class)."""
+    functions of a map, methods of the CommonEvents class), found from the lines
+    above their def / class (parsing a big script costs ~100 times more)."""
     if not assigned:
         return text
+    lines = text.split("\n")
+    head = "@" + decorator + "("
+    edits = []
+    for spec, new_id in assigned:
+        n = spec.lineno - 2  # the line above the def / class line
+        while n >= 0 and not lines[n].lstrip().startswith((head, "def ", "class ")):
+            n -= 1
+        if n < 0 or not lines[n].lstrip().startswith(head):
+            return _insert_ids_parsed(text, assigned, decorator)  # an unusual layout
+        pos = lines[n].index(head) + len(head)
+        after = next((s for s in [lines[n][pos:], *lines[n + 1 : spec.lineno]] if s.strip()), ")").lstrip()
+        edits.append((n, pos, "%d%s" % (new_id, "" if after.startswith(")") else ", ")))
+    for n, pos, ins in sorted(edits, reverse=True):
+        lines[n] = lines[n][:pos] + ins + lines[n][pos:]
+    return "\n".join(lines)
+
+
+def _insert_ids_parsed(text: str, assigned, decorator: str) -> str:
     tree = ast.parse(text)
     edits = []
     by_line = {spec.lineno: new_id for spec, new_id in assigned}
@@ -791,6 +810,7 @@ class State:
                 self.data = json.load(f)
         except (OSError, ValueError):
             self.data = {}
+        self._lines: dict[str, str] = {}  # unit -> its line of state.json, as last written
 
     def get(self, unit: Unit) -> dict | None:
         return self.data.get(unit.name)
@@ -813,12 +833,12 @@ class State:
         os.makedirs(os.path.dirname(base), exist_ok=True)
         with open(base, "w", encoding="utf-8") as f:
             f.write(py_text)
-        self.save()
+        self.save(unit.name)
 
     def forget(self, name: str) -> None:
         """Drop a unit whose files are gone (a deleted map)."""
         if self.data.pop(name, None) is not None:
-            self.save()
+            self.save(name)
         try:
             os.remove(os.path.join(self.base_dir, name + ".py"))
         except OSError:
@@ -831,11 +851,22 @@ class State:
         except OSError:
             return None
 
-    def save(self) -> None:
+    def save(self, *changed: str) -> None:
+        """Write state.json, one line per unit: only the `changed` units are encoded
+        again (all of them when none is named).  A sync records one unit, and encoding
+        the whole state each time (~100 KB for a big game) cost more than the sync."""
+        if not changed:
+            self._lines.clear()
+        for name in changed:
+            self._lines.pop(name, None)
+        for name in self.data.keys() - self._lines.keys():
+            self._lines[name] = "%s: %s" % (json.dumps(name), json.dumps(self.data[name], sort_keys=True))
+        for name in self._lines.keys() - self.data.keys():
+            del self._lines[name]
         self.project.ensure_state_dir()
         tmp = self.path + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(self.data, f, indent=1, sort_keys=True)
+            f.write("{\n" + ",\n".join(self._lines[name] for name in sorted(self._lines)) + "\n}\n")
         os.replace(tmp, self.path)
 
 
@@ -1014,7 +1045,7 @@ class Syncer:
             fingerprint = unit.fingerprint(data)
             if st is not None and st["bin"] != fingerprint:  # recorded by an older rpgsync, in another form
                 st["bin"] = fingerprint
-                self.state.save()
+                self.state.save(unit.name)
             return Result(unit=unit.name, action="none")
 
         if outdated and not py_changed and not bin_changed and prefer != "script":

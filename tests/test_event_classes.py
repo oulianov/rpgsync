@@ -444,3 +444,114 @@ def test_editor_rename_renames_the_class(exported2003):
     assert syncer.sync(unit).action == "export"
     text = _text(unit.py_path)
     assert "class GaryBis(Event):" in text and "GaryBis.page_2()" in text and "Gary.page" not in text
+
+
+# -- incremental compiles --------------------------------------------------------------
+
+BASE = (
+    '''"""Map0001"""
+
+from rpgsync.dsl import *
+
+
+'''
+    + GARY.replace("@event(30, ", "@event(300, ")
+    + """
+
+@event(301, "Ulysse", x=5, y=9)
+class Ulysse(Event):
+    def page_1(self):
+        Gary.page_2()
+
+
+@event(302, "Bystander", x=1, y=1)
+class Bystander(Event):
+    def page_1(self):
+        text("Nice weather.")
+"""
+)
+
+
+def _changed(text):
+    part = S.map_incremental_source(text, BASE)
+    return None if part is None else (sorted(part[1], key=lambda i: (i is None, i or 0)), sorted(part[2]))
+
+
+def test_incremental_edit_compiles_the_event_alone():
+    assert _changed(BASE.replace("Nice weather.", "Rain again.")) == ([302], [300, 301])
+
+
+def test_incremental_page_insert_compiles_the_callers():
+    """A page before Gary's page 2: Ulysse's Call Event changes page number."""
+    text = BASE.replace(
+        '    def page_1(self):\n        """Waiting',
+        '    @page(when=switches[9])\n    def new(self):\n        pass\n\n    def page_1(self):\n        """Waiting',
+    )
+    assert _changed(text) == ([300, 301], [302])
+
+
+def test_incremental_new_and_removed_events():
+    new = '\n\n@event(name="Newcomer", x=2, y=2)\nclass Newcomer(Event):\n    def page_1(self):\n        pass\n'
+    assert _changed(BASE + new) == ([None], [300, 301, 302])
+    gone = BASE[: BASE.index('\n\n@event(302, "Bystander"')] + "\n"
+    assert _changed(gone) == ([], [300, 301])
+    # Ulysse names Gary: removing Gary compiles Ulysse again (and reports the missing event)
+    without_gary = BASE[: BASE.index("@event(300, ")] + BASE[BASE.index('@event(301, "Ulysse"') :]
+    assert _changed(without_gary) == ([301], [302])
+
+
+def test_incremental_falls_back_outside_events():
+    assert _changed(BASE.replace("from rpgsync.dsl import *", "from rpgsync.dsl import *\nimport math")) is None
+    assert _changed(BASE) is None  # nothing changed
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda t: t.replace(
+            '    def page_1(self):\n        """Waiting',
+            '    @page(when=switches[9])\n    def new(self):\n        pass\n\n    def page_1(self):\n        """Waiting',
+        ),
+        lambda t: (
+            t
+            + '\n\n@event(name="Newcomer", x=2, y=2)\nclass Newcomer(Event):\n    def page_1(self):\n        Gary.page_1()\n'
+        ),
+        lambda t: t[: t.rindex("@event(", 0, t.index('"Ulysse"'))].rstrip("\n") + "\n",  # the last event
+    ],
+    ids=["page_insert", "event_add", "event_delete"],
+)
+def test_incremental_sync_writes_what_a_full_compile_gives(exported2003, edit):
+    syncer, unit = _setup(exported2003)
+    _append(unit, GARY.replace("@event(30, ", "@event(300, ") + "\n\n" + CALLER)
+    assert syncer.sync(unit).action == "import"
+    _write(unit.py_path, edit(_text(unit.py_path)))
+    calls = {"full": 0}
+    compile_all = unit.compile
+    unit.compile = lambda text: calls.__setitem__("full", calls["full"] + 1) or compile_all(text)
+    assert syncer.sync(unit).action == "import"
+    assert calls["full"] == 0  # compiled event by event
+    text, data = _text(unit.py_path), open(unit.bin_path, "rb").read()
+    key = lambda specs: sorted((s.key() for s in specs), key=repr)  # noqa: E731
+    assert key(compile_all(text)) == key(unit.specs_from_bin(data))
+
+
+@pytest.mark.parametrize(
+    "decorator, src",
+    [
+        ("event", '@event(name="Newcomer", x=2, y=2)\nclass Newcomer(Event):\n    pass\n'),
+        ("event", "@event()\nclass Newcomer(Event):\n    pass\n"),
+        ("event", '@event(\n    name="Newcomer",\n    x=2,\n)\nclass Newcomer(Event):\n    pass\n'),
+        (
+            "common_event",
+            'class CommonEvents(CommonEventTable):\n    @common_event(name="Rest")\n    def rest(self):\n        pass\n',
+        ),
+    ],
+)
+def test_insert_ids_without_parsing(decorator, src):
+    from rpgsync.sync import _insert_ids_parsed, insert_ids
+
+    text = '"""Map0001"""\n\nfrom rpgsync.dsl import *\n\n\n' + src
+    lineno = next(n for n, line in enumerate(text.split("\n"), 1) if line.lstrip().startswith(("class N", "def rest")))
+    spec = S.EventSpec(id=None, name=b"", x=0, y=0, pages=[], lineno=lineno)
+    assert insert_ids(text, [(spec, 44)], decorator) == _insert_ids_parsed(text, [(spec, 44)], decorator)
+    assert "(44" in insert_ids(text, [(spec, 44)], decorator)
