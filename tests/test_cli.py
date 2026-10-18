@@ -146,6 +146,21 @@ def test_push_logs_timing(project):
     assert re.search(r"Map0001: Map0001\.py -> Map0001\.lmu: changed event 9 \(\d+\.\d\d s\)$", out, re.M), out
 
 
+def test_push_writes_only_what_changed(project):
+    lmu, ldb, script = project / "Map0001.lmu", project / "RPG_RT.ldb", project / "Scripts" / "Map0001.py"
+    assert "Nothing to push" in _cli("push", project)
+    original, database = lmu.read_bytes(), ldb.read_bytes()
+    _edit(script, "variables.variable_0001 = 9999999", "variables[1] = 1234567")
+    out = _cli("push", project)
+    assert "Map0001.py -> Map0001.lmu" in out and "RPG_RT.ldb" not in out and "up to date" not in out
+    assert ldb.read_bytes() == database
+    pushed = lmu.read_bytes()
+    lmu.write_bytes(original)  # edited in the editor, not in the script: the script wins
+    assert "Map0001.py -> Map0001.lmu" in _cli("push", project)
+    assert lmu.read_bytes() == pushed
+    assert re.search(r"\d+ files already up to date", _cli("push", project, "--force"))  # every script
+
+
 EMOJIS = [emoji for emoji, _ in cli.MARKERS.values()]
 
 

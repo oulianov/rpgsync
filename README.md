@@ -162,6 +162,8 @@ rpgsync push     # scripts -> game
 - Each command works on the game of the current folder, or on the game or `Scripts` folder given as argument. 
 - `--map N` limits a command to one map; `check` also takes scripts and folders of scripts
 - `pull --force` overwrites scripts that have unsynced edits.
+- `push` writes the scripts changed since the last sync, and overwrites the game's changes made
+  in the editor; `push --force` writes every script.
 - `rpgsync check` also checks the maps: teleports, vehicle locations and
   teleport / escape targets go to a map of the map tree and inside it, every
   map of the tree has its file, and no `MapNNNN.py` is left from a deleted map.

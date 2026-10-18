@@ -363,7 +363,7 @@ def test_edit_during_a_sync_is_never_overwritten(exported2003):
     syncer, unit = _setup(exported2003)
     # the game changes (the editor saved): rpgsync starts regenerating the script
     data = open(unit.bin_path, "rb").read()
-    syncer.sync(unit, "script")  # a game write of our own, so that the next sync sees a game change
+    syncer.sync(unit, "script", force=True)  # a game write of our own, so that the next sync sees a game change
     os.utime(unit.bin_path)
     decompile = unit.decompile
 

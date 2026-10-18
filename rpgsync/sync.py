@@ -999,10 +999,11 @@ class Syncer:
         return check_specs(changed, engine, patches, allow)
 
     # -- main entry ------------------------------------------------------------
-    def sync(self, unit: Unit, prefer: str | None = None) -> Result:
-        """prefer: None (automatic), "game" (export) or "script" (import)."""
+    def sync(self, unit: Unit, prefer: str | None = None, force: bool = False) -> Result:
+        """prefer: None (automatic), "game" (export) or "script" (import: the script wins
+        where the script or the game changed since the last sync; with `force`, everywhere)."""
         try:
-            return self._sync(unit, prefer)
+            return self._sync(unit, prefer, force)
         except ChangedMeanwhile as e:
             # the game file or the script was saved while we worked on the old version
             return Result(
@@ -1012,7 +1013,7 @@ class Syncer:
             # a game file read while the editor writes it, a file locked by another program (Windows)...
             return Result(unit=unit.name, action="none", message="cannot sync yet (%s): trying again" % e, retry=True)
 
-    def _sync(self, unit: Unit, prefer: str | None) -> Result:
+    def _sync(self, unit: Unit, prefer: str | None, force: bool = False) -> Result:
         what = {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(unit.kind, "entry")
         data = read_bytes(unit.bin_path)
         if data is None:
@@ -1037,8 +1038,9 @@ class Syncer:
         bin_changed = unit.bin_changed(data, st)
         py_hash = sha(text.encode("utf-8"))
         py_changed = st is None or py_hash != st["py"]
-        if prefer == "script":
-            bin_changed, py_changed = False, True
+        game_changed = bin_changed
+        if prefer == "script" and (force or bin_changed or py_changed):
+            bin_changed, py_changed = False, True  # the script wins
         outdated = st is not None and st.get("format") != FORMAT  # written by an older rpgsync
         if not bin_changed and not py_changed and not outdated:
             fingerprint = unit.fingerprint(data)
@@ -1071,7 +1073,7 @@ class Syncer:
         if self._failed.get(unit.name) == py_hash and prefer is None:
             return Result(unit=unit.name, action="none")  # same broken script as before; already reported
         base = None
-        if st is not None and not bin_changed and prefer is None and st.get("ctx") == self.project.context_signature():
+        if st is not None and not game_changed and not force and st.get("ctx") == self.project.context_signature():
             # the game is as the last sync left it: compile only what was edited since
             base = self.state.base_text(unit)
             if base is not None and sha(base.encode("utf-8")) != st["py"]:

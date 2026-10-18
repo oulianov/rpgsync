@@ -360,7 +360,9 @@ def _units(syncer: Syncer, maps: list[int] | None, no_common: bool) -> Iterator[
         yield u
 
 
-def _sync_all(syncer: CliSyncer, units: list[Unit], prefer: str | None, initial: bool = False) -> int:
+def _sync_all(
+    syncer: CliSyncer, units: list[Unit], prefer: str | None, initial: bool = False, force: bool = False
+) -> int:
     """Sync units under a progress bar; return how many failed.  initial: the first
     export of a new project, summed up in one line instead of one line per script."""
     ui = syncer.ui
@@ -380,7 +382,7 @@ def _sync_all(syncer: CliSyncer, units: list[Unit], prefer: str | None, initial:
         for u in units:
             progress.update(task, unit=u.name)
             start = time.perf_counter()
-            r = syncer.sync(u, prefer)
+            r = syncer.sync(u, prefer, force)
             r.seconds = time.perf_counter() - start
             progress.advance(task)
             if r.action in ("export", "import") and r.message.endswith(": no changes"):
@@ -390,7 +392,7 @@ def _sync_all(syncer: CliSyncer, units: list[Unit], prefer: str | None, initial:
                 written += 1
                 continue
             syncer.report(r)
-            reported += 1
+            reported += r.action != "none" or bool(r.message)  # a line printed
             failed += r.action in ("error", "conflict")
     if initial:
         took = time.perf_counter() - begin
@@ -404,6 +406,8 @@ def _sync_all(syncer: CliSyncer, units: list[Unit], prefer: str | None, initial:
     if unchanged:
         files = "%d %sfile%s" % (unchanged, "other " if reported else "", "s" * (unchanged > 1))
         ui.print(("%s already up to date" % files, "dim"))
+    elif prefer == "script" and not reported:
+        ui.print(("Nothing to push: no script or game file changed since the last sync", "dim"))
     return failed
 
 
@@ -411,8 +415,8 @@ def _duration(seconds: float) -> str:
     return "%.1f s" % seconds if seconds < 60 else "%d min %02d s" % divmod(round(seconds), 60)
 
 
-def _run(syncer: CliSyncer, units, prefer: str | None, initial: bool = False) -> None:
-    if _sync_all(syncer, list(units), prefer, initial):
+def _run(syncer: CliSyncer, units, prefer: str | None, initial: bool = False, force: bool = False) -> None:
+    if _sync_all(syncer, list(units), prefer, initial, force):
         raise typer.Exit(1)
 
 
@@ -663,12 +667,20 @@ def pull(
     _run(syncer, _units(syncer, map, no_common), "game" if force else None, initial)
 
 
-def push(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt = False):
-    """Scripts -> game: write the scripts into the game files.
+def push(
+    project: ProjectArg = None,
+    map: MapOpt = None,
+    no_common: NoCommonOpt = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Write every script, also those unchanged since the last sync.")
+    ] = False,
+):
+    """Scripts -> game: write the scripts changed since the last sync into the game files (the
+    script wins over edits made in the editor).
 
     With the RPG Maker 2000/2003 editor: open it after the push, so it reads them."""
     syncer = _open(project)
-    _run(syncer, _units(syncer, map, no_common), "script")
+    _run(syncer, _units(syncer, map, no_common), "script", force=force)
 
 
 def locate(
