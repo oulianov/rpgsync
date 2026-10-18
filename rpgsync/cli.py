@@ -47,6 +47,8 @@ from rich.text import Text
 from .compat import check_specs, check_warnings, load_rules, target_engine
 from .maptree import map_reference_problems, map_tree_maps, tree_problems
 from .project import Project
+from .resources import Collector
+from .resources import problems as resource_problems
 from .scaffold import init_scripts_project, update_scripts_project
 from .script import (
     CompileError,
@@ -834,8 +836,10 @@ def check(
     declared, allow = load_rules(proj.script_dir)
     errors = warnings = 0
     tree_maps, sizes = map_tree_maps(proj)
+    resources = Collector(proj.encoding)  # the files the scripts and the game use
     for u in _units(syncer, map, no_common):
         if not os.path.exists(u.py_path):
+            _game_resources(resources, u)
             continue
         with open(u.py_path, encoding="utf-8") as f:
             text = f.read()
@@ -844,7 +848,9 @@ def check(
         except ScriptError as e:
             err.print((str(e), "red"), kind="error")
             errors += 1
+            _game_resources(resources, u)
             continue
+        resources.specs(specs, u.py_path)
         for problem in check_specs(specs, engine, patches or declared, allow):
             err.print((u.py_path, "cyan"), ": ", (problem, "red"), kind="error")
             errors += 1
@@ -871,6 +877,7 @@ def check(
             err.print(("RPG_RT.lmt", "cyan"), ": ", (problem, "yellow"), kind="warning")
         errors += len(tree_errors)
         warnings += len(tree_warnings)
+    warnings += _check_resources(resources, proj, ui, err, complete=not map and not no_common)
     if not no_types:
         errors += _check_types(syncer.project.script_dir, ui, err)
     warned = ("%d warning(s)" % warnings, "bold yellow") if warnings else None
@@ -879,6 +886,48 @@ def check(
         raise typer.Exit(1)
     what = "compile and fit the engine" + (" and pass the type check" if not no_types else "")
     ui.print(("All scripts %s" % what, "bold green"), *([" (", warned, ")"] if warned else []), kind="ok")
+
+
+def _game_resources(resources: Collector, unit: Unit) -> None:
+    """The resources of a unit whose script is missing or does not compile, from its game file."""
+    data = read_bytes(unit.bin_path)
+    if data is None:
+        return
+    try:
+        resources.specs(unit.bin_specs(data), os.path.basename(unit.bin_path))
+    except Exception:  # unreadable game data: reported by the sync
+        pass
+
+
+def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, complete: bool) -> int:
+    """Warn about references to files the game does not have (not imported), and, when
+    every script was read (`complete`), about imported files nothing uses.  -> warnings"""
+    if complete:
+        resources.game(proj.game_dir, proj.ldb_path)
+    found = resource_problems(resources, proj.game_dir, proj.context().engine, complete)
+    grouped: dict[tuple[str, str], list] = {}  # (database file, folder) -> its references
+    for ref in found.missing:
+        if not ref.event:  # the database keeps many (default entries never shown): one line per folder
+            grouped.setdefault((ref.path, ref.folder), []).append(ref)
+            continue
+        where = "%s:%d" % (ref.path, ref.line) if ref.line else ref.path
+        problem = "%s uses %s/%s, which is not imported" % (ref.what, ref.folder, ref.name)
+        err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
+    for (path, folder), refs in grouped.items():
+        where = "%s:%d" % (path, refs[0].line) if refs[0].line else path
+        names = list(dict.fromkeys(r.name for r in refs))
+        shown = ", ".join(names[:8]) + (" and %d more" % (len(names) - 8) if len(names) > 8 else "")
+        if len(refs) == 1:
+            problem = "%s uses %s/%s, which is not imported" % (refs[0].what, folder, refs[0].name)
+        else:
+            problem = "%d entries use %s files that are not imported: %s" % (len(refs), folder, shown)
+        err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
+    for folder, names in found.unused.items():
+        problem = "%d imported file%s never used: %s" % (len(names), "s" * (len(names) > 1), ", ".join(names))
+        err.print((folder + "/", "cyan"), ": ", (problem, "yellow"), kind="warning")
+    if found.note:
+        ui.print(found.note, kind="info")
+    return sum(r.event for r in found.missing) + len(grouped) + len(found.unused)
 
 
 def _ty(script_dir: str) -> str | None:
