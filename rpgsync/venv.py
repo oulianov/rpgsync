@@ -4,7 +4,8 @@ uv writes the absolute path of the environment into its commands (the
 launchers of rpgsync, pytest... in .venv/bin) and activate scripts. A game
 folder copied or renamed keeps them pointing at the old folder: they fail, or
 run the old folder's environment. Its Python itself still works (a link to
-uv's), so the paths are written again for where the environment is now.
+uv's), so the paths are written again for where the environment is now, as is
+the old folder's .rpgsync/rpgsync named by the editable install of rpgsync.
 
 On Windows the launchers are programs (.exe), not rewritten here:
 ``uv sync --reinstall`` in the scripts folder makes them again.
@@ -12,6 +13,7 @@ On Windows the launchers are programs (.exe), not rewritten here:
 
 from __future__ import annotations
 
+import glob
 import os
 import re
 import shlex
@@ -88,4 +90,13 @@ def repair(script_dir: str) -> str | None:
             with open(path, "r+b") as f:  # in place: the file keeps its mode
                 f.write(fixed)
                 f.truncate()
+    # the editable install of rpgsync (a .pth file) names the old folder's .rpgsync/rpgsync link
+    old_link = os.fsencode(os.path.join(os.path.dirname(old), ".rpgsync") + os.sep)
+    new_link = os.fsencode(os.path.join(os.path.dirname(venv), ".rpgsync") + os.sep)
+    for pth in glob.glob(os.path.join(glob.escape(venv), "lib", "python*", "site-packages", "*.pth")):
+        with open(pth, "rb") as f:
+            data = f.read()
+        if old_link in data:
+            with open(pth, "wb") as f:
+                f.write(data.replace(old_link, new_link))
     return old

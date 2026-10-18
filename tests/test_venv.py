@@ -39,6 +39,21 @@ def test_launchers_of_a_renamed_folder_point_at_it(tmp_path):
     assert repair(str(script_dir)) is None
 
 
+def test_the_editable_rpgsync_follows_the_folder(tmp_path):
+    old = tmp_path / "old game" / ".venv" / "bin" / "python"
+    header = b"#!/bin/sh\n'''exec' '" + os.fsencode(old) + b"' \"$0\" \"$@\"\n' '''\n"
+    script_dir, bin_dir, body = _venv(tmp_path, "new game", header)
+    site = script_dir / ".venv" / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "_rpgsync.pth").write_text("%s/.rpgsync/rpgsync/\n" % (tmp_path / "old game"))
+    (site / "other.pth").write_text("/elsewhere/lib\n")
+
+    repair(str(script_dir))
+
+    assert (site / "_rpgsync.pth").read_text() == "%s/.rpgsync/rpgsync/\n" % script_dir
+    assert (site / "other.pth").read_text() == "/elsewhere/lib\n"
+
+
 def test_a_short_path_gets_the_shell_line_for_spaces(tmp_path):
     script_dir, bin_dir, body = _venv(tmp_path, "with space", b"#!/old/.venv/bin/python\n")
 

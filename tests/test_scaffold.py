@@ -6,7 +6,14 @@ import tomllib
 
 from rpgsync import dsl, named
 from rpgsync.project import Project
-from rpgsync.scaffold import PYPROJECT, detect_patches, init_scripts_project, update_scripts_project
+from rpgsync.scaffold import (
+    LINK_SOURCE,
+    PYPROJECT,
+    RPGSYNC_ROOT,
+    detect_patches,
+    init_scripts_project,
+    update_scripts_project,
+)
 
 
 def test_no_patches(tmp_path):
@@ -66,9 +73,10 @@ def test_star_import_names():
 
 def test_pyproject_template_is_toml():
     config = tomllib.loads(
-        PYPROJECT.format(name="g", title="G", source="{ path = 'x' }", game="..", engine="2003", patches="[]")
+        PYPROJECT.format(name="g", title="G", source=LINK_SOURCE, game="..", engine="2003", patches="[]")
     )
     assert config["tool"]["pyright"] == {"reportWildcardImportFromLibrary": False}
+    assert config["tool"]["uv"]["sources"]["rpgsync"] == {"path": ".rpgsync/rpgsync", "editable": True}
 
 
 def test_game_types(game2003):
@@ -95,4 +103,31 @@ def test_pyright_settings_added_once(game2003):
     assert tomllib.loads(pyproject.read_text())["tool"]["pyright"] == {"reportWildcardImportFromLibrary": False}
     assert update_scripts_project(project) == []
     pyproject.write_text(old + "\n[tool.pyright]\nstrict = []\n")  # the user's own settings are kept
+    assert update_scripts_project(project) == []
+
+
+def test_rpgsync_found_through_a_link(game2003):
+    """pyproject.toml (and uv.lock) name rpgsync by the same relative path on every
+    computer: .rpgsync/rpgsync, a link to this computer's rpgsync folder."""
+    project = Project(str(game2003))
+    init_scripts_project(project)
+    link = game2003 / "Scripts" / ".rpgsync" / "rpgsync"
+    assert link.is_symlink() and link.resolve() == RPGSYNC_ROOT
+    link.unlink()  # rpgsync moved: the link follows
+    link.symlink_to(game2003, target_is_directory=True)
+    assert update_scripts_project(project) == []
+    assert link.resolve() == RPGSYNC_ROOT
+
+
+def test_absolute_path_of_an_older_rpgsync(game2003):
+    project = Project(str(game2003))
+    init_scripts_project(project)
+    pyproject = game2003 / "Scripts" / "pyproject.toml"
+    text = pyproject.read_text()
+    for path in ("/Users/someone/rpgsync", "C:/Users/someone/rpgsync"):
+        pyproject.write_text(text.replace(LINK_SOURCE, 'rpgsync = { path = "%s", editable = true }' % path))
+        assert update_scripts_project(project) == [str(pyproject)]
+        assert pyproject.read_text() == text
+    custom = text.replace(LINK_SOURCE, 'rpgsync = { path = "../rpgsync", editable = true }')
+    pyproject.write_text(custom)  # a relative path of the user's own is kept
     assert update_scripts_project(project) == []

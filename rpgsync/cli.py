@@ -286,8 +286,17 @@ def _open(project: str | None) -> CliSyncer:
     old = repair_venv(project.script_dir)
     if old:
         UI(err=True).print("repaired the scripts' Python environment, made in %s" % old, kind="info")
-    update_scripts_project(project)  # files that an older rpgsync did not write
+    # files that an older rpgsync did not write; uv.lock and .venv follow pyproject.toml
+    if str(Path(project.script_dir) / "pyproject.toml") in update_scripts_project(project):
+        _uv_sync(project.script_dir, UI(err=True))
     return CliSyncer(project)
+
+
+def _uv_sync(script_dir: str, ui: UI) -> None:
+    """Install the scripts' Python environment, when uv is there."""
+    if shutil.which("uv"):
+        with ui.console.status("Installing the scripts' Python environment (uv sync)..."):
+            subprocess.run(["uv", "sync", "--quiet"], cwd=script_dir, check=False)
 
 
 def _interactive() -> bool:
@@ -335,9 +344,7 @@ def _set_up(syncer: CliSyncer, yes: bool) -> None:
         "created %s (%s)" % (scripts, ", ".join(os.path.relpath(p, project.script_dir) for p in written)),
         kind="file",
     )
-    if shutil.which("uv"):
-        with ui.console.status("Installing the scripts' Python environment (uv sync)..."):
-            subprocess.run(["uv", "sync", "--quiet"], cwd=project.script_dir, check=False)
+    _uv_sync(project.script_dir, ui)
     ui.echo("")
 
 

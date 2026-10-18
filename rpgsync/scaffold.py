@@ -8,13 +8,23 @@ import os
 import re
 import tomllib
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote, urlparse
 
 from .project import Project
 
 RPGSYNC_ROOT = Path(__file__).resolve().parent.parent
 RPGSYNC_GIT = "https://github.com/oulianov/rpgsync"
+# The scripts project finds rpgsync through a link, in the folder rpgsync keeps out of
+# git, to this computer's rpgsync folder: pyproject.toml and uv.lock then hold the
+# same relative path on every computer sharing the game.
+RPGSYNC_LINK = ".rpgsync/rpgsync"
+LINK_SOURCE = (
+    "# .rpgsync/rpgsync: a link to this computer's rpgsync folder, made by rpgsync\n"
+    f'rpgsync = {{ path = "{RPGSYNC_LINK}", editable = true }}'
+)
+# the source line of an older rpgsync: the absolute path of its folder on one computer
+_PATH_SOURCE = re.compile(r'^rpgsync = \{ path = "(?P<path>[^"]*)", editable = true \}[ \t]*$', re.M)
 
 PYRIGHT = """\
 [tool.pyright]
@@ -38,7 +48,7 @@ dev = ["pytest>=8", "pytest-xdist>=3", "ruff>=0.6", "ty"]
 package = false
 
 [tool.uv.sources]
-rpgsync = {source}
+{source}
 
 [tool.rpgsync]
 # game folder, relative to this file
@@ -247,19 +257,83 @@ __pycache__/
 """
 
 
-def rpgsync_source() -> str:
-    """How the scripts project depends on rpgsync (TOML inline table)."""
+def rpgsync_checkout() -> Path | None:
+    """The folder of the running rpgsync when it is a clone, None when it was
+    installed from git."""
     if (RPGSYNC_ROOT / "pyproject.toml").exists():  # source checkout / editable install
-        return '{ path = "%s", editable = true }' % RPGSYNC_ROOT.as_posix()
+        return RPGSYNC_ROOT
     try:  # uvx --from <clone> / uv tool install <clone>
         direct = json.loads(metadata.distribution("rpgsync").read_text("direct_url.json") or "{}")
         url = urlparse(direct.get("url", ""))
         path = Path(unquote(url.path))
         if url.scheme == "file" and (path / "pyproject.toml").exists():
-            return '{ path = "%s", editable = true }' % path.as_posix()
+            return path
     except (metadata.PackageNotFoundError, ValueError):
         pass
-    return '{ git = "%s" }' % RPGSYNC_GIT
+    return None
+
+
+def rpgsync_source() -> str:
+    """The [tool.uv.sources] line saying where the scripts project gets rpgsync."""
+    if rpgsync_checkout():
+        return LINK_SOURCE
+    return 'rpgsync = { git = "%s" }' % RPGSYNC_GIT
+
+
+def _same(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or on Windows a junction (os.readlink reads both)."""
+    if path.is_symlink():
+        return True
+    if os.name == "nt":
+        try:
+            os.readlink(path)
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+def link_rpgsync(script_dir: str | Path) -> bool:
+    """Point <scripts>/.rpgsync/rpgsync at this computer's rpgsync folder, made again
+    when it is missing or points elsewhere.  -> whether it changed."""
+    target = rpgsync_checkout()
+    link = Path(script_dir) / RPGSYNC_LINK
+    if target is None or _same(link, target):
+        return False
+    if _is_link(link):
+        (os.rmdir if os.name == "nt" else os.unlink)(link)  # the link only, never what it points at
+    elif link.exists():
+        return False  # a real folder: left alone
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            raise
+        import _winapi  # no right to make symlinks: a junction needs none
+
+        _winapi.CreateJunction(str(target), str(link))
+    return True
+
+
+def _uses_link(pyproject_text: str) -> bool:
+    try:
+        source = tomllib.loads(pyproject_text).get("tool", {}).get("uv", {}).get("sources", {}).get("rpgsync", {})
+    except tomllib.TOMLDecodeError:
+        return False
+    return isinstance(source, dict) and source.get("path") == RPGSYNC_LINK
+
+
+def _absolute(path: str) -> bool:
+    """Absolute on this computer or another one (a pyproject.toml written on Windows)."""
+    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
 def detect_patches(game_dir: str) -> list[str]:
@@ -295,20 +369,28 @@ def game_types(project: Project) -> str:
 
 def update_scripts_project(project: Project) -> list[str]:
     """Bring the scripts folder of a set-up game up to date with this rpgsync: the
-    Pylance settings of pyproject.toml, database/game_types.py.  Returns the written paths."""
+    rpgsync source and Pylance settings of pyproject.toml, the .rpgsync/rpgsync link,
+    database/game_types.py.  Returns the written paths."""
     root = Path(project.script_dir)
     pyproject = root / "pyproject.toml"
     if not pyproject.exists():
         return []  # not set up: reading a game never creates its scripts folder
     written = []
-    text = pyproject.read_text(encoding="utf-8")
+    text = original = pyproject.read_text(encoding="utf-8")
+    old_source = _PATH_SOURCE.search(text)
+    if old_source and _absolute(old_source["path"]) and rpgsync_checkout():
+        text = text[: old_source.start()] + LINK_SOURCE + text[old_source.end() :]
     try:
         configured = "pyright" in tomllib.loads(text).get("tool", {})
     except tomllib.TOMLDecodeError:
         configured = True  # a file being edited: left as it is
     if not configured:
-        pyproject.write_text(text.rstrip("\n") + "\n\n" + PYRIGHT, encoding="utf-8")
+        text = text.rstrip("\n") + "\n\n" + PYRIGHT
+    if text != original:
+        pyproject.write_text(text, encoding="utf-8")
         written.append(str(pyproject))
+    if _uses_link(text):
+        link_rpgsync(root)
     path = root / "database" / "game_types.py"
     content = game_types(project)
     if not path.exists() or path.read_text(encoding="utf-8") != content:
@@ -349,4 +431,6 @@ def init_scripts_project(project: Project) -> list[str]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         written.append(str(path))
+    if _uses_link((root / "pyproject.toml").read_text(encoding="utf-8")):
+        link_rpgsync(root)
     return written

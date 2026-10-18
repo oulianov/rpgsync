@@ -102,7 +102,7 @@ rpgsync
 ```
 Open the `Scripts` folder in your editor and select its `.venv` as the Python interpreter. You're seeing your Python clone!
 
-Copied or renamed the game folder? The commands of its `.venv` still point at the old folder: the next `rpgsync` (or `.venv/bin/python -m rpgsync`) writes them again for the new one. On Windows, run `uv sync --reinstall` in the `Scripts` folder.
+
 
 ### 4. Choose your editor workflow
 
