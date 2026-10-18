@@ -182,6 +182,12 @@ class Collector:
         # with these; folder None: any
         self.prefixes: set[tuple[str | None, str]] = set()
 
+    def merge(self, other: Collector) -> None:
+        """Add what another collector gathered (a script checked in another process)."""
+        self.refs += other.refs
+        self.texts += other.texts
+        self.prefixes |= other.prefixes
+
     def _dec(self, raw: bytes | str) -> str:
         return raw if isinstance(raw, str) else bytes(raw).decode(self.encoding, "replace")
 

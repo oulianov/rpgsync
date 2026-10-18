@@ -378,20 +378,38 @@ def map_src(n: int) -> str:
     return "maps.%s" % name if name else str(n)
 
 
+_IDS: dict[int, tuple[Mapping[int, str], dict[str, int]]] = {}  # id(names) -> (names, name -> id)
+
+
+def _ids(coll: str) -> dict[str, int]:
+    """Name -> id (the first one) of the variables, switches, maps...: built once per
+    set of names (a game has thousands, each script refers to many)."""
+    names = _DB_NAMES.get().get(coll, _NONE)
+    found = _IDS.get(id(names))
+    if found is None or found[0] is not names:
+        ids: dict[str, int] = {}
+        for n, name in names.items():
+            ids.setdefault(name, n)
+        if len(_IDS) > 64:
+            _IDS.clear()
+        _IDS[id(names)] = found = (names, ids)
+    return found[1]
+
+
 def _map_id(node: ast.Attribute) -> int:
     """``maps.relm`` -> the id of that map"""
-    for n, name in _DB_NAMES.get().get("maps", _NONE).items():
-        if name == node.attr:
-            return n
+    n = _ids("maps").get(node.attr)
+    if n is not None:
+        return n
     raise CompileError("no map named %r in database/map_tree.py (deleted, or renamed there?)" % node.attr, node)
 
 
 def _named_ref(node: ast.Attribute) -> Ref:
     """``variables.code_voulu`` -> Ref(variables, 32)"""
     coll = node.value.id  # type: ignore[attr-defined]
-    for n, name in _DB_NAMES.get().get(coll, _NONE).items():
-        if name == node.attr:
-            return Ref(coll=coll, index=n, node=node)
+    n = _ids(coll).get(node.attr)
+    if n is not None:
+        return Ref(coll=coll, index=n, node=node)
     what = {"variables": "variable", "switches": "switch", "common_events": "common event"}[coll]
     raise CompileError("no %s named %r in database/%s.py" % (what, node.attr, coll), node)
 

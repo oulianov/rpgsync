@@ -581,6 +581,17 @@ def test_check_reports_map_references(exported2003):
     assert "Map tree" in out and "Map0099.py: the game has no map 99" in out
 
 
+def test_check_in_several_processes(exported2003):
+    script = os.path.join(exported2003, "Scripts", "Map0004.py")
+    _edit(script, "teleport(maps.dungeon_road, 9, 2)", "teleport(maps.dungeon_road, 90, 2)")
+    with open(os.path.join(exported2003, "Scripts", "Map0001.py"), "a", encoding="utf-8") as f:
+        f.write("\nnot an event\n")  # does not compile
+    alone = _cli("check", exported2003, "--no-types", "--resources", "--jobs", 1, ok=False)
+    assert "teleport to Dungeon Road (map 3) at (90, 2)" in alone and "Map0001.py:" in alone
+    assert "2 problem(s)" in alone
+    assert _cli("check", exported2003, "--no-types", "--resources", "--jobs", 3, ok=False) == alone
+
+
 def test_locate_map_tree_entries(exported2003):
     path, line = _cli("locate", exported2003, "--map-tree", 3).strip().rsplit(":", 1)
     lines = _text(path).split("\n")

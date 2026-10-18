@@ -29,6 +29,7 @@ import ast
 import copy
 import keyword
 import re
+from collections.abc import Callable
 from functools import cache
 from typing import Any
 
@@ -809,7 +810,8 @@ def _eval(node: ast.AST) -> Any:
             a, b = b, a
         if not isinstance(a, list) or isinstance(b, bool) or not isinstance(b, int) or b < 0:
             raise CompileError("only `[...] * count` is supported", node)
-        return [copy.deepcopy(x) for _ in range(b) for x in a]
+        copies = [_copier(x) for x in a]
+        return [c() for _ in range(b) for c in copies]
     if isinstance(node, ast.Call):
         if not isinstance(node.func, ast.Name) or node.func.id not in MODEL_CLASSES:
             raise CompileError(
@@ -838,36 +840,71 @@ def _eval(node: ast.AST) -> Any:
     raise CompileError("unsupported expression %s" % ast.unparse(node), node)
 
 
+_PLAIN = (type(None), bool, int, str)
+
+
+def _copier(v: Any) -> Callable[[], Any]:
+    """What copies an evaluated value, for `[...] * count`: a model holding plain values
+    only (the 440 `BattlerAnimationItemSkill()` of a skill) is copied shallow, much
+    faster than deepcopy."""
+    if type(v) in _PLAIN:
+        return lambda: v
+    if isinstance(v, BaseModel) and all(type(x) in _PLAIN for x in v.__dict__.values()):
+        return v.model_copy
+    return lambda: copy.deepcopy(v)
+
+
+@cache
+def _plan(sname: str) -> tuple[tuple[FieldDef, str, str, bool], ...]:
+    """(field, kind, enum or structure, depends on the engine) of the exported fields."""
+    return tuple((f, *f.model.partition(":")[::2], _engine_dependent(f)) for f in _fields(sname))
+
+
+@cache
+def _enum_names(enum: str) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for k, x in ENUMS[enum].items():
+        names.setdefault(x, k)
+    return names
+
+
 def _normalize(model: BaseModel, sname: str) -> None:
     """Enum numbers -> names, element ids -> explicit positions."""
-    for f in _fields(sname):
-        v = getattr(model, f.name)
-        m = f.model
-        if m.startswith("enum:") and isinstance(v, int) and not isinstance(v, bool):
-            setattr(model, f.name, _enum_name(m[5:], v))
-        elif m.startswith("struct:"):
-            _normalize(v, m[7:])
-        elif m.startswith("array:"):
-            for i, e in enumerate(v):
+    for f, kind, arg, _ in _plan(sname):
+        if kind == "enum":
+            v = getattr(model, f.name)
+            if isinstance(v, int) and not isinstance(v, bool):
+                setattr(model, f.name, _enum_names(arg).get(v, v))
+        elif kind == "struct":
+            _normalize(getattr(model, f.name), arg)
+        elif kind == "array":
+            for i, e in enumerate(getattr(model, f.name)):
                 if e.id is None:
                     e.id = i + 1
-                _normalize(e, m[6:])
+                _normalize(e, arg)
 
 
 def _check_encodable(model: BaseModel, sname: str, ctx: Ctx, node: ast.AST) -> None:
     """Fail at compile time for values that cannot be stored (text outside
     the game encoding, numbers out of range...)."""
-    for f in _fields(sname):
+    for f, kind, arg, engine_dependent in _plan(sname):
         v = getattr(model, f.name)
-        m = f.model
         try:
-            if m.startswith("struct:"):
-                _check_encodable(v, m[7:], ctx, node)
-            elif m.startswith("array:"):
+            if kind == "struct":
+                _check_encodable(v, arg, ctx, node)
+            elif kind == "array":
+                checked = set()  # the values of elements already checked (440 alike in a skill)
                 for e in v:
                     _check_range(e.id, *INT32, "%s id" % f.name)
-                    _check_encodable(e, m[6:], ctx, node)
-            elif not (_engine_dependent(f) and v is None):
+                    values = tuple(e.__dict__.values())
+                    try:
+                        if values[1:] in checked:  # all but the id (the first field)
+                            continue
+                        checked.add(values[1:])
+                    except TypeError:  # unhashable: lists, structures
+                        pass
+                    _check_encodable(e, arg, ctx, node)
+            elif not (engine_dependent and v is None):
                 _to_lcf(f, v, ctx)
         except CompileError as e:
             raise CompileError("%s: %s" % (f.name, e), node) from None
@@ -922,6 +959,13 @@ def table_size(text: str) -> TableSize | None:
 def compile_table(name: str, text: str, ctx: Ctx, filename: str = "<database>") -> list[M.DbModel]:
     """Parse a database file into its entries (validated models, with their
     attribute name in ``_ident``).  ``size = N`` is read by table_size()."""
+    return compile_table_sized(name, text, ctx, filename)[0]
+
+
+def compile_table_sized(
+    name: str, text: str, ctx: Ctx, filename: str = "<database>"
+) -> tuple[list[M.DbModel], TableSize | None]:
+    """compile_table() and table_size() in one parse.  -> (entries, size)"""
     if name not in _TABLE_INFO:
         raise CompileError("unknown database table %r" % name)
     sname = table_struct(name)
@@ -933,16 +977,19 @@ def compile_table(name: str, text: str, ctx: Ctx, filename: str = "<database>") 
     body, legacy = _table_body(name, tree)
     items: list[tuple[str | None, ast.expr]] = []
     seen_size = False
+    size = None
     names: dict[str, int] = {}
     for stmt in body:
         if isinstance(stmt, ast.Pass) or (
             isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)
         ):
             continue
-        if size_stmt(stmt) is not None:
+        found = size_stmt(stmt)
+        if found is not None:
             if seen_size:
                 raise CompileError("size is assigned twice", stmt)
             seen_size = True
+            size = found
             continue
         target = None
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
@@ -975,4 +1022,4 @@ def compile_table(name: str, text: str, ctx: Ctx, filename: str = "<database>") 
         entry._lineno = node.lineno
         entry._ident = ident
         entries.append(entry)
-    return entries
+    return entries, size

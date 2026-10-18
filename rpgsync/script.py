@@ -27,7 +27,7 @@ import keyword
 import re
 import tokenize
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextvars import ContextVar
 from typing import Any
 
@@ -637,19 +637,64 @@ def _emit_match(nodes, i, ctx, level, in_loop):
 # --------------------------------------------------------------------------
 
 
+# a comment, or a string (where a '#' is no comment)
+_COMMENT_OR_STRING = re.compile(
+    "|".join(
+        (
+            r"#[^\n]*",
+            r"'''(?:\\.|[^\\])*?'''",
+            r'"""(?:\\.|[^\\])*?"""',
+            r"'(?:\\.|[^'\\\n])*'",
+            r'"(?:\\.|[^"\\\n])*"',
+        )
+    ),
+    re.S,
+)
+
+
+def _fstring_prefix(src: str, at: int) -> bool:
+    """Whether the string starting at `at` is an f-string (or a t-string)."""
+    start = at
+    while start > 0 and (src[start - 1].isalnum() or src[start - 1] == "_"):
+        start -= 1
+    prefix = src[start:at].lower()
+    return len(prefix) <= 2 and ("f" in prefix or "t" in prefix)
+
+
 class CommentIndex:
     """Full-line '#' comments of a script; they compile to Comment commands."""
 
     def __init__(self, src: str):
         self.lines = src.split("\n")
         self.items: list[list] = []  # [line, col, text, claimed]
-        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-            if tok.type == tokenize.COMMENT:
-                line, col = tok.start
-                if not self.lines[line - 1][:col].strip():
-                    text = tok.string[1:]
-                    self.items.append([line, col, text[1:] if text.startswith(" ") else text, False])
-        self.item_lines = [item[0] for item in self.items]  # sorted: tokens come in order
+        for line, col, comment in self._comments(src):
+            if not self.lines[line - 1][:col].strip():
+                text = comment[1:]
+                self.items.append([line, col, text[1:] if text.startswith(" ") else text, False])
+        self.item_lines = [item[0] for item in self.items]  # sorted: they come in order
+
+    @staticmethod
+    def _comments(src: str) -> Iterator[tuple[int, int, str]]:
+        """(line, column, text) of the comments.  A scan for strings and comments only:
+        tokenizing whole scripts took a tenth of the compile time."""
+        if "#" not in src:
+            return
+        found = []
+        line = 1
+        pos = 0  # where `line` was counted to
+        for m in _COMMENT_OR_STRING.finditer(src):
+            at = m.start()
+            if src[at] == "#":
+                line += src.count("\n", pos, at)
+                pos = at
+                found.append((line, at - src.rfind("\n", 0, at) - 1, m.group()))
+            elif at and src[at - 1] in "fFtTrR" and _fstring_prefix(src, at):
+                # an f-string: its {...} may hold quotes (Python 3.12), the tokenizer tells
+                for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+                    if tok.type == tokenize.COMMENT:
+                        yield *tok.start, tok.string
+                return
+        yield from found
 
     def region_end(self, after: int, col: int) -> int:
         """First code line after `after` that is indented less than `col`."""
@@ -1708,22 +1753,25 @@ def page_kwargs_src(props: dict[str, Any], ctx: Ctx, base: dict[str, Any] | None
     return kw
 
 
+_PAGE_LEGACY = frozenset({"switch_a", "switch_b", "variable", "item", "actor", "timer", "timer2"})
+_PAGE_ARGS = tuple(sorted({"id", "raw", "when", "sprite", "tile", "route"} | _PAGE_LEGACY | set(PAGE_DEFAULTS)))
+
+
 def page_props_from_call(
     call: Call, ctx: Ctx, base: dict[str, Any] | None = None
 ) -> tuple[dict[str, Any], int | None, bool]:
     """-> (props, explicit page id, raw flag).  A setting left out is `base`'s (the
     event class's settings), RPG Maker's default without one."""
     base = base or PAGE_BASE
-    legacy = {"switch_a", "switch_b", "variable", "item", "actor", "timer", "timer2"}
-    allowed = {"id", "raw", "when", "sprite", "tile", "route"} | legacy | set(PAGE_DEFAULTS)
+    legacy = _PAGE_LEGACY
     if call.args:
         raise CompileError("page() only takes keyword arguments", call.node)
     for k in call.kwargs:
-        if k not in allowed:
+        if k not in _PAGE_ARGS:
             raise CompileError(
-                "page() got an unknown argument %r (expected one of: %s)" % (k, ", ".join(sorted(allowed))), call.node
+                "page() got an unknown argument %r (expected one of: %s)" % (k, ", ".join(_PAGE_ARGS)), call.node
             )
-    a = K.Args(call, sorted(allowed))
+    a = K.Args(call, _PAGE_ARGS)
     cond = {}
     if a.get("when") is not None:
         if (legacy - {"switch_b"}) & set(call.kwargs):

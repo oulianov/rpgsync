@@ -552,8 +552,7 @@ class DatabaseUnit(Unit):
     def compile(self, text):
         from . import database
 
-        entries: list = database.compile_table(self.table, text, self.project.context(), self.py_path)
-        size = database.table_size(text)
+        entries, size = database.compile_table_sized(self.table, text, self.project.context(), self.py_path)
         return entries + ([size] if size is not None else [])
 
     def specs_from_bin(self, data):

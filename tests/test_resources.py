@@ -134,6 +134,7 @@ def test_check_warns(exported2003):
     at = next(n for n, line in enumerate(lines) if line.startswith("    def page_1(self):"))
     indent = " " * 8
     lines.insert(at + 1, indent + 'pictures[1].show("not_there", x=160, y=120)')
+    lines.insert(at + 2, indent + 'pictures[2].show("Not_There", x=160, y=120)')  # the same file: one warning
     script.write_text("\n".join(lines), encoding="utf-8")
     (exported2003 / "Picture").mkdir(exist_ok=True)
     (exported2003 / "Picture" / "spare.png").write_bytes(b"")
@@ -141,6 +142,7 @@ def test_check_warns(exported2003):
     assert "not imported" not in r.output and "never used" not in r.output  # only with --resources
     r = CliRunner().invoke(cli.app, ["check", str(exported2003), "--no-types", "--resources"])
     out = r.output
-    assert "Map0001.py:%d: pictures[...].show() uses Picture/not_there, which is not imported" % (at + 2) in out
+    problem = "pictures[...].show() uses Picture/not_there, which is not imported (also used at Map0001.py:%d)"
+    assert "Map0001.py:%d: %s" % (at + 2, problem % (at + 3)) in out
     assert "Picture/: 1 imported file never used: spare.png" in out
     assert os.path.basename(str(script)) in out

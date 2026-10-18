@@ -36,7 +36,7 @@ import time
 import tomllib
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from pydantic import BaseModel
@@ -48,6 +48,7 @@ from .compat import check_specs, check_warnings, load_rules, target_engine
 from .maptree import map_reference_problems, map_tree_maps, tree_problems
 from .project import Project
 from .resources import Collector
+from .resources import key as resource_key
 from .resources import problems as resource_problems
 from .scaffold import init_scripts_project, update_scripts_project
 from .script import (
@@ -834,6 +835,12 @@ def check(
             help="Also check the resource files: used by an event but not imported, imported but never used.",
         ),
     ] = False,
+    jobs: Annotated[
+        int | None,
+        typer.Option(
+            "--jobs", "-j", min=1, help="Processes compiling the scripts (default: one per CPU for a large game)."
+        ),
+    ] = None,
 ):
     """Compile every script, check engine compatibility and types (ty), without writing anything."""
     syncer = _open(project)
@@ -844,41 +851,16 @@ def check(
     errors = warnings = 0
     tree_maps, sizes = map_tree_maps(proj)
     files = Collector(proj.encoding) if resources else None  # the files the scripts and the game use
-    for u in _units(syncer, map, no_common):
-        if not os.path.exists(u.py_path):
-            if files is not None:
-                _game_resources(files, u)
-            continue
-        with open(u.py_path, encoding="utf-8") as f:
-            text = f.read()
-        try:
-            specs, _ = u.compile_checked(text)
-        except ScriptError as e:
-            err.print((str(e), "red"), kind="error")
-            errors += 1
-            if files is not None:
-                _game_resources(files, u)
-            continue
-        if files is not None:
-            files.specs(specs, u.py_path)
-        for problem in check_specs(specs, engine, patches or declared, allow):
-            err.print((u.py_path, "cyan"), ": ", (problem, "red"), kind="error")
-            errors += 1
-        for problem in check_warnings(specs, engine, patches or declared, allow):
-            err.print((u.py_path, "cyan"), ": ", (problem, "yellow"), kind="warning")
-            warnings += 1
-        if u.kind == "map":
-            # the active page is the last one whose conditions hold: pages after it may hide it
-            for line, problem in unreachable_pages(specs):
-                where = "%s:%d" % (u.py_path, line) if line else u.py_path
-                err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
-                warnings += 1
-        if tree_maps is not None and u.kind in ("map", "common", "troop", "maptree"):
-            # teleports (vehicles, teleport / escape targets, start positions) to maps of the game, inside them
-            for line, problem in map_reference_problems(specs, tree_maps, sizes):
-                where = "%s:%d" % (u.py_path, line) if line else u.py_path
-                err.print((where, "cyan"), ": ", (problem, "red"), kind="error")
-                errors += 1
+    rules = _Rules(engine=engine, patches=patches or declared, allow=allow, tree_maps=tree_maps, sizes=sizes)
+    units = list(_units(syncer, map, no_common))
+    for found, part in _checked_units(proj, units, rules, resources, jobs):
+        for kind, where, problem in found:
+            color = "red" if kind == "error" else "yellow"
+            err.print(*([(where, "cyan"), ": "] if where else []), (problem, color), kind=kind)
+            errors += kind == "error"
+            warnings += kind == "warning"
+        if files is not None and part is not None:
+            files.merge(part)
     if tree_maps is not None and not map:
         tree_errors, tree_warnings = tree_problems(proj.game_dir, proj.script_dir, proj.encoding)
         for problem in tree_errors:
@@ -899,6 +881,96 @@ def check(
     ui.print(("All scripts %s" % what, "bold green"), *([" (", warned, ")"] if warned else []), kind="ok")
 
 
+class _Rules(BaseModel):
+    """What `check` checks the compiled scripts against."""
+
+    engine: str
+    patches: list[str]
+    allow: list[int]
+    tree_maps: dict[int, str] | None  # the maps of the game (None: no map tree) and their sizes
+    sizes: dict[int, tuple[int, int] | None]
+
+
+def _check_unit(u: Unit, rules: _Rules, files: Collector | None) -> list[tuple[str, str, str]]:
+    """Compile a unit's script and check it.  -> the problems to print: (kind, where, problem)"""
+    found: list[tuple[str, str, str]] = []
+    if not os.path.exists(u.py_path):
+        if files is not None:
+            _game_resources(files, u)
+        return found
+    with open(u.py_path, encoding="utf-8") as f:
+        text = f.read()
+    try:
+        specs, _ = u.compile_checked(text)
+    except ScriptError as e:
+        if files is not None:
+            _game_resources(files, u)
+        return [("error", "", str(e))]
+    if files is not None:
+        files.specs(specs, u.py_path)
+    for problem in check_specs(specs, rules.engine, rules.patches, rules.allow):
+        found.append(("error", u.py_path, problem))
+    for problem in check_warnings(specs, rules.engine, rules.patches, rules.allow):
+        found.append(("warning", u.py_path, problem))
+    if u.kind == "map":
+        # the active page is the last one whose conditions hold: pages after it may hide it
+        for line, problem in unreachable_pages(specs):
+            found.append(("warning", "%s:%d" % (u.py_path, line) if line else u.py_path, problem))
+    if rules.tree_maps is not None and u.kind in ("map", "common", "troop", "maptree"):
+        # teleports (vehicles, teleport / escape targets, start positions) to maps of the game, inside them
+        for line, problem in map_reference_problems(specs, rules.tree_maps, rules.sizes):
+            found.append(("error", "%s:%d" % (u.py_path, line) if line else u.py_path, problem))
+    return found
+
+
+_PARALLEL_SIZE = 3_000_000  # scripts (bytes) worth compiling in several processes: ~1 s in one
+
+
+def _checked_units(
+    proj: Project, units: list[Unit], rules: _Rules, resources: bool, jobs: int | None
+) -> Iterator[tuple[list[tuple[str, str, str]], Collector | None]]:
+    """_check_unit() of each unit, in order: (problems, the files it uses).  A large game's
+    scripts compile in several processes (`jobs`, default one per CPU)."""
+    sizes = {u.py_path: os.path.getsize(u.py_path) if os.path.exists(u.py_path) else 0 for u in units}
+    if jobs is None:
+        jobs = (os.cpu_count() or 1) if sum(sizes.values()) >= _PARALLEL_SIZE else 1
+    jobs = min(jobs, len(units))
+    if jobs <= 1:
+        for u in units:
+            files = Collector(proj.encoding) if resources else None
+            yield _check_unit(u, rules, files), files
+        return
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    context = multiprocessing.get_context("spawn")  # fork is unsafe on macOS
+    init = (proj.game_dir, proj.script_dir, rules, resources)
+    with ProcessPoolExecutor(jobs, mp_context=context, initializer=_worker_init, initargs=init) as pool:
+        try:
+            # the largest first, so that the last ones to finish are short
+            futures = {
+                u.py_path: pool.submit(_worker_check, u.py_path) for u in sorted(units, key=lambda u: -sizes[u.py_path])
+            }
+            for u in units:
+                yield futures[u.py_path].result()
+        finally:
+            pool.shutdown(cancel_futures=True)
+
+
+_WORKER: dict[str, Any] = {}  # a check process: its units, rules
+
+
+def _worker_init(game_dir: str, script_dir: str, rules: _Rules, resources: bool) -> None:
+    project = Project(game_dir, script_dir)
+    _WORKER.update(units={u.py_path: u for u in Syncer(project).units()}, rules=rules, resources=resources)
+    _WORKER["encoding"] = project.encoding
+
+
+def _worker_check(py_path: str) -> tuple[list[tuple[str, str, str]], Collector | None]:
+    files = Collector(_WORKER["encoding"]) if _WORKER["resources"] else None
+    return _check_unit(_WORKER["units"][py_path], _WORKER["rules"], files), files
+
+
 def _game_resources(resources: Collector, unit: Unit) -> None:
     """The resources of a unit whose script is missing or does not compile, from its game file."""
     data = read_bytes(unit.bin_path)
@@ -917,12 +989,22 @@ def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, compl
         resources.game(proj.game_dir, proj.ldb_path)
     found = resource_problems(resources, proj.game_dir, proj.context().engine, complete)
     grouped: dict[tuple[str, str], list] = {}  # (database file, folder) -> its references
+    uses: dict[tuple[str, str], list] = {}  # (folder, file) -> the events using it
     for ref in found.missing:
         if not ref.event:  # the database keeps many (default entries never shown): one line per folder
             grouped.setdefault((ref.path, ref.folder), []).append(ref)
-            continue
+        else:  # one line per file, at its first use
+            uses.setdefault((ref.folder, resource_key(ref.name)), []).append(ref)
+    for refs in uses.values():
+        ref = refs[0]
         where = "%s:%d" % (ref.path, ref.line) if ref.line else ref.path
         problem = "%s uses %s/%s, which is not imported" % (ref.what, ref.folder, ref.name)
+        if len(refs) > 1:
+            others = [
+                "%s:%d" % (os.path.basename(r.path), r.line) if r.line else os.path.basename(r.path) for r in refs[1:4]
+            ]
+            more = " and %d more" % (len(refs) - 4) if len(refs) > 4 else ""
+            problem += " (also used at %s%s)" % (", ".join(others), more)
         err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
     for (path, folder), refs in grouped.items():
         where = "%s:%d" % (path, refs[0].line) if refs[0].line else path
@@ -938,7 +1020,7 @@ def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, compl
         err.print((folder + "/", "cyan"), ": ", (problem, "yellow"), kind="warning")
     if found.note:
         ui.print(found.note, kind="info")
-    return sum(r.event for r in found.missing) + len(grouped) + len(found.unused)
+    return len(uses) + len(grouped) + len(found.unused)
 
 
 def _ty(script_dir: str) -> str | None:
