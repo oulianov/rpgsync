@@ -160,7 +160,7 @@ rpgsync push     # scripts -> game
 ```
 
 - Each command works on the game of the current folder, or on the game or `Scripts` folder given as argument. 
-- `--map N` limits a command to one map
+- `--map N` limits a command to one map; `check` also takes scripts and folders of scripts
 - `pull --force` overwrites scripts that have unsynced edits.
 - `rpgsync check` also checks the maps: teleports, vehicle locations and
   teleport / escape targets go to a map of the map tree and inside it, every
@@ -176,6 +176,8 @@ game file stays as it was.
 ```bash
 cd /path/to/MyGame/Scripts
 rpgsync check
+rpgsync check Map0004.py Map0012.py   # only these scripts
+rpgsync check database                # only the scripts in this folder
 ```
 
 `rpgsync check` also runs the type checker [ty](https://github.com/astral-sh/ty);

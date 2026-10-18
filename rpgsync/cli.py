@@ -820,7 +820,14 @@ def status(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOp
 
 
 def check(
-    project: ProjectArg = None,
+    paths: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help="The game folder (with RPG_RT.ldb) or its scripts folder (default: the current folder), "
+            "or scripts and folders of scripts to check only those: Scripts/Map0004.py, Scripts/database.",
+            show_default=False,
+        ),
+    ] = None,
     map: MapOpt = None,
     no_common: NoCommonOpt = False,
     patches: Annotated[
@@ -842,10 +849,12 @@ def check(
         ),
     ] = None,
 ):
-    """Compile every script, check engine compatibility and types (ty), without writing anything."""
-    syncer = _open(project)
+    """Compile every script (or the ones given), check engine compatibility and types (ty), without
+    writing anything."""
+    syncer = _open(_paths_project(paths))
     ui, err = syncer.ui, UI(err=True)
     proj = syncer.project
+    chosen = _chosen_paths(proj, paths)  # None: the whole game
     engine = target_engine(proj.script_dir, proj.context().engine)
     declared, allow = load_rules(proj.script_dir)
     errors = warnings = 0
@@ -853,6 +862,9 @@ def check(
     files = Collector(proj.encoding) if resources else None  # the files the scripts and the game use
     rules = _Rules(engine=engine, patches=patches or declared, allow=allow, tree_maps=tree_maps, sizes=sizes)
     units = list(_units(syncer, map, no_common))
+    if chosen is not None:
+        keep = {u.py_path for u in _chosen_units(syncer.units(), chosen)}
+        units = [u for u in units if u.py_path in keep]
     for found, part in _checked_units(proj, units, rules, resources, jobs):
         for kind, where, problem in found:
             color = "red" if kind == "error" else "yellow"
@@ -861,7 +873,7 @@ def check(
             warnings += kind == "warning"
         if files is not None and part is not None:
             files.merge(part)
-    if tree_maps is not None and not map:
+    if tree_maps is not None and any(u.kind == "maptree" for u in units):
         tree_errors, tree_warnings = tree_problems(proj.game_dir, proj.script_dir, proj.encoding)
         for problem in tree_errors:
             err.print(("RPG_RT.lmt", "cyan"), ": ", (problem, "red"), kind="error")
@@ -870,15 +882,59 @@ def check(
         errors += len(tree_errors)
         warnings += len(tree_warnings)
     if files is not None:
-        warnings += _check_resources(files, proj, ui, err, complete=not map and not no_common)
+        complete = chosen is None and not map and not no_common
+        warnings += _check_resources(files, proj, ui, err, complete=complete)
     if not no_types:
-        errors += _check_types(syncer.project.script_dir, ui, err)
+        errors += _check_types(syncer.project.script_dir, ui, err, chosen)
     warned = ("%d warning(s)" % warnings, "bold yellow") if warnings else None
     if errors:
         ui.print(("%d problem(s)" % errors, "bold red"), *([", ", warned] if warned else []), kind="error")
         raise typer.Exit(1)
-    what = "compile and fit the engine" + (" and pass the type check" if not no_types else "")
-    ui.print(("All scripts %s" % what, "bold green"), *([" (", warned, ")"] if warned else []), kind="ok")
+    if chosen is not None and len(units) == 1:  # Map0004.py compiles and fits the engine
+        scripts, verbs = os.path.basename(units[0].py_path), ("compiles", "fits", "passes")
+    else:
+        scripts, verbs = "All scripts" if chosen is None else "The %d scripts" % len(units), ("compile", "fit", "pass")
+    what = "%s and %s the engine" % verbs[:2] + (" and %s the type check" % verbs[2] if not no_types else "")
+    ui.print(("%s %s" % (scripts, what), "bold green"), *([" (", warned, ")"] if warned else []), kind="ok")
+
+
+def _paths_project(paths: list[str] | None) -> str | None:
+    """The folder whose game `check` checks: that of the paths it was given (one game)."""
+    if not paths:
+        return None
+    games = {}
+    for p in paths:
+        if not os.path.exists(p):
+            raise typer.BadParameter("%s does not exist" % p)
+        where = Path(p).resolve()
+        folder = where if where.is_dir() else where.parent
+        games[p] = (_find(folder), str(folder))
+    first = paths[0]
+    for p in paths[1:]:
+        if games[p][0] != games[first][0]:
+            raise typer.BadParameter("%s and %s are not in the same game" % (first, p))
+    return games[first][1]
+
+
+def _chosen_paths(proj: Project, paths: list[str] | None) -> list[Path] | None:
+    """The scripts and folders of scripts to check; None: the whole game (no paths, or its
+    game or scripts folder)."""
+    if not paths:
+        return None
+    chosen = [Path(p).resolve() for p in paths]
+    whole = (Path(proj.game_dir).resolve(), Path(proj.script_dir).resolve())
+    return None if any(p in whole for p in chosen) else chosen
+
+
+def _chosen_units(units: list[Unit], chosen: list[Path]) -> list[Unit]:
+    """The units whose script is one of `chosen` or in one of its folders."""
+    scripts = {u.py_path: Path(u.py_path).resolve() for u in units}
+    out = [u for u in units if any(p == scripts[u.py_path] or p in scripts[u.py_path].parents for p in chosen)]
+    for p in chosen:
+        if not any(p == s or p in s.parents for s in scripts.values()):
+            what = "holds no script" if p.is_dir() else "is not a script"
+            raise _fail("%s %s of the game (a map, a database table, the common events...)" % (p, what))
+    return out
 
 
 class _Rules(BaseModel):
@@ -1032,15 +1088,15 @@ def _ty(script_dir: str) -> str | None:
     return shutil.which("ty")
 
 
-def _check_types(script_dir: str, ui: UI, err: UI) -> int:
-    """Run ty on the scripts folder; print its diagnostics.  -> number of problems
-    (With DynParams, database/game_types.py lets a variable stand where the DSL
+def _check_types(script_dir: str, ui: UI, err: UI, paths: list[Path] | None = None) -> int:
+    """Run ty on the scripts folder (or on `paths` in it); print its diagnostics.  -> number
+    of problems (With DynParams, database/game_types.py lets a variable stand where the DSL
     takes a fixed number.)"""
     ty = _ty(script_dir)
     if ty is None:
         ui.print("type check skipped: ty is not installed (run `uv sync` in %s)" % script_dir, kind="info")
         return 0
-    cmd = [ty, "check", "--output-format", "concise"]
+    cmd = [ty, "check", "--output-format", "concise", *(str(p) for p in paths or ())]
     venv = os.path.join(script_dir, ".venv")
     if os.path.isdir(venv):  # the scripts' environment, even when another virtualenv is active
         cmd += ["--python", venv]

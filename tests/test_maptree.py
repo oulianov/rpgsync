@@ -592,6 +592,26 @@ def test_check_in_several_processes(exported2003):
     assert _cli("check", exported2003, "--no-types", "--resources", "--jobs", 3, ok=False) == alone
 
 
+def test_check_some_scripts(exported2003):
+    scripts = os.path.join(exported2003, "Scripts")
+    map1, map4 = os.path.join(scripts, "Map0001.py"), os.path.join(scripts, "Map0004.py")
+    _edit(map4, "teleport(maps.dungeon_road, 9, 2)", "teleport(maps.dungeon_road, 90, 2)")
+    with open(map1, "a", encoding="utf-8") as f:
+        f.write("\nnot an event\n")  # does not compile
+    out = _cli("check", map4, "--no-types", ok=False)
+    assert "teleport to Dungeon Road (map 3) at (90, 2)" in out and "Map0001.py" not in out
+    assert "1 problem(s)" in out
+    out = _cli("check", map1, map4, "--no-types", ok=False)
+    assert "Map0001.py:" in out and "2 problem(s)" in out
+    assert "Map0002.py compiles and fits the engine" in _cli("check", os.path.join(scripts, "Map0002.py"), "--no-types")
+    out = _cli("check", os.path.join(scripts, "database"), "--no-types")
+    assert re.search(r"The \d+ scripts compile and fit the engine", out)
+    assert "2 problem(s)" in _cli("check", exported2003, "--no-types", ok=False)  # the whole game
+    notes = os.path.join(scripts, "notes.py")
+    open(notes, "w").write("")
+    assert "is not a script of the game" in _cli("check", notes, "--no-types", ok=False)
+
+
 def test_locate_map_tree_entries(exported2003):
     path, line = _cli("locate", exported2003, "--map-tree", 3).strip().rsplit(":", 1)
     lines = _text(path).split("\n")
