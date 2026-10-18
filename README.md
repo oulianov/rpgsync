@@ -183,11 +183,12 @@ VS Code shows the same problems while you type, with the ty extension or
 Pylance. `Scripts/pyproject.toml` turns off Pylance's warning about
 `from rpgsync.dsl import *`: the scripts use it on purpose.
 
-It also warns about the game's resource files (`CharSet/`, `Picture/`,
-`Sound/`...): an event that uses a file the game doesn't have (not imported,
-and not in the RTP when the game uses one), and the imported files nothing
-uses. Plugin comments naming a file count as a use, and so do names completed
-when the game runs (a picture's number from a variable, DynParams).
+With `--resources`, it also checks the game's resource files (`CharSet/`,
+`Picture/`, `Sound/`...) and warns about an event that uses a file the game
+doesn't have (not imported, and not in the RTP when the game uses one), and
+about the imported files nothing uses. Plugin comments naming a file count as
+a use, and so do names completed when the game runs (a picture's number from a
+variable, DynParams).
 
 ### Database, Common Events and Troop Battle Events
 

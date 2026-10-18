@@ -273,6 +273,8 @@ def _name(c: Command) -> str:
 
 def problems(cmds: list[Command]) -> list[Problem]:
     """DynParams mistakes in an event's command list."""
+    if not any(c.code == 12410 and c.string[:11].lower() == b"@dynparams_" for c in cmds):
+        return []  # no DynParams comment (most lists): nothing to play
     out: dict[str, Problem] = {}
 
     def add(error: bool, i: int, what: str) -> None:

@@ -64,10 +64,12 @@ def test_missing_and_unused(tmp_path):
             _cmd(11110, b"used", [1] + [0] * 13),
             _cmd(11550, b"click", [100, 100, 50]),
             _cmd(11550, b"(OFF)", [100, 100, 50]),  # no sound
+            _cmd(11550, b"(No Sound)", [100, 100, 50]),  # no sound either, when there is no such file
+            _cmd(11110, b"(Frame)", [1] + [0] * 13, line=8),  # but a picture
             _cmd(11510, b"Theme", [0, 100, 100, 50], line=9),
         ),
     )
-    assert [(r.folder, r.name, r.line, r.what) for r in found.missing] == [("Music", "Theme", 9, "play_bgm()")]
+    assert [(r.folder, r.name, r.line) for r in found.missing] == [("Picture", "(Frame)", 8), ("Music", "Theme", 9)]
     assert found.unused == {"Picture": ["spare.png"]}
 
 
@@ -81,13 +83,17 @@ def test_page_graphics_and_move_routes(tmp_path):
 
 
 def test_names_known_when_the_game_runs(tmp_path):
-    game = _game(tmp_path, Picture=["num0001.png", "num0002.png", "other.png"], FaceSet=["Hero.png"])
+    game = _game(
+        tmp_path, Picture=["num0001.png", "num0002.png", "other.png", "Sheet 001 Page 1.png"], FaceSet=["Hero.png"]
+    )
     substitution = [1] + [0] * 17 + [4, 12]  # Show Picture: the last 4 digits from variable 12
     string_var = [0, 0, 0, 1, 5]  # Maniac Patch: the face set of string variable 5
     dynparams = _cmd(12410, b'@dynparams_append_string "oth"')
-    found = _check(game, _event(_cmd(11110, b"num0000", substitution), _cmd(10130, b"", string_var), dynparams))
+    unquoted = _cmd(12410, b"@dynparams_append_string Sheet 00")
+    commands = _cmd(11110, b"num0000", substitution), _cmd(10130, b"", string_var), dynparams, unquoted
+    found = _check(game, _event(*commands))
     assert found.missing == []  # neither num0000 nor the empty name is checked
-    assert found.unused == {"FaceSet": ["Hero.png"]}  # num* and oth* are names built at runtime
+    assert found.unused == {"FaceSet": ["Hero.png"]}  # num*, oth* and sheet* are names built at runtime
 
 
 def test_plugin_comments_name_files(tmp_path):
@@ -132,6 +138,8 @@ def test_check_warns(exported2003):
     (exported2003 / "Picture").mkdir(exist_ok=True)
     (exported2003 / "Picture" / "spare.png").write_bytes(b"")
     r = CliRunner().invoke(cli.app, ["check", str(exported2003), "--no-types"])
+    assert "not imported" not in r.output and "never used" not in r.output  # only with --resources
+    r = CliRunner().invoke(cli.app, ["check", str(exported2003), "--no-types", "--resources"])
     out = r.output
     assert "Map0001.py:%d: pictures[...].show() uses Picture/not_there, which is not imported" % (at + 2) in out
     assert "Picture/: 1 imported file never used: spare.png" in out

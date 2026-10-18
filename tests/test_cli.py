@@ -203,7 +203,9 @@ def test_locate_points_at_the_lines_of_events_and_commands(project):
     out = _cli("locate", project, "--map", 1, "--event", event, "--command", 0).strip()
     assert int(out.rsplit(":", 1)[1]) <= body + 1
     # a statement added before it moves it down by one line
-    _edit(script, lines[body], lines[body][: len(lines[body]) - len(lines[body].lstrip())] + "wait(0.1)\n" + lines[body])
+    _edit(
+        script, lines[body], lines[body][: len(lines[body]) - len(lines[body].lstrip())] + "wait(0.1)\n" + lines[body]
+    )
     moved = _cli("locate", project, "--map", 1, "--event", event, "--command", 1).strip()
     assert int(moved.rsplit(":", 1)[1]) == int(out.rsplit(":", 1)[1]) + 1
 
@@ -233,7 +235,11 @@ def test_locate_troop_pages_and_commands(project):
     assert locate("--page", 2, "--command", 2)[1] == "match show_choices("
     assert locate("--page", 1, "--command", 3)[1].startswith("text(")  # a text over several lines: its first one
     # computed from the file as it is now
-    _edit(script, '            text("This is a test battle.")', '            wait(0.1)\n            text("This is a test battle.")')
+    _edit(
+        script,
+        '            text("This is a test battle.")',
+        '            wait(0.1)\n            text("This is a test battle.")',
+    )
     lines = script.read_text(encoding="utf-8").split("\n")
     assert locate("--page", 1, "--command", 1)[1] == 'text("This is a test battle.")'
     assert "not in" in _cli("locate", project, "--troop", 1, ok=False)  # no battle events

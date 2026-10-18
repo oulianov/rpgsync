@@ -79,6 +79,16 @@ STRING_VARIABLES = {
     11720: (6, 0, 7),
 }
 _COMMENTS = (12410, 22410)
+_SEPARATORS = re.compile(r"[\s\"'`,;:()\[\]{}<>=|/\\*?!]+")  # around a name in a comment or setting
+# the entries holding files in their own entries (the other fields are not walked: an
+# item's battle animations per actor alone are tens of thousands of entries)
+NESTED = {
+    "Terrain": ("footstep",),
+    "Skill": ("sound_effect",),
+    "BattlerAnimation": ("poses", "weapons"),
+    "MapInfo": ("music",),
+}
+_FILE_MODELS = {"Actor", "Enemy", "Terrain", "BattlerAnimationPose", "BattlerAnimationWeapon", "MapInfo", *NESTED}
 LABELS = {
     "Actor": "actor",
     "Enemy": "enemy",
@@ -205,14 +215,18 @@ class Collector:
     def commands(self, cmds: list, path: str) -> None:
         from .dynparams import play
 
-        rewritten = {o.target for o in play(cmds) if o.target is not None}  # strings DynParams replaces
+        rewritten = set()  # commands whose string DynParams replaces
+        if any(c.code == 12410 and c.string[:11].lower() == b"@dynparams_" for c in cmds):
+            rewritten = {o.target for o in play(cmds) if o.target is not None}
         for i, c in enumerate(cmds):
             if c.code in _COMMENTS:
                 text = self._dec(c.string)
                 self.texts.append(text.lower())
-                m = re.match(r"\s*@dynparams_\w*append_string\s+\"([^\"]+)\"", text, re.I)
+                # a name DynParams builds: its text, "quoted" or not (DynRPG takes both)
+                m = re.match(r"\s*@dynparams_\w*append_string\s+(?:\"((?:[^\"]|\"\")+)\"|(.+))$", text, re.I)
                 if m:
-                    self.prefixes.add((None, key(m.group(1))))
+                    part = m.group(1).replace('""', '"') if m.group(1) is not None else m.group(2)
+                    self.prefixes.add((None, key(part)))
                 continue
             p = list(c.params)
             if c.code == 11330 and len(p) > 4:  # a move route: graphics and sounds of its steps
@@ -245,8 +259,10 @@ class Collector:
 
     def _model(self, m: Any, path: str, line: int | None, active: bool) -> None:
         """A database / map tree entry and the entries it holds."""
-        line = getattr(m, "lineno", None) or line
         kind = type(m).__name__
+        if kind not in _FILE_MODELS:
+            return  # switches, variables, items, classes...: no file
+        line = getattr(m, "lineno", None) or line
         label = LABELS.get(kind, kind.lower())
         if getattr(m, "id", None) is not None:
             label += " %s" % m.id
@@ -270,7 +286,8 @@ class Collector:
             self.add("BattleWeapon", m.weapon_name, path, line, label, active)
         elif kind == "MapInfo":
             self.add("Backdrop", m.background_name, path, line, label, active and m.background_type in ("specific", 2))
-        for field, value in m:
+        for field in NESTED.get(kind, ()):
+            value = getattr(m, field)
             on = active
             if kind == "MapInfo" and field == "music":
                 on = active and m.music_type in ("specific", 2)
@@ -392,18 +409,25 @@ def problems(collector: Collector, game_dir: str, engine: str, complete: bool) -
         for ref in collector.refs:
             k = key(ref.name)
             if ref.active and k not in have.get(ref.folder, {}) and k not in rtp.get(ref.folder, set()):
+                if ref.folder in ("Music", "Sound") and ref.name.startswith("(") and ref.name.endswith(")"):
+                    continue  # "(No Sound)": the Player plays nothing, as with (OFF)
                 out.missing.append(ref)
     if complete:
         used = {(r.folder, key(r.name)) for r in collector.refs}
-        texts = "\n".join(collector.texts)
+        texts = unicodedata.normalize("NFC", "\n".join(collector.texts))
+        words = set()  # what the texts name: "hud", "hud.png" -> hud, hud.png
+        for w in _SEPARATORS.split(texts):
+            words.add(w)
+            if "." in w:
+                words.add(os.path.splitext(w)[0])
         for folder, found in sorted(have.items()):
+            prefixes = [p for f, p in collector.prefixes if f in (None, folder) and len(p) > 1]
             unused = []
             for k, rel in sorted(found.items()):
-                if (folder, k) in used or any(
-                    k.startswith(p) for f, p in collector.prefixes if f in (None, folder) and len(p) > 1
-                ):
+                if (folder, k) in used or any(k.startswith(p) for p in prefixes):
                     continue
-                if re.search(r"(?<![\w])%s(?![\w])" % re.escape(os.path.basename(k)), texts):
+                name = os.path.basename(k)
+                if name in words or (_SEPARATORS.search(name) and name in texts):
                     continue  # a plugin command or setting names it
                 unused.append(rel)
             if unused:

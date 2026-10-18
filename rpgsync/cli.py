@@ -827,6 +827,13 @@ def check(
         typer.Option("--patch", help="Allowed engine patch: dynrpg, maniac or easyrpg (repeatable)."),
     ] = None,
     no_types: Annotated[bool, typer.Option("--no-types", help="Skip the type check (ty).")] = False,
+    resources: Annotated[
+        bool,
+        typer.Option(
+            "--resources",
+            help="Also check the resource files: used by an event but not imported, imported but never used.",
+        ),
+    ] = False,
 ):
     """Compile every script, check engine compatibility and types (ty), without writing anything."""
     syncer = _open(project)
@@ -836,10 +843,11 @@ def check(
     declared, allow = load_rules(proj.script_dir)
     errors = warnings = 0
     tree_maps, sizes = map_tree_maps(proj)
-    resources = Collector(proj.encoding)  # the files the scripts and the game use
+    files = Collector(proj.encoding) if resources else None  # the files the scripts and the game use
     for u in _units(syncer, map, no_common):
         if not os.path.exists(u.py_path):
-            _game_resources(resources, u)
+            if files is not None:
+                _game_resources(files, u)
             continue
         with open(u.py_path, encoding="utf-8") as f:
             text = f.read()
@@ -848,9 +856,11 @@ def check(
         except ScriptError as e:
             err.print((str(e), "red"), kind="error")
             errors += 1
-            _game_resources(resources, u)
+            if files is not None:
+                _game_resources(files, u)
             continue
-        resources.specs(specs, u.py_path)
+        if files is not None:
+            files.specs(specs, u.py_path)
         for problem in check_specs(specs, engine, patches or declared, allow):
             err.print((u.py_path, "cyan"), ": ", (problem, "red"), kind="error")
             errors += 1
@@ -877,7 +887,8 @@ def check(
             err.print(("RPG_RT.lmt", "cyan"), ": ", (problem, "yellow"), kind="warning")
         errors += len(tree_errors)
         warnings += len(tree_warnings)
-    warnings += _check_resources(resources, proj, ui, err, complete=not map and not no_common)
+    if files is not None:
+        warnings += _check_resources(files, proj, ui, err, complete=not map and not no_common)
     if not no_types:
         errors += _check_types(syncer.project.script_dir, ui, err)
     warned = ("%d warning(s)" % warnings, "bold yellow") if warnings else None
