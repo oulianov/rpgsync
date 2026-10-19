@@ -44,6 +44,7 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
+from . import dynrpg
 from .compat import check_specs, check_warnings, load_rules, target_engine
 from .maptree import map_reference_problems, map_tree_maps, tree_problems
 from .project import Project
@@ -872,7 +873,17 @@ def check(
     errors = warnings = 0
     tree_maps, sizes = map_tree_maps(proj)
     files = Collector(proj.encoding) if resources else None  # the files the scripts and the game use
-    rules = _Rules(engine=engine, patches=patches or declared, allow=allow, tree_maps=tree_maps, sizes=sizes)
+    allowed = patches or declared
+    dyn = "dynrpg" in allowed or "easyrpg" in allowed  # plugin calls run: check them against the game
+    rules = _Rules(
+        engine=engine,
+        patches=allowed,
+        allow=allow,
+        tree_maps=tree_maps,
+        sizes=sizes,
+        plugins=dynrpg.installed(proj.game_dir) if dyn else None,
+        tables=proj.table_sizes() if dyn else None,
+    )
     units = list(_units(syncer, map, no_common))
     if chosen is not None:
         keep = {u.py_path for u in _chosen_units(syncer.units(), chosen)}
@@ -893,6 +904,10 @@ def check(
             err.print(("RPG_RT.lmt", "cyan"), ": ", (problem, "yellow"), kind="warning")
         errors += len(tree_errors)
         warnings += len(tree_warnings)
+    if rules.plugins is not None and "dynrpg" in rules.patches and chosen is None and not map:
+        for problem in dynrpg.setup_problems(rules.plugins, rules.tables):  # once, for the whole game
+            err.print(("DynRPG.ini", "cyan"), ": ", (problem, "yellow"), kind="warning")
+            warnings += 1
     if files is not None:
         complete = chosen is None and not map and not no_common
         warnings += _check_resources(files, proj, ui, err, complete=complete)
@@ -957,6 +972,8 @@ class _Rules(BaseModel):
     allow: list[int]
     tree_maps: dict[int, str] | None  # the maps of the game (None: no map tree) and their sizes
     sizes: dict[int, tuple[int, int] | None]
+    plugins: dynrpg.Installed | None = None  # DynPlugins/ and DynRPG.ini (None: no plugin call runs)
+    tables: dict[str, int] | None = None  # entries of the variables, actors, items, skills
 
 
 def _check_unit(u: Unit, rules: _Rules, files: Collector | None) -> list[tuple[str, str, str]]:
@@ -978,7 +995,7 @@ def _check_unit(u: Unit, rules: _Rules, files: Collector | None) -> list[tuple[s
         files.specs(specs, u.py_path)
     for problem in check_specs(specs, rules.engine, rules.patches, rules.allow):
         found.append(("error", u.py_path, problem))
-    for problem in check_warnings(specs, rules.engine, rules.patches, rules.allow):
+    for problem in check_warnings(specs, rules.engine, rules.patches, rules.allow, rules.plugins, rules.tables):
         found.append(("warning", u.py_path, problem))
     if u.kind == "map":
         # the active page is the last one whose conditions hold: pages after it may hide it

@@ -21,7 +21,9 @@ Ranges use Python slices, so ``variables[1:11]`` is variables 1..10.
 from __future__ import annotations
 
 import ast
+import keyword
 import re
+import unicodedata
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -31,6 +33,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from . import commands as K
+from . import dynrpg
 from .commands import Call, Command, CompileError, Ctx, Sym, pystr
 
 # --------------------------------------------------------------------------
@@ -1167,6 +1170,7 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
 _DYN_NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
 _DYN_TOKEN = re.compile(r"^([NnVv]+)(\d+)$")
 _DYN_STRING = re.compile(r'^"((?:[^"]|"")*)"$')  # a " inside a string is written ""
+_DYN_NOT_IN_WORD = ('"', ",", "\n", "\r")
 
 
 def _dyn_token_src(prefix: str, n: int) -> str:
@@ -1199,25 +1203,51 @@ def _dyn_token(v) -> str | None:
 
 
 def _split_dyn_args(text: str) -> list[str] | None:
+    """The arguments of a DynRPG call as written: split at the commas outside strings, their
+    spaces kept.  None when a string isn't closed."""
     args, cur, quoted = [], "", False
     for ch in text:
         if ch == '"':
             quoted = not quoted
-            cur += ch
-        elif ch == "," and not quoted:
-            args.append(cur.strip())
+        if ch == "," and not quoted:
+            args.append(cur)
             cur = ""
         else:
             cur += ch
     if quoted:
         return None
-    args.append(cur.strip())
+    args.append(cur)
     return args
+
+
+def _dyn_arg_src(a: str) -> str | None:
+    """Python form of one argument as written in the comment, None when none compiles back to it."""
+    if m := _DYN_STRING.match(a):
+        return pystr(m.group(1).replace('""', '"'))
+    if _DYN_NUMBER.match(a):
+        return a if (repr(float(a)) if "." in a else str(int(a))) == a else None
+    if (m := _DYN_TOKEN.match(a)) and DYN_PREFIX.match(m.group(1)):
+        return _dyn_token_src(m.group(1), int(m.group(2)))
+    if not a.strip(" ") or any(ch in a for ch in _DYN_NOT_IN_WORD):
+        return None
+    if dynrpg.kind(a.replace(" ", "")) != dynrpg.WORD:
+        return None  # a number or token with spaces (DynRPG drops them): not a word for ty
+    return word_src(a)
+
+
+def word_src(text: str) -> str:
+    """``word.end``, or ``word(" Page 2")`` for a text that is no Python name."""
+    name = text.isidentifier() and not keyword.iskeyword(text) and not text.startswith("__")
+    if name and unicodedata.normalize("NFKC", text) == text:  # Python reads names in NFKC
+        return "word." + text
+    return "word(%s)" % pystr(text)
 
 
 def dynrpg_src(line: str) -> str | None:
     """Python form of a one-line DynRPG comment, or None if it cannot be
-    written back identically."""
+    written back identically.  The first argument follows the name after one
+    space, the others follow ", "; an argument that is no string, number or
+    token is a word, its spaces kept (``word(" Page 2")``)."""
     m = re.match(r"^@([A-Za-z_][A-Za-z0-9_]*)(?: (.*))?$", line)
     if not m:
         return None
@@ -1225,26 +1255,34 @@ def dynrpg_src(line: str) -> str | None:
     args_src = []
     if rest is not None:
         args = _split_dyn_args(rest)
-        if args is None or ", ".join(args) != rest:
+        if args is None or not all(a.startswith(" ") for a in args[1:]):
             return None
-        for a in args:
-            if _DYN_STRING.match(a):
-                args_src.append(pystr(_DYN_STRING.match(a).group(1).replace('""', '"')))
-            elif _DYN_NUMBER.match(a) and (a.count(".") == 0 or repr(float(a)) == a):
-                args_src.append(a)
-            elif _DYN_TOKEN.match(a) and DYN_PREFIX.match(_DYN_TOKEN.match(a).group(1)):
-                t = _DYN_TOKEN.match(a)
-                args_src.append(_dyn_token_src(t.group(1), int(t.group(2))))
-            else:
+        for a in [args[0]] + [a[1:] for a in args[1:]]:
+            src = _dyn_arg_src(a)
+            if src is None:
                 return None
+            args_src.append(src)
     return "dyn.%s(%s)" % (name, ", ".join(args_src))
+
+
+def _dyn_word(v) -> str | None:
+    """The text of ``word.end`` / ``word("Simu-Com 00")``, else None."""
+    if isinstance(v, Attr) and isinstance(v.obj, Sym) and v.obj.name == "word":
+        return v.name
+    if not (isinstance(v, Call) and v.target is None and v.name == "word"):
+        return None
+    if v.kwargs or len(v.args) != 1 or not isinstance(v.args[0], str):
+        raise _err('word() takes one text: word("Simu-Com 00")', v)
+    if any(ch in v.args[0] for ch in _DYN_NOT_IN_WORD):
+        raise _err('a word can\'t hold ", commas or line breaks: write a "string" instead', v)
+    return v.args[0]
 
 
 def dynrpg_text(call: Call) -> str:
     if call.kwargs:
         raise _err("DynRPG calls take positional arguments only", call)
     parts = []
-    kinds = "numbers, strings, variables[...] or actors[...].name"
+    kinds = "numbers, strings, variables[...], actors[...].name or words (word.end)"
     for a in call.args:
         if isinstance(a, str):
             parts.append('"%s"' % a.replace('"', '""'))
@@ -1254,6 +1292,8 @@ def dynrpg_text(call: Call) -> str:
             parts.append(repr(a) if isinstance(a, float) else str(a))
         elif _dyn_token(a) is not None:
             parts.append(_dyn_token(a))
+        elif (text := _dyn_word(a)) is not None:
+            parts.append(text)  # as is, unquoted
         else:
             raise _err("DynRPG arguments are %s (got %s)" % (kinds, show(a)), call)
     return "@" + call.name + (" " + ", ".join(parts) if parts else "")

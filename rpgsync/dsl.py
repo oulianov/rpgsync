@@ -950,12 +950,148 @@ class _DynTokenPrefix:
     def __getitem__(self, number: int) -> DynToken: ...
 
 
+class Word:
+    """Unquoted text in a DynRPG call, written as is in the comment: ``word.end`` is
+    the ``end`` of ``@remove_text "id", end``; ``word(" Page 2")`` (a text that is no
+    Python name) keeps the spaces of ``@dynparams_append_string  Page 2``.  A word
+    can't hold ``"``, ``,`` or a line break.  DynRPG gives most plugins a word
+    without its spaces, in lowercase: give texts as ``"strings"``."""
+
+
+class _Words:
+    def __getattr__(self, text: str) -> Word: ...
+    def __call__(self, text: str, /) -> Word: ...
+
+
+DynNumber = int | float | Variable | DynToken
+"""A number in a DynRPG call: ``12``, ``variables.x`` (read when the call runs),
+``variables[variables.x]`` or a token like ``v[12]``."""
+DynString = str | DynToken
+"""A text in a DynRPG call: ``"text"``, ``actors[3].name`` (read when the call runs)
+or a token like ``n[3]``."""
+DynArg = DynNumber | DynString | Word
+"""Any argument of a DynRPG call."""
+
+
 class DynRPG:
     """DynRPG plugin calls, stored as "@function args" comments:
     ``dyn.change_text("id", r"\\v[1]", 0)``, ``dyn.dynparams_add_param(2, variables.clue)``.
-    Arguments are numbers, strings, ``variables[...]``, ``actors[...].name`` or tokens like ``v[12]``."""
+    Arguments are numbers, strings, ``variables[...]``, ``actors[...].name``, tokens like
+    ``v[12]`` or words (``word.end``).
+
+    The commands of the plugins rpgsync knows are below; ``rpgsync check`` warns about
+    their arguments and, from DynPlugins/, about calls no plugin of the game runs.  Any
+    other plugin's command works too: ``dyn.any_name(...)``.  A plugin version may read
+    more arguments than written here: they are accepted."""
 
     def __getattr__(self, function: str) -> Callable[..., None]: ...
+
+    # DynTextPlugin.dll: texts drawn on the screen.  In the id and the text: \v[n]
+    # (variable), \n[n] (hero name), \i[n] / \I[n] (item name / description),
+    # \t[n] / \T[n] (skill name / description), \x[id] (another text)
+
+    def write_text(
+        self,
+        id: DynString,
+        x: DynNumber,
+        y: DynNumber,
+        text: DynString | DynNumber,
+        fixed: DynArg = ...,
+        color: DynNumber = ...,
+        picture: DynNumber = ...,
+        /,
+        *rest: DynArg,
+    ) -> None:
+        """DynTextPlugin: show a text at (x, y), drawn above a picture, while it shows
+        (with its transparency): ``dyn.write_text("gold", 10, 10, r"\\v[4] G", 0, 3)``.
+
+        Args:
+            fixed: ``word.fixed`` scrolls the text with the map; 0: it stays on screen.
+            color: 0-19, a color of the system graphic.
+            picture: the picture it goes with (default: PictureID in DynRPG.ini).
+        """
+
+    def append_line(self, id: DynString, text: DynString | DynNumber, end: DynArg = ..., /, *rest: DynArg) -> None:
+        """DynTextPlugin: add a line below a text."""
+
+    def append_text(self, id: DynString, text: DynString | DynNumber, end: DynArg = ..., /, *rest: DynArg) -> None:
+        """DynTextPlugin: add to the end of a text's last line."""
+
+    def change_text(
+        self, id: DynString, text: DynString | DynNumber, color: DynNumber | Word, /, *rest: DynArg
+    ) -> None:
+        """DynTextPlugin: replace a text; ``color``: 0-19, or ``word.end`` to keep it."""
+
+    def change_position(self, id: DynString, x: DynNumber, y: DynNumber, /, *rest: DynArg) -> None:
+        """DynTextPlugin: move a text to (x, y)."""
+
+    def remove_text(self, id: DynString, end: DynArg = ..., /, *rest: DynArg) -> None:
+        """DynTextPlugin: erase a text (``dyn.remove_text("id", word.end)``)."""
+
+    def remove_all(self, /, *rest: DynArg) -> None:
+        """DynTextPlugin: erase every text."""
+
+    # DynParams.dll: rewrites the parameters of the next command (rpgsync writes these
+    # comments for a variable where RPG Maker takes a number, see the README)
+
+    def dynparams_add_param(self, index: DynNumber, value: DynNumber = ..., /, *rest: DynArg) -> None:
+        """DynParams: parameter ``index`` (from 1) of the next command := ``value``; with
+        one number, it is the value of the next parameter (5, 6... or from set_index)."""
+
+    def dynparams_set_index(self, index: DynNumber, /, *rest: DynArg) -> None:
+        """DynParams: the parameter ``dynparams_add_param(value)`` writes next."""
+
+    def dynparams_append_string(self, text: Word | DynString, /, *rest: DynArg) -> None:
+        """DynParams: add to the text of the next command; the comment's text after the
+        name, as is: ``word("Simu-Com 0")``."""
+
+    def dynparams_append_number(self, value: DynNumber, /, *rest: DynArg) -> None:
+        """DynParams: add a number to the text of the next command."""
+
+    def dynparams_message_line_append_string(self, line: DynNumber, text: DynString, /, *rest: DynArg) -> None:
+        """DynParams: add to line 1-4 of the next message."""
+
+    def dynparams_message_line_append_number(self, line: DynNumber, value: DynNumber, /, *rest: DynArg) -> None:
+        """DynParams: add a number to line 1-4 of the next message."""
+
+    def dynparams_choice_case_append_string(self, choice: DynNumber, text: DynString, /, *rest: DynArg) -> None:
+        """DynParams: add to a choice (from 1) of the next Show Choices."""
+
+    def dynparams_choice_case_append_number(self, choice: DynNumber, value: DynNumber, /, *rest: DynArg) -> None:
+        """DynParams: add a number to a choice (from 1) of the next Show Choices."""
+
+    def dynparams_overwrite_next(self, /, *rest: DynArg) -> None:
+        """DynParams: apply what the calls before built to the next command."""
+
+    def dynparams_clear_params(self, /, *rest: DynArg) -> None:
+        """DynParams: forget what the calls before built."""
+
+    def dynparams_list_params(self, /, *rest: DynArg) -> None:
+        """DynParams: show what the calls before built (a message box)."""
+
+    def dynparams_start_record(self, /, *rest: DynArg) -> None:
+        """DynParams: write each command that runs into DynPlugins/DynParamsRecord.txt."""
+
+    def dynparams_stop_record(self, /, *rest: DynArg) -> None:
+        """DynParams: stop writing DynPlugins/DynParamsRecord.txt."""
+
+    # msg_commands.dll
+
+    def process_cmd(self, /, *rest: DynArg) -> None:
+        """msg_commands."""
+
+    # EasyRPG Player's own commands (no DLL; "easyrpg" in the patches)
+
+    def call(self, function: Word | DynString, /, *args: DynArg) -> None:
+        """EasyRPG Player: run a command with the other arguments:
+        ``dyn.call(word.easyrpg_add, 5, 1, 2)``."""
+
+    def easyrpg_output(self, mode: Word | DynString, message: DynString, /, *args: DynArg) -> None:
+        """EasyRPG Player: write a message to its log; ``mode``: ``word.Debug``, ``word.Info``,
+        ``word.Warning`` or ``word.Error``; ``$1``-``$9`` in it: the arguments after it."""
+
+    def easyrpg_add(self, variable: DynNumber, value: DynNumber, /, *values: DynNumber) -> None:
+        """EasyRPG Player: variable number ``variable`` := the sum of the values."""
 
 
 ManiacValue = int | Value | Switch
@@ -1335,6 +1471,8 @@ game = GameState()
 dyn = DynRPG()
 maniac = ManiacPatch()
 V = VV = VVV = v = vv = vvv = N = NV = NVV = n = nv = nvv = _DynTokenPrefix()
+word = _Words()
+"""Unquoted text in a DynRPG call: ``word.end``, ``word("Simu-Com Faceset 00")`` (see Word)."""
 started_by_action_key = Condition()
 """Condition: the event was started with the action key."""
 bgm_looped = Condition()
@@ -2247,7 +2385,10 @@ __all__ = [
     "Counter",
     "Digits",
     "Direction",
+    "DynArg",
+    "DynNumber",
     "DynRPG",
+    "DynString",
     "DynToken",
     "Enemies",
     "Enemy",
@@ -2306,6 +2447,7 @@ __all__ = [
     "Vehicle",
     "VehicleCharacter",
     "WeatherKind",
+    "Word",
     "actors",
     "add_battle_command",
     "add_state",
@@ -2467,4 +2609,5 @@ __all__ = [
     "wait",
     "wait_for_movement",
     "weather",
+    "word",
 ]

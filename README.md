@@ -330,6 +330,15 @@ EasyRPG Player reads the same `[Patch]` section of the game's `EasyRPG.ini`
 (e.g. `Maniac=1`, `DynRPG=1`, `PowerMode2003=1`) when it doesn't detect a patch
 by itself. See [Patches.md](Patches.md) for how each patch is handled.
 
+#### DynRPG plugin calls
+
+A DynRPG comment `@name args` is `dyn.name(args)` in the scripts, and
+unquoted text in it a word: `dyn.remove_text("menu1", word.end)`. The
+commands of the plugins rpgsync knows (DynText, DynParams, EasyRPG Player's
+own...) are typed, so the editor completes them, and `rpgsync check` warns
+about wrong arguments, calls that no plugin of `DynPlugins/` runs, and
+`DynRPG.ini` sections no plugin reads.
+
 #### DynParams: a variable anywhere
 
 With the [DynParams](https://rewking.com/dynrpg/) plugin

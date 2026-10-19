@@ -13,6 +13,10 @@ pyproject.toml::
     engine = "2003"               # "2000" | "2003"
     patches = ["dynrpg"]          # dynrpg | maniac | easyrpg
     allow_commands = [3007]       # individual command codes
+
+With DynRPG, the calls of plugins (``dyn.name(...)``) are checked against the
+plugins rpgsync knows (rpgsync/dynrpg.py) and, by `rpgsync check`, against the
+ones in the game's DynPlugins folder.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import os
 import tomllib
 from collections.abc import Iterable, Sequence
 
-from . import dynparams, maniac
+from . import dynparams, dynrpg, maniac
 from .commands import CODE_NAMES
 from .lcf import Command
 
@@ -74,10 +78,17 @@ def describe(code: int) -> str:
 
 
 def command_problems(
-    cmds: Sequence[Command], engine: str, patches: Iterable[str] = (), allow: Iterable[int] = ()
+    cmds: Sequence[Command],
+    engine: str,
+    patches: Iterable[str] = (),
+    allow: Iterable[int] = (),
+    plugins: dynrpg.Installed | None = None,
+    tables: dict[str, int] | None = None,
 ) -> list[dynparams.Problem]:
     """Problems of a command list for the given engine ("2k" or "2k3"): errors
-    break the game in RPG_RT, warnings do not."""
+    break the game in RPG_RT, warnings do not.  `plugins`: the game's DynRPG
+    plugins (None: not known, their checks are skipped); `tables`: the size of its
+    variables, actors, items and skills, for the ids plugin calls name."""
     patches, allow = set(patches), set(allow)
     problems = []
 
@@ -116,7 +127,7 @@ def command_problems(
                     "%s uses RPG Maker 2003 parameters (%d, 2000 has %d): RPG Maker 2000 ignores them"
                     % (describe(code), len(c.params), MAX_PARAMS_2K[code]),
                 )
-    return problems + dynparams.problems(list(cmds))
+    return problems + dynparams.problems(list(cmds)) + dynrpg.problems(cmds, patches, plugins, tables)
 
 
 def check_commands(
@@ -126,8 +137,16 @@ def check_commands(
     return [p.message for p in command_problems(cmds, engine, patches, allow) if p.error]
 
 
-def check_warnings(specs: Sequence, engine: str, patches: Iterable[str] = (), allow: Iterable[int] = ()) -> list[str]:
-    """Problems that do not break the game (see check_specs for the ones that do)."""
+def check_warnings(
+    specs: Sequence,
+    engine: str,
+    patches: Iterable[str] = (),
+    allow: Iterable[int] = (),
+    plugins: dynrpg.Installed | None = None,
+    tables: dict[str, int] | None = None,
+) -> list[str]:
+    """Problems that do not break the game (see check_specs for the ones that do;
+    command_problems for `plugins` and `tables`)."""
     out = []
     for spec in specs:
         if hasattr(spec, "pages"):
@@ -138,7 +157,7 @@ def check_warnings(specs: Sequence, engine: str, patches: Iterable[str] = (), al
         else:
             continue  # database entries have no event commands
         for where, cmds in lists:
-            problems = command_problems(cmds, engine, patches, allow)
+            problems = command_problems(cmds, engine, patches, allow, plugins, tables)
             out += ["%s: %s" % (where, p.message) for p in problems if not p.error]
     return list(dict.fromkeys(out))
 

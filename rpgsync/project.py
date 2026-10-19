@@ -204,6 +204,25 @@ class Project:
             return False
         return any(e.lower() == "dynparams.dll" for e in _listdir(os.path.join(self.game_dir, plugins)))
 
+    def table_sizes(self, tables=("variables", "actors", "items", "skills")) -> dict[str, int]:
+        """Entries of database tables: the game's, or the ``size = N`` of their database
+        script when it is larger (slots added there, not synced yet)."""
+        from .commands import CompileError
+        from .database import table_size
+
+        db = LcfFile.load(self.ldb_path).root
+        out = {}
+        for table in tables:
+            out[table] = max((it.id for it in db.get(table)), default=0)
+            try:
+                with open(self.table_script(table), encoding="utf-8") as f:
+                    size = table_size(f.read())
+            except (OSError, SyntaxError, ValueError, CompileError):
+                size = None  # no script, or one that doesn't compile (reported by check)
+            if size is not None:
+                out[table] = max(out[table], size.size)
+        return out
+
     def context_signature(self) -> str:
         """What a script compiles against (engine, encoding, names of variables,
         switches and common events...): an unchanged entry compiles the same while this

@@ -52,13 +52,22 @@ with `@`.
   like the rest of the scripts: `V152` is `variables.name` (or `variables[152]`),
   `VV3` is `variables[variables.name]`, `N3` is `actors[3].name` and `NV3` is
   `actors[variables.name].name`. Other spellings keep their form (`v[150]`).
-  A `"` inside a string is written `""` in the comment:
+  A `"` inside a string is written `""` in the comment. Unquoted text is a
+  **word**: `word.end` when it is a Python name, `word("...")` otherwise, both
+  written as is (spaces kept; no `"`, `,` or line break):
 
   ```python
   dyn.dynparams_add_param(2, variables.clue_switch)  # @dynparams_add_param 2, V152
   dyn.change_text("desc-indice", r"\I[\v[153]]", 0)
   dyn.write_text("id", 10, 20, 'He said "hi"')      # @write_text "id", 10, 20, "He said ""hi"""
+  dyn.remove_text("menu1", word.end)                 # @remove_text "menu1", end
+  dyn.dynparams_append_string(word(" Page 2"))       # @dynparams_append_string  Page 2
+  dyn.call(word.easyrpg_add, 1, 10)                  # @call easyrpg_add, 1, 10
   ```
+
+  A comment becomes a call only when the call compiles back to the same text:
+  the first argument after one space, the others after `, `. Anything else
+  keeps the comment as is: `comment('@write_text "id", 1, 2,  "two spaces"')`.
 
 - **DynParams as plain Python:** with `DynPlugins/DynParams.dll`, a variable
   where RPG Maker takes a number compiles to the DynParams comments, and the
@@ -115,15 +124,48 @@ with `@`.
   | More message lines or choices than the target has | warning | the extra ones are not shown |
   | Message lines or choices for another kind of command | warning | they do not change it |
 
-- **Any plugin works**: rpgsync doesn't know plugins, so every call becomes
-  `dyn.name(...)`, whether a plugin exists for it or not.
-- **Arguments that don't fit** the `@name arg, arg` format keep the comment as
-  is: `comment("@call easyrpg_add, 1, 10")`.
+- **Known plugins:** rpgsync knows the commands of some plugins, and the
+  `DynRPG.ini` settings they read (`rpgsync/dynrpg.py`; any other plugin's
+  call is written `dyn.name(...)` too):
+
+  | Plugin | Commands | DynRPG.ini |
+  |---|---|---|
+  | DynTextPlugin.dll | `write_text(id, x, y, text, fixed?, color?, picture?)`, `append_line(id, text, end?)`, `append_text(id, text, end?)`, `change_text(id, text, color)` (`word.end`: same color), `change_position(id, x, y)`, `remove_text(id, end?)`, `remove_all()`; `end`: anything (`word.end`) | `[DynTextPlugin]` PictureID |
+  | DynParams.dll | the `dynparams_*` commands above | `[DynParams]` DebugLog |
+  | msg_commands.dll | `process_cmd()` | |
+  | EasyRPG Player (no DLL) | `call(function, ...)`, `easyrpg_output(mode, message, ...)`, `easyrpg_add(variable, value, ...)`, any `easyrpg_*` | |
+  | faster_atb_advanced.dll | none: it hooks the engine | `[faster_atb_advanced]` BattleSpeedVariable, DefaultSpeed |
+  | game_clock.dll | none | `[game_clock]` SessionStart ... BackgroundVar (variables), ForegroundImage(N), BackgroundImage(N), DummyImage, TimeTextDisplay |
+  | ExpBug-in.dll | none | `[Exp_Curves]` CoefficientA-E |
+  | ATBWaitOnly.dll | none | |
+
+  Their commands are typed methods of `dyn` (editor completion, ty): numbers
+  take `12`, `variables.x`, `variables[...]` or `v[12]`; texts take `"..."` or
+  `actors[...].name`; words take `word...`. Arguments are positional, and more
+  than a command reads are accepted (a plugin version may read them).
 - **Plugins that hook the engine** without event calls (battle plugins,
   graphics plugins configured by `.ini` files) don't appear in scripts.
 - **`check`:** without `"dynrpg"` in `patches`, each call is a warning: RPG_RT
   runs it as a plain comment. With `"easyrpg"`, `dyn.easyrpg_...()` calls are
-  fine: EasyRPG Player runs `@easyrpg_` comments without DynRPG.
+  fine: EasyRPG Player runs `@easyrpg_` comments without DynRPG. With
+  `"dynrpg"`, `rpgsync check` also warns (the sync still writes the event):
+
+  | Problem | Example |
+  |---|---|
+  | Fewer arguments than a known command needs | `dyn.change_text() needs 3 arguments (id, text, color), got 2` |
+  | An argument of the wrong kind | `dyn.change_position(): x (argument 2) is a number, not "10"` |
+  | More arguments than the command reads | `dyn.change_position() reads 3 arguments (id, x, y): 2 more are ignored` |
+  | A literal id the database lacks, in a DynText string (`\v[n]` variable, `\n[n]` actor, `\i[n]` / `\I[n]` item, `\t[n]` / `\T[n]` skill; `\i[\v[7]]` is dynamic) or a token (`V12`, `N3`) | `dyn.write_text(): \v[4000]: the database has no variable 4000 (it has 3327)` |
+  | A command of a known plugin that isn't in `DynPlugins/` (any case) | `dyn.process_cmd() comes from msg_commands.dll, which isn't in DynPlugins` |
+  | An unknown command, when every DLL of `DynPlugins/` is known (an unknown DLL may provide it) | `dyn.foo(): no plugin in DynPlugins provides it` |
+  | An EasyRPG Player command without `"easyrpg"` in `patches` | `dyn.easyrpg_add() is an EasyRPG Player command, RPG_RT ignores it` |
+  | A `DynRPG.ini` section no installed plugin reads (`[QuickPatches]` is DynRPG's; a plugin reads the section named after its DLL) | `DynRPG.ini: [CortiLog]: no plugin in DynPlugins reads this section` |
+  | Settings an installed plugin needs, missing | `DynRPG.ini: [game_clock] lacks SessionStart: game_clock.dll needs it` |
+  | A plugin setting naming a variable past the database | `DynRPG.ini: [game_clock] names variables past the database's 3327 (...)` |
+
+  A plugin EasyRPG Player emulates (DynText, DynParams) needs no DLL with
+  `"easyrpg"` in `patches`. The `DynRPG.ini` lines show when the whole game
+  is checked.
 - **EasyRPG Player** emulates a few plugins (DynText, DynParams, its own
   `easyrpg_*` functions). Other calls log `Unsupported DynRPG function` and do
   nothing; engine plugins are ignored.
