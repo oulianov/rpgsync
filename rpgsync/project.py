@@ -33,13 +33,6 @@ CODEPAGES = {
 CONFIG_DIR = ".rpgsync"
 
 
-def _listdir(path: str) -> list[str]:
-    try:
-        return os.listdir(path)
-    except OSError:
-        return []
-
-
 def _stat(path: str) -> tuple[int, int] | None:
     try:
         st = os.stat(path)
@@ -198,11 +191,11 @@ class Project:
         return self._ctx
 
     def has_dynparams(self) -> bool:
-        """Does the game run the DynParams plugin (DynPlugins/DynParams.dll)?"""
-        plugins = next((e for e in _listdir(self.game_dir) if e.lower() == "dynplugins"), None)
-        if plugins is None:
-            return False
-        return any(e.lower() == "dynparams.dll" for e in _listdir(os.path.join(self.game_dir, plugins)))
+        """Does the game run the DynParams plugin (DynPlugins/DynParams.dll, or listed in
+        EasyRPG.ini's [DynRPG] Plugins)?"""
+        from . import dynrpg
+
+        return dynrpg.installed(self.game_dir).provides("DynParams.dll")
 
     def table_sizes(self, tables=("variables", "actors", "items", "skills")) -> dict[str, int]:
         """Entries of database tables: the game's, or the ``size = N`` of their database

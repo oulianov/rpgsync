@@ -908,6 +908,9 @@ def check(
         for problem in dynrpg.setup_problems(rules.plugins, rules.tables):  # once, for the whole game
             err.print(("DynRPG.ini", "cyan"), ": ", (problem, "yellow"), kind="warning")
             warnings += 1
+        for problem in dynrpg.easyrpg_ini_problems(rules.plugins):
+            err.print(("EasyRPG.ini", "cyan"), ": ", (problem, "yellow"), kind="warning")
+            warnings += 1
     if files is not None:
         complete = chosen is None and not map and not no_common
         warnings += _check_resources(files, proj, ui, err, complete=complete)

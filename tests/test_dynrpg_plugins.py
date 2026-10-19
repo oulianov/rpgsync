@@ -252,6 +252,100 @@ def test_installed_plugins(src, plugins, patches, message):
         assert any(message in m for m in found), found
 
 
+def _declared(*names: str, dlls: tuple[str, ...] = ()) -> dynrpg.Installed:
+    return dynrpg.Installed(dlls=list(dlls), declared=list(names))
+
+
+@pytest.mark.parametrize(
+    ("src", "plugins", "patches", "message"),
+    [
+        # a game made for EasyRPG Player: no DLL, EasyRPG.ini lists the plugins
+        ("dyn.process_cmd()", _declared("msg_commands"), ("dynrpg",), None),
+        ("dyn.process_cmd()", _declared("MSG_COMMANDS.DLL"), ("dynrpg",), None),  # any case, .dll or not
+        (
+            "dyn.process_cmd()",
+            _declared("DynTextPlugin"),
+            ("dynrpg",),
+            "dyn.process_cmd() comes from msg_commands.dll: add msg_commands to [DynRPG] Plugins in EasyRPG.ini",
+        ),
+        # the list is all EasyRPG Player runs, emulated plugins too
+        (
+            "dyn.remove_all()",
+            _declared(),
+            ("dynrpg", "easyrpg"),
+            "dyn.remove_all() comes from DynTextPlugin.dll: add DynTextPlugin to [DynRPG] Plugins in EasyRPG.ini",
+        ),
+        (
+            "dyn.foo()",
+            _declared("DynTextPlugin"),
+            ("dynrpg",),
+            "dyn.foo(): no plugin of EasyRPG.ini's [DynRPG] Plugins provides it",
+        ),
+        # a game for both: its DLLs (RPG_RT) and the list (EasyRPG Player) must agree
+        ("dyn.process_cmd()", _declared("msg_commands", dlls=("msg_commands.dll",)), ("dynrpg",), None),
+        (
+            "dyn.process_cmd()",
+            _declared("game_clock", dlls=("msg_commands.dll", "game_clock.dll")),
+            ("dynrpg",),
+            "dyn.process_cmd() comes from msg_commands.dll, which EasyRPG.ini's [DynRPG] Plugins doesn't list: "
+            "EasyRPG Player doesn't run it",
+        ),
+        (
+            "dyn.process_cmd()",
+            _declared("msg_commands", dlls=("game_clock.dll",)),
+            ("dynrpg",),
+            "dyn.process_cmd() comes from msg_commands.dll, which isn't in DynPlugins: RPG_RT doesn't run it "
+            "(EasyRPG Player does)",
+        ),
+        (
+            "dyn.process_cmd()",
+            _declared("game_clock", dlls=("game_clock.dll",)),
+            ("dynrpg",),
+            "dyn.process_cmd() comes from msg_commands.dll, which is neither in DynPlugins nor in EasyRPG.ini's "
+            "[DynRPG] Plugins",
+        ),
+    ],
+)
+def test_plugins_declared_in_easyrpg_ini(src, plugins, patches, message):
+    found = _warnings(src, patches=patches, plugins=plugins)
+    if message is None:
+        assert found == []
+    else:
+        assert message in found, found
+
+
+def test_installed_reads_the_plugins_of_easyrpg_ini(tmp_path):
+    ini = tmp_path / "easyrpg.INI"
+    ini.write_bytes(b"[Patch]\r\nDynRPG=1\r\n[dynrpg]\r\nplugins = DynTextPlugin, msg_commands.dll  game_clock,\r\n")
+    assert dynrpg.installed(str(tmp_path)).declared == ["DynTextPlugin", "msg_commands.dll", "game_clock"]
+    ini.write_bytes(b"[DynRPG]\nPlugins=\n")
+    assert dynrpg.installed(str(tmp_path)).declared == []  # declared: no plugin runs
+    ini.write_bytes(b"[Patch]\nDynRPG=1\n")
+    assert dynrpg.installed(str(tmp_path)).declared is None  # EasyRPG Player finds them itself
+
+
+def test_easyrpg_ini_problems():
+    assert dynrpg.easyrpg_ini_problems(dynrpg.Installed(dlls=["game_clock.dll"])) == []
+    assert dynrpg.easyrpg_ini_problems(_declared("msg_commands", "game_clock")) == []  # no DLL: EasyRPG Player only
+    plugins = _declared(
+        "game_clock", "msg_commands", "CortiCustomCrit", dlls=("game_clock.dll", "DynTextPlugin.dll", "Mystery.dll")
+    )
+    assert dynrpg.easyrpg_ini_problems(plugins) == [
+        "[DynRPG] Plugins lists msg_commands, which isn't in DynPlugins: RPG_RT doesn't run it",
+        "[DynRPG] Plugins names CortiCustomCrit, no plugin rpgsync knows: EasyRPG Player may not run it",
+        "[DynRPG] Plugins doesn't list DynTextPlugin.dll of DynPlugins: EasyRPG Player doesn't run it",
+    ]  # Mystery.dll: rpgsync doesn't know it, nor whether EasyRPG Player could run it
+
+
+def test_dynrpg_ini_problems_with_declared_plugins():
+    plugins = dynrpg.Installed(ini=dynrpg.read_ini(INI), declared=["faster_atb_advanced", "game_clock"])
+    found = dynrpg.setup_problems(plugins, {"variables": 5000})
+    assert found[0].startswith("[CortiCustomCrit]: no plugin in DynPlugins or EasyRPG.ini's [DynRPG] Plugins")
+    assert found[1].startswith("[Mystery]: no plugin in DynPlugins or EasyRPG.ini's [DynRPG] Plugins")
+    assert found[2].startswith("[game_clock] lacks SessionCurrent")  # a declared plugin's settings are checked
+    assert len(found) == 3  # [faster_atb_advanced] is read; ExpBug-in isn't declared, so no [Exp_Curves] needed
+
+
 def test_unknown_game_skips_the_plugin_checks():
     assert _warnings("dyn.process_cmd()", "dyn.foo()", "dyn.easyrpg_add(1, 2)") == []
 
@@ -359,3 +453,21 @@ def test_check_warns_about_the_plugins(exported2003):
     one = os.path.join(exported2003, "Scripts", "Map0001.py")
     r = CliRunner().invoke(cli.app, ["check", one, "--no-types", "--patch", "dynrpg"])
     assert "DynRPG.ini" not in r.output  # only when the whole game is checked
+
+
+def test_check_reads_the_plugins_of_easyrpg_ini(exported2003):
+    """A game made for EasyRPG Player: no DLL, EasyRPG.ini lists its plugins."""
+    (exported2003 / "EasyRPG.ini").write_text("[Patch]\nDynRPG=1\n[DynRPG]\nPlugins=DynTextPlugin, Mystery\n")
+    r = CliRunner().invoke(cli.app, ["check", str(exported2003), "--no-types", "--patch", "dynrpg"])
+    assert r.exit_code == 0, r.output
+    assert "dyn.write_text()" not in r.output
+    assert "DynPlugins" not in r.output
+    assert "EasyRPG.ini: [DynRPG] Plugins names Mystery, no plugin rpgsync knows" in r.output
+
+
+def test_dynparams_listed_in_easyrpg_ini(exported2003):
+    from rpgsync.project import Project
+
+    assert not Project(str(exported2003)).has_dynparams()
+    (exported2003 / "EasyRPG.ini").write_text("[DynRPG]\nPlugins=dynparams.dll\n")
+    assert Project(str(exported2003)).has_dynparams()

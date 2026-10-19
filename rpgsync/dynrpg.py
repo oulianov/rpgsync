@@ -2,8 +2,10 @@
 settings they read.
 
 DynRPG (https://rewking.com/dynrpg/) loads every DLL of the game's DynPlugins
-folder.  Events call a plugin through comments that start with ``@``, which the
-scripts write ``dyn.name(...)``::
+folder; EasyRPG Player runs the plugins it emulates without their DLL, the ones
+its EasyRPG.ini lists in ``[DynRPG] Plugins=`` when it has that key.  Events call
+a plugin through comments that start with ``@``, which the scripts write
+``dyn.name(...)``::
 
     @write_text "id", 10, 20, "Hello \\v[3]"    dyn.write_text("id", 10, 20, r"Hello \\v[3]")
     @remove_text "id", end                       dyn.remove_text("id", word.end)
@@ -11,8 +13,9 @@ scripts write ``dyn.name(...)``::
 A plugin reads its settings from the game's DynRPG.ini, in its own section (named
 after its DLL unless it says otherwise).  With this table, `rpgsync check` warns
 about arguments a command doesn't take, calls no installed plugin runs, sections
-nothing reads and missing settings.  rpgsync.dsl.DynRPG has the same commands as
-typed methods, for editors and ty (tests/test_dynrpg_plugins.py keeps them alike).
+nothing reads, missing settings and EasyRPG.ini's list against DynPlugins.
+rpgsync.dsl.DynRPG has the same commands as typed methods, for editors and ty
+(tests/test_dynrpg_plugins.py keeps them alike).
 """
 
 from __future__ import annotations
@@ -281,18 +284,38 @@ def _shown(a: Arg) -> str:
 
 
 # --------------------------------------------------------------------------
-# What the game has: DynPlugins/*.dll, DynRPG.ini
+# What the game has: DynPlugins/*.dll, DynRPG.ini, EasyRPG.ini's [DynRPG] Plugins
 # --------------------------------------------------------------------------
 
 
+def _name(dll: str) -> str:
+    """A plugin's name as EasyRPG Player compares them: its DLL's, without .dll, in lowercase."""
+    dll = dll.lower()
+    return dll[:-4] if dll.endswith(".dll") else dll
+
+
 class Installed(BaseModel):
-    """A game's DynRPG setup: the plugins of its DynPlugins folder and its DynRPG.ini."""
+    """A game's DynRPG setup: the plugins of its DynPlugins folder (RPG_RT runs them), its
+    DynRPG.ini and the plugins its EasyRPG.ini declares (EasyRPG Player runs these, without
+    their DLL)."""
 
     dlls: list[str] = []  # file names
     ini: dict[str, dict[str, str]] | None = None  # section -> setting -> value; None: no DynRPG.ini
+    # [DynRPG] Plugins of EasyRPG.ini, as written (DynTextPlugin, msg_commands.dll...); None: not
+    # declared, EasyRPG Player then finds the plugins itself
+    declared: list[str] | None = None
 
     def has(self, dll: str) -> bool:
+        """Is the plugin's DLL in DynPlugins?"""
         return dll.lower() in {d.lower() for d in self.dlls}
+
+    def lists(self, dll: str) -> bool:
+        """Does EasyRPG.ini's [DynRPG] Plugins name the plugin?"""
+        return self.declared is not None and _name(dll) in {_name(d) for d in self.declared}
+
+    def provides(self, dll: str) -> bool:
+        """Does the game run the plugin, in RPG_RT (its DLL) or in EasyRPG Player (EasyRPG.ini)?"""
+        return self.has(dll) or self.lists(dll)
 
     def unknown(self) -> list[str]:
         """The DLLs this module doesn't know (they may add any command, read any section)."""
@@ -307,19 +330,28 @@ def _listdir(path: str) -> list[str]:
 
 
 def installed(game_dir: str) -> Installed:
-    """The DynRPG plugins and DynRPG.ini of a game folder (file names in any case)."""
+    """The DynRPG plugins, DynRPG.ini and EasyRPG.ini plugin list of a game folder (file
+    names in any case)."""
     entries = _listdir(game_dir)
     folder = next((e for e in entries if e.lower() == "dynplugins"), None)
     dlls = [e for e in _listdir(os.path.join(game_dir, folder)) if e.lower().endswith(".dll")] if folder else []
-    ini = None
-    name = next((e for e in entries if e.lower() == "dynrpg.ini"), None)
-    if name is not None:
-        try:
-            with open(os.path.join(game_dir, name), "rb") as f:
-                ini = read_ini(f.read().decode("latin-1"))
-        except OSError:
-            pass
-    return Installed(dlls=sorted(dlls, key=str.lower), ini=ini)
+    ini = _read_game_ini(game_dir, entries, "dynrpg.ini")
+    easyrpg = _read_game_ini(game_dir, entries, "easyrpg.ini") or {}
+    section = next((s for name, s in easyrpg.items() if name.lower() == "dynrpg"), {})
+    plugins = next((v for k, v in section.items() if k.lower() == "plugins"), None)
+    declared = None if plugins is None else [p for p in re.split(r"[,\s]+", plugins) if p]
+    return Installed(dlls=sorted(dlls, key=str.lower), ini=ini, declared=declared)
+
+
+def _read_game_ini(game_dir: str, entries: list[str], lower_name: str) -> dict[str, dict[str, str]] | None:
+    name = next((e for e in entries if e.lower() == lower_name), None)
+    if name is None:
+        return None
+    try:
+        with open(os.path.join(game_dir, name), "rb") as f:
+            return read_ini(f.read().decode("latin-1"))
+    except OSError:
+        return None
 
 
 def read_ini(text: str) -> dict[str, dict[str, str]]:
@@ -437,13 +469,35 @@ def _not_run(name: str, plugin: Plugin | None, patches: set[str], plugins: Insta
             "if the game is made for EasyRPG Player"
         )
     if plugin is not None and plugin.dll:
-        if plugins.has(plugin.dll) or (plugin.emulated and "easyrpg" in patches):
+        if plugins.declared is None:
+            if plugins.has(plugin.dll) or (plugin.emulated and "easyrpg" in patches):
+                return None
+            emulated = " (EasyRPG Player emulates it)" if plugin.emulated else ""
+            return " comes from %s, which isn't in DynPlugins%s" % (plugin.dll, emulated)
+        # EasyRPG Player runs the plugins EasyRPG.ini lists; RPG_RT, the DLLs of a game that has some
+        listed, dll = plugins.lists(plugin.dll), plugins.has(plugin.dll)
+        if listed and (dll or not plugins.dlls):
             return None
-        emulated = " (EasyRPG Player emulates it)" if plugin.emulated else ""
-        return " comes from %s, which isn't in DynPlugins%s" % (plugin.dll, emulated)
+        if listed:
+            return " comes from %s, which isn't in DynPlugins: RPG_RT doesn't run it (EasyRPG Player does)" % plugin.dll
+        if dll:
+            return (
+                " comes from %s, which EasyRPG.ini's [DynRPG] Plugins doesn't list: EasyRPG Player doesn't run it"
+                % plugin.dll
+            )
+        if plugins.dlls:
+            return " comes from %s, which is neither in DynPlugins nor in EasyRPG.ini's [DynRPG] Plugins" % plugin.dll
+        return " comes from %s: add %s to [DynRPG] Plugins in EasyRPG.ini" % (plugin.dll, _plain(plugin.dll))
     if plugin is not None or plugins.unknown():
         return None  # an unknown DLL may run it
+    if plugins.declared is not None and not plugins.dlls:
+        return ": no plugin of EasyRPG.ini's [DynRPG] Plugins provides it"
     return ": no plugin in DynPlugins provides it"
+
+
+def _plain(dll: str) -> str:
+    """The DLL's name without .dll, as written."""
+    return dll[:-4] if dll.lower().endswith(".dll") else dll
 
 
 def _id_problems(args: list[Arg], texts: bool, tables: dict[str, int]) -> list[str]:
@@ -471,18 +525,19 @@ def setup_problems(plugins: Installed, tables: dict[str, int] | None = None) -> 
     out = []
     ini = plugins.ini or {}
     by_lower = {s.lower(): s for s in ini}
-    known = [BY_DLL[d.lower()] for d in plugins.dlls if d.lower() in BY_DLL]
+    known = [p for p in PLUGINS if p.dll and plugins.provides(p.dll)]
     # DynRPG gives a plugin the section named after its DLL; a known one may read another
-    readers = CORE_SECTIONS | {os.path.splitext(d)[0].lower() for d in plugins.dlls}
+    readers = CORE_SECTIONS | {_name(d) for d in [*plugins.dlls, *(plugins.declared or [])]}
     readers |= {p.section.lower() for p in known if p.section}
+    where = "DynPlugins" if plugins.declared is None else "DynPlugins or EasyRPG.ini's [DynRPG] Plugins"
     for low, section in by_lower.items():
         if low in readers:
             continue
         owner = next((p for p in PLUGINS if p.section and p.section.lower() == low), None)
         if owner is not None:
-            out.append("[%s] is read by %s, which isn't in DynPlugins" % (section, owner.dll))
+            out.append("[%s] is read by %s, which isn't in %s" % (section, owner.dll, where))
         elif not plugins.unknown():
-            out.append("[%s]: no plugin in DynPlugins reads this section" % section)
+            out.append("[%s]: no plugin in %s reads this section" % (section, where))
     variables = (tables or {}).get("variables")
     for p in known:
         if p.section is None:
@@ -506,6 +561,27 @@ def setup_problems(plugins: Installed, tables: dict[str, int] | None = None) -> 
                 "[%s] names %s past the database's %d (the editor doesn't show %s): %s"
                 % (p.section, what, variables, _them(past), ", ".join(past))
             )
+    return out
+
+
+def easyrpg_ini_problems(plugins: Installed) -> list[str]:
+    """What is wrong with the [DynRPG] Plugins of the game's EasyRPG.ini: names of no plugin
+    rpgsync knows (EasyRPG Player runs only the plugins it emulates), known DLLs of DynPlugins it
+    leaves out (EasyRPG Player doesn't run them) and, in a game that has DLLs, the plugins it
+    lists without their DLL (RPG_RT doesn't run them)."""
+    if plugins.declared is None:
+        return []
+    out = []
+    by_name = {_name(p.dll): p for p in PLUGINS if p.dll}
+    for name in plugins.declared:
+        plugin = by_name.get(_name(name))
+        if plugin is None:
+            out.append("[DynRPG] Plugins names %s, no plugin rpgsync knows: EasyRPG Player may not run it" % name)
+        elif plugins.dlls and not plugins.has(plugin.dll):
+            out.append("[DynRPG] Plugins lists %s, which isn't in DynPlugins: RPG_RT doesn't run it" % name)
+    for dll in plugins.dlls:
+        if dll.lower() in BY_DLL and not plugins.lists(dll):
+            out.append("[DynRPG] Plugins doesn't list %s of DynPlugins: EasyRPG Player doesn't run it" % dll)
     return out
 
 

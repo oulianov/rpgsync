@@ -16,7 +16,7 @@ pyproject.toml::
 
 With DynRPG, the calls of plugins (``dyn.name(...)``) are checked against the
 plugins rpgsync knows (rpgsync/dynrpg.py) and, by `rpgsync check`, against the
-ones in the game's DynPlugins folder.
+ones in the game's DynPlugins folder and the [DynRPG] Plugins of its EasyRPG.ini.
 """
 
 from __future__ import annotations
