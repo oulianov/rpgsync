@@ -1,11 +1,29 @@
 [project]
 name = "rpgsync"
 version = "0.1.0"
-description = "A python twin of your RPG Maker 2000/2003 game"
+description = "A Python twin of your RPG Maker 2000/2003 game"
 readme = "README.md"
 license = "MIT"
 # no license-files: uv_build then reads the project folder as a file when it is reached
-# through a link (the scripts' .rpgsync/rpgsync), and the scripts can't install rpgsync
+# through a link (the older scripts' .rpgsync/rpgsync source), and the scripts can't
+# install rpgsync.  LICENSE goes in the sdist through source-include below.
+authors = [{ name = "Nicolas Oulianov" }]
+keywords = ["rpg-maker", "rpg-maker-2000", "rpg-maker-2003", "easyrpg", "gamedev", "dsl"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Games/Entertainment :: Role-Playing",
+    "Topic :: Software Development :: Code Generators",
+    "Typing :: Typed",
+]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.14.0",
@@ -15,7 +33,10 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/oulianov/rpgsync"
 Repository = "https://github.com/oulianov/rpgsync"
+Issues = "https://github.com/oulianov/rpgsync/issues"
+Changelog = "https://github.com/oulianov/rpgsync/blob/master/CHANGELOG.md"
 
 [project.scripts]
 rpgsync = "rpgsync.cli:main"
@@ -26,6 +47,7 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-root = ""
+source-include = ["LICENSE", "CHANGELOG.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

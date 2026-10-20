@@ -1,0 +1,84 @@
+# Publishes rpgsync to PyPI when a GitHub release is published (see docs/development.md,
+# Releasing): the tests run on Python 3.11 to 3.15, the release's tag must be v +
+# pyproject.toml's version, then the sdist and wheel are built and uploaded with PyPI's
+# trusted publishing: no token or password is stored anywhere.
+#
+# One-time setup, before the first release: on PyPI,
+# https://pypi.org/manage/account/publishing/, "Add a new pending publisher", GitHub, with
+# PyPI project name rpgsync, owner oulianov, repository rpgsync, workflow name release.yml,
+# and no environment name.  The first upload creates the project, and the pending
+# publisher becomes its trusted publisher.
+
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: rpgsync
+          persist-credentials: false
+      # the tests run on EasyRPG's test games, found next to rpgsync (tests/conftest.py)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: EasyRPG/TestGame
+          ref: 4bbedb73492c80b79d8290e0b06ea86875b0bdc8
+          path: TestGame
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: ${{ matrix.python }}
+          working-directory: rpgsync
+      - name: Tests
+        working-directory: rpgsync
+        run: uv run --locked pytest
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: The tag is pyproject.toml's version
+        run: |
+          version=$(uv version --short)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::the release's tag is $GITHUB_REF_NAME, pyproject.toml's version $version"
+            exit 1
+          fi
+      - run: uv build
+      - name: The wheel installs and runs
+        run: uvx --isolated --from dist/rpgsync-*.whl rpgsync --help
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - run: uv publish --trusted-publishing always dist/*

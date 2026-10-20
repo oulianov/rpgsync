@@ -2,9 +2,11 @@
 
 import ast
 import inspect
+import json
+import subprocess
 import tomllib
 
-from rpgsync import dsl, named
+from rpgsync import dsl, named, scaffold
 from rpgsync.project import Project
 from rpgsync.scaffold import (
     GITATTRIBUTES,
@@ -13,6 +15,7 @@ from rpgsync.scaffold import (
     RPGSYNC_ROOT,
     detect_patches,
     init_scripts_project,
+    rpgsync_requirement,
     update_scripts_project,
 )
 
@@ -74,10 +77,11 @@ def test_star_import_names():
 
 def test_pyproject_template_is_toml():
     config = tomllib.loads(
-        PYPROJECT.format(name="g", title="G", source=LINK_SOURCE, game="..", engine="2003", patches="[]")
+        PYPROJECT.format(name="g", title="G", requirement="rpgsync~=0.2.0", game="..", engine="2003", patches="[]")
     )
     assert config["tool"]["pyright"] == {"reportWildcardImportFromLibrary": False}
-    assert config["tool"]["uv"]["sources"]["rpgsync"] == {"path": ".rpgsync/rpgsync", "editable": True}
+    assert config["project"]["dependencies"] == ["rpgsync~=0.2.0"]
+    assert "sources" not in config["tool"]["uv"]
 
 
 def test_game_types(game2003):
@@ -122,11 +126,45 @@ def test_pyright_settings_added_once(game2003):
     assert update_scripts_project(project) == []
 
 
-def test_rpgsync_found_through_a_link(game2003):
-    """pyproject.toml (and uv.lock) name rpgsync by the same relative path on every
-    computer: .rpgsync/rpgsync, a link to this computer's rpgsync folder."""
+def test_rpgsync_from_pypi(game2003):
+    """A new game's scripts depend on this rpgsync release from PyPI, which their uv.lock
+    pins: no link to this computer's rpgsync folder."""
+    init_scripts_project(Project(str(game2003)))
+    scripts = game2003 / "Scripts"
+    config = tomllib.loads((scripts / "pyproject.toml").read_text())
+    assert config["project"]["dependencies"] == [rpgsync_requirement()]
+    assert rpgsync_requirement().startswith("rpgsync~=")
+    assert "sources" not in config["tool"]["uv"]
+    assert not (scripts / ".rpgsync" / "rpgsync").exists()
+
+
+def test_rpgsync_requirement(monkeypatch):
+    """This release and its fixes: a minor version changes the scripts rpgsync writes."""
+    for version, requirement in [
+        ("0.2.3", "rpgsync~=0.2.3"),
+        ("0.3", "rpgsync~=0.3.0"),
+        ("0.3.0.dev1", "rpgsync~=0.3.0"),
+        ("1.0.0rc1", "rpgsync~=1.0.0"),
+        ("0+unknown", "rpgsync"),
+    ]:
+        monkeypatch.setattr(scaffold, "rpgsync_version", lambda v=version: v)
+        assert rpgsync_requirement() == requirement
+
+
+def _older_pyproject(pyproject, source=LINK_SOURCE):
+    """pyproject.toml as an older rpgsync wrote it: rpgsync from a [tool.uv.sources] path."""
+    text = pyproject.read_text()
+    text = text.replace('dependencies = ["%s"]' % rpgsync_requirement(), 'dependencies = ["rpgsync"]')
+    pyproject.write_text(text.replace("[tool.rpgsync]", "[tool.uv.sources]\n%s\n\n[tool.rpgsync]" % source))
+
+
+def test_older_link_source_keeps_its_link(game2003):
+    """pyproject.toml (and uv.lock) of an older rpgsync name rpgsync by the same relative
+    path on every computer: .rpgsync/rpgsync, a link to this computer's rpgsync folder."""
     project = Project(str(game2003))
     init_scripts_project(project)
+    _older_pyproject(game2003 / "Scripts" / "pyproject.toml")
+    assert update_scripts_project(project) == []
     link = game2003 / "Scripts" / ".rpgsync" / "rpgsync"
     assert link.is_symlink() and link.resolve() == RPGSYNC_ROOT
     link.unlink()  # rpgsync moved: the link follows
@@ -139,6 +177,7 @@ def test_absolute_path_of_an_older_rpgsync(game2003):
     project = Project(str(game2003))
     init_scripts_project(project)
     pyproject = game2003 / "Scripts" / "pyproject.toml"
+    _older_pyproject(pyproject)
     text = pyproject.read_text()
     for path in ("/Users/someone/rpgsync", "C:/Users/someone/rpgsync"):
         pyproject.write_text(text.replace(LINK_SOURCE, 'rpgsync = { path = "%s", editable = true }' % path))
@@ -147,3 +186,35 @@ def test_absolute_path_of_an_older_rpgsync(game2003):
     custom = text.replace(LINK_SOURCE, 'rpgsync = { path = "../rpgsync", editable = true }')
     pyproject.write_text(custom)  # a relative path of the user's own is kept
     assert update_scripts_project(project) == []
+
+
+def test_linked_rpgsync_installed_in_the_environment(game2003, monkeypatch):
+    """A developer links their rpgsync folder as .rpgsync/rpgsync: it is installed, editable,
+    in the scripts' .venv instead of the release, and pyproject.toml stays as it is."""
+    commands = []
+
+    def run(cmd, **kwargs):
+        commands.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(scaffold.shutil, "which", lambda name: "/bin/" + name)
+    monkeypatch.setattr(scaffold.subprocess, "run", run)
+    project = Project(str(game2003))
+    init_scripts_project(project)
+    scripts = game2003 / "Scripts"
+    pyproject = (scripts / "pyproject.toml").read_text()
+    site = scripts / ".venv" / ("Lib" if scaffold.os.name == "nt" else "lib/python3.12") / "site-packages"
+    site.mkdir(parents=True)
+    assert update_scripts_project(project) == [] and commands == []  # no link: the release
+    (scripts / ".rpgsync").mkdir()
+    (scripts / ".rpgsync" / "rpgsync").symlink_to(RPGSYNC_ROOT, target_is_directory=True)
+    assert update_scripts_project(project) == []
+    venv = str(scripts / ".venv")
+    assert commands == [["uv", "pip", "install", "--quiet", "--python", venv, "--editable", str(RPGSYNC_ROOT)]]
+    dist_info = site / "rpgsync-0.2.0.dist-info"
+    dist_info.mkdir()
+    direct_url = {"url": RPGSYNC_ROOT.as_uri(), "dir_info": {"editable": True}}
+    (dist_info / "direct_url.json").write_text(json.dumps(direct_url))
+    update_scripts_project(project)
+    assert len(commands) == 1  # installed already
+    assert (scripts / "pyproject.toml").read_text() == pyproject

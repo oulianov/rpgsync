@@ -6,18 +6,27 @@ import configparser
 import json
 import os
 import re
+import shutil
+import subprocess
 import tomllib
 from importlib import metadata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
+from . import __version__
 from .project import Project
 
 RPGSYNC_ROOT = Path(__file__).resolve().parent.parent
-RPGSYNC_GIT = "https://github.com/oulianov/rpgsync"
-# The scripts project finds rpgsync through a link, in the folder rpgsync keeps out of
-# git, to this computer's rpgsync folder: pyproject.toml and uv.lock then hold the
-# same relative path on every computer sharing the game.
+# The scripts project depends on the rpgsync release that set it up, from PyPI
+# (rpgsync~=0.2.0), and its uv.lock pins the exact version: everyone sharing the game,
+# and its CI, run the rpgsync its scripts are written for.
+#
+# A developer of rpgsync links their rpgsync folder as .rpgsync/rpgsync, in the folder
+# rpgsync keeps out of git: rpgsync then installs that folder, editable, into the
+# scripts' .venv (install_linked_rpgsync), and pyproject.toml and uv.lock stay as they
+# are.  Before, the scripts project found rpgsync through that link, always made: the
+# LINK_SOURCE of the projects set up then is still kept up to date.
 RPGSYNC_LINK = ".rpgsync/rpgsync"
 LINK_SOURCE = (
     "# .rpgsync/rpgsync: a link to this computer's rpgsync folder, made by rpgsync\n"
@@ -39,16 +48,15 @@ name = "{name}"
 version = "0.1.0"
 description = "Event scripts of {title}, kept in sync with the game by rpgsync"
 requires-python = ">=3.11"
-dependencies = ["rpgsync"]
+# the rpgsync these scripts are written for, its exact version in uv.lock.  Your own
+# rpgsync folder instead, on this computer only: link it as .rpgsync/rpgsync
+dependencies = ["{requirement}"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-xdist>=3", "ruff>=0.6", "ty"]
 
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-{source}
 
 [tool.rpgsync]
 # game folder, relative to this file
@@ -281,11 +289,25 @@ def rpgsync_checkout() -> Path | None:
     return None
 
 
-def rpgsync_source() -> str:
-    """The [tool.uv.sources] line saying where the scripts project gets rpgsync."""
-    if rpgsync_checkout():
-        return LINK_SOURCE
-    return 'rpgsync = { git = "%s" }' % RPGSYNC_GIT
+def rpgsync_version() -> str:
+    """The version of the running rpgsync.  Run from its source folder: that folder's
+    pyproject.toml's (an editable install keeps the version it was installed with)."""
+    try:
+        project = tomllib.loads((RPGSYNC_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+        if project["name"] == "rpgsync":
+            return project["version"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError):
+        pass
+    return __version__
+
+
+def rpgsync_requirement() -> str:
+    """The scripts project's dependency on rpgsync: this release and the fixes that write
+    the same scripts, rpgsync~=0.2.0 for 0.2.0 (see CHANGELOG.md, Versions)."""
+    m = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", rpgsync_version())
+    if m is None:  # a source folder that was never installed
+        return "rpgsync"
+    return "rpgsync~=%s.%s.%s" % (m[1], m[2], m[3] or 0)
 
 
 def _same(a: Path, b: Path) -> bool:
@@ -329,6 +351,38 @@ def link_rpgsync(script_dir: str | Path) -> bool:
 
         _winapi.CreateJunction(str(target), str(link))
     return True
+
+
+def _editable_rpgsync(venv: Path) -> Path | None:
+    """The folder the environment has rpgsync installed from, editable (None: a release)."""
+    site = "Lib/site-packages" if os.name == "nt" else "lib/python*/site-packages"
+    for dist_info in venv.glob(site + "/rpgsync-*.dist-info"):
+        try:
+            direct = json.loads((dist_info / "direct_url.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        url = urlparse(direct.get("url", ""))
+        if url.scheme == "file" and direct.get("dir_info", {}).get("editable"):
+            return Path(url2pathname(url.path))
+    return None
+
+
+def install_linked_rpgsync(script_dir: str | Path) -> bool:
+    """A developer's own rpgsync folder, linked as <scripts>/.rpgsync/rpgsync: install it,
+    editable, into the scripts' .venv instead of the release uv.lock pins, so the scripts,
+    their tests and the editor use it.  pyproject.toml and uv.lock stay as they are; `uv
+    sync` and `uv run` put the release back, until rpgsync's next start.  Nothing to do
+    without the link (or with the older LINK_SOURCE, which installs it).  -> installed"""
+    root = Path(script_dir)
+    link, venv = root / RPGSYNC_LINK, root / ".venv"
+    if not (link / "pyproject.toml").is_file() or not venv.is_dir() or shutil.which("uv") is None:
+        return False
+    target = link.resolve()  # the folder itself: uv_build can't read license files through a link
+    installed = _editable_rpgsync(venv)
+    if installed is not None and _same(installed, target):
+        return False
+    cmd = ["uv", "pip", "install", "--quiet", "--python", str(venv), "--editable", str(target)]
+    return subprocess.run(cmd, cwd=root, capture_output=True, check=False).returncode == 0
 
 
 def _uses_link(pyproject_text: str) -> bool:
@@ -415,7 +469,8 @@ def update_test_scripts(root: Path) -> bool:
 
 def update_scripts_project(project: Project) -> list[str]:
     """Bring the scripts folder of a set-up game up to date with this rpgsync: the
-    rpgsync source and Pylance settings of pyproject.toml, the .rpgsync/rpgsync link,
+    rpgsync source and Pylance settings of pyproject.toml, the .rpgsync/rpgsync link
+    (of an older LINK_SOURCE, or a developer's: their rpgsync installed in .venv),
     database/game_types.py, tests/test_scripts.py.  Returns the written paths."""
     root = Path(project.script_dir)
     pyproject = root / "pyproject.toml"
@@ -437,6 +492,8 @@ def update_scripts_project(project: Project) -> list[str]:
         written.append(str(pyproject))
     if _uses_link(text):
         link_rpgsync(root)
+    else:
+        install_linked_rpgsync(root)
     path = root / "database" / "game_types.py"
     content = game_types(project)
     if not path.exists() or path.read_text(encoding="utf-8") != content:
@@ -460,7 +517,7 @@ def init_scripts_project(project: Project) -> list[str]:
         "pyproject.toml": PYPROJECT.format(
             name=slug + "-scripts",
             title=title,
-            source=rpgsync_source(),
+            requirement=rpgsync_requirement(),
             game=os.path.relpath(project.game_dir, root),
             engine={"2k": "2000", "2k3": "2003"}[project.context().engine],
             patches=json.dumps(detect_patches(project.game_dir)),
