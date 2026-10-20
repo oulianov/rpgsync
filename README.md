@@ -137,6 +137,17 @@ rpgsync clean     # delete the backups of overwritten files
   (`FILE:LINE`).
 - `rpgsync COMMAND --help` lists a command's options.
 
+### With the EasyRPG Editor
+
+> [!TIP]
+> **The EasyRPG Editor is the recommended editor to use with rpgsync.** It stays open
+> while rpgsync runs, and merges your Python edits with the changes you make in it.
+
+In the [EasyRPG Editor](https://github.com/oulianov/Editor), turn on **rpgsync mode**
+(Settings). The Editor reloads the changes made on disk and shows them as well as it
+can, so it can stay open while `rpgsync` runs. When both sides change the same game,
+it merges what each changed and only asks when the same entry changed on both sides.
+
 ### With the RPG Maker 2000/2003 editor
 
 ```bash
@@ -153,27 +164,11 @@ then open the editor and keep editing there.
 > edits: its next save (a map, the database, or quitting) writes that copy back
 > over them.
 
-### With the EasyRPG Editor
-
-In the [EasyRPG Editor](https://github.com/oulianov/Editor), turn on **rpgsync mode**
-(Settings). The Editor reloads the changes made on disk and shows them as well as it
-can, so it can stay open while `rpgsync` runs. When both sides change the same game,
-it merges what each changed and only asks when the same entry changed on both sides.
-
 ### Play-test with EasyRPG Player
 
 [EasyRPG Player](https://easyrpg.org/player/) runs RPG Maker 2000/2003 games on
 Windows, macOS, Linux and more, and is the quickest way to test your changes: start
 the game, play, quit, edit, start again.
-
-- Download: https://easyrpg.org/player/downloads/
-- Run a game: `easyrpg-player --project-path /path/to/MyGame --window`
-- Useful options: `--test-play` (debug mode, F9 menu), `--new-game`,
-  `--start-map-id N --start-position X Y` (start right where you work).
-- F12 returns to the title screen, so you can reload changed maps without
-  restarting.
-- It reads the `[Patch]` section of the game's `EasyRPG.ini` (e.g. `Maniac=1`,
-  `DynRPG=1`) when it doesn't detect a patch by itself; rpgsync reads it too.
 
 ### Will this break my project?
 
