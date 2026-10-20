@@ -32,10 +32,12 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from . import script as S
+from . import scriptfiles as F
 from .commands import CompileError, TableSize
 from .compat import check_specs, load_rules, target_engine
 from .lcf import LcfError, LcfFile, ber, write_struct
 from .project import Project
+from .scriptfiles import ChangedMeanwhile, read_bytes, write_atomic
 
 Log = Callable[[str], None]
 
@@ -44,37 +46,26 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def read_bytes(path: str) -> bytes | None:
-    try:
-        with open(path, "rb") as f:
-            return f.read()
-    except FileNotFoundError:
-        return None
-
-
-def write_atomic(path: str, data: bytes) -> None:
-    tmp = path + ".rpgsync-tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
-
-
-class ChangedMeanwhile(Exception):
-    """A file changed while rpgsync was syncing it (an edit in the editor or in the
-    script): nothing more is written, the next pass syncs both changes."""
-
-
 def check_unchanged(path: str, expected: bytes | None) -> None:
     if read_bytes(path) != expected:
         raise ChangedMeanwhile(os.path.basename(path))
 
 
+def same_entries(a: list, b: list) -> bool:
+    """Do two spec lists hold the same entries?  Compared by id: a script does not list
+    them in the game's order (`size = N` heads common_events.py, the game's size comes last)."""
+    return [s.key() for s in sorted(a, key=lambda s: s.id)] == [s.key() for s in sorted(b, key=lambda s: s.id)]
+
+
 class ScriptError(Exception):
-    def __init__(self, path: str, err: CompileError):
+    """A script that does not compile: `line` is in `path` (a file of its folder, for a
+    script split in files), err.lineno in the script's text."""
+
+    def __init__(self, path: str, err: CompileError, line: int | None = None):
         self.path = path
         self.err = err
-        line = ":%d" % err.lineno if err.lineno else ""
-        super().__init__("%s%s: %s" % (path, line, err))
+        self.line = line if line is not None else err.lineno
+        super().__init__("%s%s: %s" % (path, ":%d" % self.line if self.line else "", err))
 
 
 # --------------------------------------------------------------------------
@@ -90,9 +81,50 @@ class Unit:
     py_path: str
     kind: str
 
+    split_style: F.Style | None = None  # how the script is split in files when too big (None: never)
+
     def __init__(self, project: Project):
         self.project = project
         self._bin_specs: tuple[bytes, list] | None = None
+        self.script: F.ScriptFiles | None = None  # the script as last read or written
+
+    # -- the script's files ----------------------------------------------------
+    def read_script(self) -> F.ScriptFiles | None:
+        """The script as it is now (one file, or the files of its folder joined into
+        one text); None when there is none.  ScriptError for a folder that is not one
+        script."""
+        try:
+            self.script = F.read(self.py_path, self.split_style)
+        except F.LayoutError as e:
+            raise ScriptError(e.path, CompileError(e.message), e.line) from None
+        return self.script
+
+    def script_text(self) -> str | None:
+        """The script's text, None when there is none or it cannot be read."""
+        try:
+            found = F.read(self.py_path, self.split_style)
+        except (F.LayoutError, ChangedMeanwhile, UnicodeDecodeError):
+            return None
+        return None if found is None else found.text
+
+    def has_script(self) -> bool:
+        return F.exists(self.py_path)
+
+    def script_label(self, start: str | None = None) -> str:
+        """The script's file, or its folder with a slash: its name, or its path relative
+        to `start`."""
+        if F.is_package(self.py_path):
+            folder = F.package_dir(self.py_path)
+            return (os.path.relpath(folder, start) if start else os.path.basename(folder)) + "/"
+        return os.path.relpath(self.py_path, start) if start else os.path.basename(self.py_path)
+
+    def where(self, lineno: int | None) -> tuple[str, int | None]:
+        """The file and line of a line of the script's text (as last read)."""
+        return self.script.where(lineno) if self.script is not None else (self.py_path, lineno)
+
+    def at(self, lineno: int | None) -> str:
+        path, line = self.where(lineno)
+        return "%s:%d" % (path, line) if line else path
 
     # implemented by subclasses
     def decompile(self, data: bytes) -> str: ...
@@ -144,9 +176,11 @@ class Unit:
         """What after_import changed in the script, for the sync's message."""
         return None
 
-    def export_warnings(self, data: bytes, old_text: str, new_text: str, st: dict | None) -> list[str]:
+    def export_warnings(
+        self, data: bytes, old_text: str, new_text: str, st: dict | None, at: Callable[[int], str]
+    ) -> list[str]:
         """Things to check in a script regenerated from the game (`old_text`: the script
-        before, as the last sync left it)."""
+        before, as the last sync left it; `at`: path:line of a line of `new_text`)."""
         return []
 
     def export_note(self, data: bytes, st: dict | None) -> str | None:
@@ -155,7 +189,7 @@ class Unit:
 
     def watched(self) -> list[str]:
         """Files whose change may change the script (watch syncs the unit again)."""
-        return [self.bin_path, self.py_path]
+        return [self.bin_path, *F.paths(self.py_path)]
 
     def state_extra(self) -> dict:
         """More to remember of the last sync (see bin_changed)."""
@@ -246,7 +280,14 @@ class Unit:
             if specs is None:
                 specs = self.compile(text)
         except CompileError as e:
-            raise ScriptError(self.py_path, e) from None
+            path, line = self.where(e.lineno)
+            raise ScriptError(path, e, line) from None
+        if self.script is not None and self.script.text == text:
+            # a bracket or a quote left open at the end of a part swallows the entries after it
+            ids = {getattr(s, "id", None) for s in specs}
+            for path, line, eid in F.entries_lost(self.script, self.split_style, ids):
+                msg = "entry %d is not read as one: is a bracket or a quote left open above it?" % eid
+                raise ScriptError(path, CompileError(msg), line)
         needs_ids = any(getattr(s, "id", 0) is None for s in specs)
         existing = self.existing_ids(data) if data is not None and needs_ids else []
         assigned = S.assign_ids(specs, existing)
@@ -256,6 +297,7 @@ class Unit:
 class MapUnit(Unit):
     kind = "map"
     decorator = "event"
+    split_style = F.MAP
 
     def __init__(self, project: Project, map_id: int, path: str):
         super().__init__(project)
@@ -269,7 +311,7 @@ class MapUnit(Unit):
         return "%s%s" % (self.name, " - " + name if name else "")
 
     def watched(self):
-        return [self.bin_path, self.py_path, self.project.lmt_path]  # the title is the map tree's name
+        return [*super().watched(), self.project.lmt_path]  # the title is the map tree's name
 
     def state_extra(self):
         return {"title": self.title()}
@@ -284,14 +326,14 @@ class MapUnit(Unit):
 
     def export_note(self, data, st):
         if st is not None and st.get("bin") == self.fingerprint(data):
-            return "renamed in the map tree -> new title in %s" % os.path.basename(self.py_path)
+            return "renamed in the map tree -> new title in %s" % self.script_label()
         return None
 
     def _class_names(self) -> dict[int, tuple[str, str | None]]:
         """The event classes of the current script: their names belong to it (renamed
         with an IDE, or kept when the event is renamed in the script)."""
-        text = read_bytes(self.py_path)
-        return S.read_class_names(text.decode("utf-8", "replace")) if text is not None else {}
+        text = self.script_text()
+        return S.read_class_names(text) if text is not None else {}
 
     def decompile(self, data):
         # the parsed map is not kept while formatting (decoded, a big map weighs ~90 MB)
@@ -331,7 +373,7 @@ class MapUnit(Unit):
     def import_note(self):
         return getattr(self, "_note", None)
 
-    def export_warnings(self, data, old_text, new_text, st):
+    def export_warnings(self, data, old_text, new_text, st, at):
         # Call Event holds a page number: pages moved in the editor change what it runs
         if not st or not st.get("entries") or S.old_event_form(old_text):
             return []
@@ -341,7 +383,7 @@ class MapUnit(Unit):
             return []
         root = LcfFile.parse(data).root
         ctx = self.project.context()
-        return S.renumbered_page_calls(old_text, new_text, root, changed, ctx, os.path.basename(self.py_path))
+        return S.renumbered_page_calls(old_text, new_text, root, changed, ctx, at)
 
     def compile_incremental(self, text, base):
         # events added or removed, pages moved: see map_incremental_source
@@ -372,6 +414,7 @@ class CommonEventsUnit(Unit):
     name = "CommonEvents"
     decorator = "common_event"
     entry_indent = S.INDENT
+    split_style = F.COMMON_EVENTS
 
     def __init__(self, project: Project):
         super().__init__(project)
@@ -436,6 +479,7 @@ class TroopEventsUnit(Unit):
     name = "TroopEvents"
     decorator = "troop"
     entry_indent = S.INDENT
+    split_style = F.TROOP_EVENTS
 
     def __init__(self, project: Project):
         super().__init__(project)
@@ -444,8 +488,8 @@ class TroopEventsUnit(Unit):
 
     def _function_names(self) -> dict[int, str]:
         """The function names of the current script: they belong to it."""
-        text = read_bytes(self.py_path)
-        return S.read_function_names(text.decode("utf-8", "replace"), "troop") if text is not None else {}
+        text = self.script_text()
+        return S.read_function_names(text, "troop") if text is not None else {}
 
     def decompile(self, data):
         root = LcfFile.parse(data).root
@@ -518,17 +562,18 @@ class DatabaseUnit(Unit):
         self.table = table
         self.name = "database/" + table
         self.bin_path = project.ldb_path
-        self.py_path = os.path.join(project.script_dir, "database", table + ".py")
+        self.py_path = project.table_script(table)
         self.new_names: dict[int, str] = {}
+        self.split_style = F.table_style(table)
 
     def decompile(self, data):
         from . import database
 
         # attribute names come from the current file: they belong to the scripts
         keep = dict(self.new_names)
-        text = read_bytes(self.py_path)
+        text = self.script_text()
         if text is not None:
-            keep.update(database.read_identifiers(text.decode("utf-8", "replace")))
+            keep.update(database.read_identifiers(text))
         # entries with a list longer than a line (stat curves...) are marked
         # `# fmt: skip`: ruff would put each of their values on its own line
         from .fmt import line_length
@@ -606,9 +651,9 @@ class MapTreeUnit(Unit):
 
         # attribute names come from the current file: event scripts use them
         keep = dict(self.new_names)
-        text = read_bytes(self.py_path)
+        text = self.script_text()
         if text is not None:
-            keep.update(maptree.read_identifiers(text.decode("utf-8", "replace")))
+            keep.update(maptree.read_identifiers(text))
         return self.formatted(maptree.decompile_map_tree(data, self.project.context(), keep))
 
     def compile(self, text):
@@ -654,11 +699,7 @@ class MapTreeUnit(Unit):
         from .lcf import MapTree
 
         ids = {it.id for it in MapTree.parse(data).maps} | set(self.project.map_paths())
-        for name in os.listdir(self.project.script_dir) if os.path.isdir(self.project.script_dir) else []:
-            m = re.fullmatch(r"Map(\d{4})\.py", name)
-            if m:
-                ids.add(int(m.group(1)))
-        return sorted(ids)
+        return sorted(ids | set(self.project.map_scripts()))
 
     def apply(self, data, specs):
         from . import maptree
@@ -690,10 +731,15 @@ class MapTreeUnit(Unit):
     def files_after_write(self, syncer):
         existing = self.project.map_paths()
         for mid in self.changes.deleted if self.changes else []:
-            for path in (existing.get(mid), self.project.script_for_map(mid)):
+            script = self.project.script_for_map(mid)
+            for path in (existing.get(mid), *F.paths(script)):
                 if path and os.path.exists(path):
                     syncer.backup(path)
                     os.remove(path)
+            try:
+                os.rmdir(F.package_dir(script))  # a map's folder, now empty
+            except OSError:
+                pass
             syncer.state.forget("Map%04d" % mid)
         self.changes = None
 
@@ -918,27 +964,74 @@ class Syncer:
 
     # -- helpers -------------------------------------------------------------
     def backup(self, path: str) -> None:
+        """Copy a file to .rpgsync/history/<time>/ before it is overwritten or removed
+        (the files of the scripts folder keep their path in it: database/items/...)."""
         if not os.path.exists(path):
             return
         stamp = time.strftime("%Y%m%d-%H%M%S")
         d = os.path.join(self.history_dir, stamp)
-        os.makedirs(d, exist_ok=True)
-        shutil.copy2(path, os.path.join(d, os.path.basename(path)))
+        rel = os.path.relpath(path, self.project.script_dir)
+        dest = os.path.join(d, rel if not rel.startswith("..") else os.path.basename(path))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(path, dest)
         snaps = sorted(os.listdir(self.history_dir))
         for old in snaps[: -self.keep_history]:
             shutil.rmtree(os.path.join(self.history_dir, old), ignore_errors=True)
 
-    def write_script(self, unit: Unit, text: str, expect: bytes | None = None) -> None:
-        """expect: the script as the sync read it; ChangedMeanwhile if it was edited since."""
-        check_unchanged(unit.py_path, expect)
+    def max_file_kb(self) -> int:
+        """[tool.rpgsync] max_file_kb: a script bigger than this is split in files (0: never)."""
+        return F.max_file_kb(self.project.script_dir)
+
+    def write_script(self, unit: Unit, text: str, expect: F.ScriptFiles | None) -> F.ScriptFiles:
+        """Write a script: in one file, or in the files of its folder (see scriptfiles).
+        expect: the script as the sync read it (None: none); ChangedMeanwhile if it was
+        edited since.  -> the script as written, to compare with the next time."""
         if unit.format_problem:
-            self.log("%s: written unformatted: %s" % (os.path.basename(unit.py_path), unit.format_problem))
+            self.log("%s: written unformatted: %s" % (unit.script_label(), unit.format_problem))
             unit.format_problem = None
-        if read_bytes(unit.py_path) == text.encode("utf-8"):
-            return
-        os.makedirs(os.path.dirname(unit.py_path), exist_ok=True)
-        self.backup(unit.py_path)
-        write_atomic(unit.py_path, text.encode("utf-8"))
+        from .fmt import line_length
+
+        written = F.write(
+            unit.py_path,
+            unit.split_style,
+            text,
+            expect,
+            self.max_file_kb(),
+            self.backup,
+            line_length(self.project.script_dir),
+        )
+        unit.script = written
+        return written
+
+    def relayout(self, unit: Unit, data: bytes, found: F.ScriptFiles | None, refresh: bool = False) -> str | None:
+        """Split a script grown over the limit, or cut a part of its folder grown over it
+        (refresh: also write what is rpgsync's in its folder, the imports of the parts...,
+        after an edit): the same script, in other files.  -> what was done, for the
+        message; the state follows when it recorded this script."""
+        if found is None or not (
+            F.relayout_due(found, unit.split_style, self.max_file_kb()) or (refresh and found.package)
+        ):
+            return None
+        try:
+            written = self.write_script(unit, found.text, found)
+        except (ChangedMeanwhile, F.LayoutError):
+            return None  # edited meanwhile (synced next pass), or cannot be split: left as it is
+        if written.raw == found.raw:
+            return None
+        st = self.state.get(unit)
+        if written.text != found.text and st is not None and st["py"] == sha(found.text.encode("utf-8")):
+            self.state.record(unit, data, written.text)  # blank lines moved at the start of a part
+        if not found.package:
+            return "split %s in %d files in %s (each under %d KB: GitLab shows no diff of a bigger file)" % (
+                os.path.basename(unit.py_path),
+                len(written.raw) - 1,
+                unit.script_label(),
+                self.max_file_kb(),
+            )
+        added = sorted(os.path.basename(p) for p in set(written.raw) - set(found.raw))
+        if added:
+            return "%s: parts over %d KB cut, new %s" % (unit.script_label(), self.max_file_kb(), ", ".join(added))
+        return None
 
     def write_bin(self, unit: Unit, data: bytes, expect: bytes | None) -> None:
         """expect: the game file as the sync read it; ChangedMeanwhile if it was saved since."""
@@ -946,6 +1039,8 @@ class Syncer:
         if LcfFile.parse(data).to_bytes() != data:
             raise RuntimeError("internal error: generated %s does not re-read identically" % unit.bin_path)
         check_unchanged(unit.bin_path, expect)
+        # the script read is still the script (a folder half written by a git checkout...)
+        F.check_unchanged(unit.py_path, unit.script)
         made = unit.files_before_write(self)
         try:
             self.backup(unit.bin_path)
@@ -1012,27 +1107,33 @@ class Syncer:
         except (LcfError, OSError) as e:
             # a game file read while the editor writes it, a file locked by another program (Windows)...
             return Result(unit=unit.name, action="none", message="cannot sync yet (%s): trying again" % e, retry=True)
+        except F.LayoutError as e:  # a script folder rpgsync cannot write back
+            return Result(unit=unit.name, action="error", message=str(e))
 
     def _sync(self, unit: Unit, prefer: str | None, force: bool = False) -> Result:
         what = {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(unit.kind, "entry")
         data = read_bytes(unit.bin_path)
         if data is None:
-            if unit.kind == "map" and not os.path.exists(unit.py_path):
+            if unit.kind == "map" and not unit.has_script():
                 return Result(unit=unit.name, action="none")  # a map deleted in this pass
             return Result(unit=unit.name, action="none", message="game file missing")
-        raw = read_bytes(unit.py_path)  # compared before writing: an edit made meanwhile is never overwritten
-        text = None if raw is None else raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            found = unit.read_script()  # compared before writing: an edit made meanwhile is never overwritten
+        except ScriptError as e:
+            return Result(unit=unit.name, action="error", message=str(e))
+        text = None if found is None else found.text
         st = self.state.get(unit)
 
         if text is None or prefer == "game":
             new_text = unit.decompile(data)
             if text != new_text:
-                self.write_script(unit, new_text, raw)
-            self.state.record(unit, data, new_text)
+                found = self.write_script(unit, new_text, found)
+            self.state.record(unit, data, found.text)  # type: ignore[union-attr]
+            note = self.relayout(unit, data, found)
             return Result(
                 unit=unit.name,
                 action="export",
-                message="wrote %s" % os.path.relpath(unit.py_path, self.project.game_dir),
+                message="wrote %s" % unit.script_label(self.project.game_dir) + ("; " + note if note else ""),
             )
 
         bin_changed = unit.bin_changed(data, st)
@@ -1047,28 +1148,32 @@ class Syncer:
             if st is not None and st["bin"] != fingerprint:  # recorded by an older rpgsync, in another form
                 st["bin"] = fingerprint
                 self.state.save(unit.name)
-            return Result(unit=unit.name, action="none")
+            return Result(unit=unit.name, action="none", message=self.relayout(unit, data, found) or "")
 
         if outdated and not py_changed and not bin_changed and prefer != "script":
             new_text = unit.decompile(data)
-            self.write_script(unit, new_text, raw)
-            self.state.record(unit, data, new_text)
+            found = self.write_script(unit, new_text, found)
+            self.state.record(unit, data, found.text)
+            self.relayout(unit, data, found)
             return Result(
                 unit=unit.name,
                 action="export" if new_text != text else "none",
-                message="regenerated %s in the new rpgsync layout" % os.path.basename(unit.py_path),
+                message="regenerated %s in the new rpgsync layout" % unit.script_label(),
             )
         if bin_changed and not py_changed:
             new_text = unit.decompile_since(data, text, st)
-            warnings = unit.export_warnings(data, text, new_text, st)
-            self.write_script(unit, new_text, raw)
-            self.state.record(unit, data, new_text)
+            found = self.write_script(unit, new_text, found)
+            warnings = unit.export_warnings(data, text, found.text, st, found.at)
+            self.state.record(unit, data, found.text)
             self._failed.pop(unit.name, None)
             message = unit.export_note(data, st) or "%s changed in the editor -> regenerated %s" % (
                 os.path.basename(unit.bin_path),
-                os.path.basename(unit.py_path),
+                unit.script_label(),
             )
-            return Result(unit=unit.name, action="export", message="\n  ".join([message, *warnings]))
+            note = self.relayout(unit, data, found)
+            return Result(
+                unit=unit.name, action="export", message="\n  ".join([message, *warnings, *filter(None, [note])])
+            )
 
         if self._failed.get(unit.name) == py_hash and prefer is None:
             return Result(unit=unit.name, action="none")  # same broken script as before; already reported
@@ -1090,21 +1195,21 @@ class Syncer:
                 unit=unit.name,
                 action="error",
                 message="%s does not fit the engine, game not written:\n  %s"
-                % (os.path.basename(unit.py_path), "\n  ".join(problems)),
+                % (unit.script_label(), "\n  ".join(problems)),
             )
         self._failed.pop(unit.name, None)
 
         if st is None and prefer is None:
             # Never synced: only adopt the pair if it already agrees.
-            if [s.key() for s in specs] == [s.key() for s in unit.bin_specs(data)]:
+            if same_entries(specs, unit.bin_specs(data)):
                 self.state.record(unit, data, text)
-                return Result(unit=unit.name, action="none", message="already in sync")
+                note = self.relayout(unit, data, found)
+                return Result(unit=unit.name, action="none", message="already in sync" + ("; " + note if note else ""))
             return Result(
                 unit=unit.name,
                 action="conflict",
                 message="%s and %s differ and were never synced; run `rpgsync push` (script wins) "
-                "or `rpgsync pull --force` (game wins)"
-                % (os.path.basename(unit.py_path), os.path.basename(unit.bin_path)),
+                "or `rpgsync pull --force` (game wins)" % (unit.script_label(), os.path.basename(unit.bin_path)),
             )
 
         conflicts: list[int] = []
@@ -1115,39 +1220,34 @@ class Syncer:
             new_data, summary = unit.apply(data, specs)
         except ValueError as e:  # e.g. size lowered below an entry still in use
             self._failed[unit.name] = py_hash
-            line = ":%d" % e.lineno if getattr(e, "lineno", None) else ""  # type: ignore[attr-defined]
-            return Result(unit=unit.name, action="error", message="%s%s: %s" % (unit.py_path, line, e))
+            return Result(unit=unit.name, action="error", message="%s: %s" % (unit.at(getattr(e, "lineno", None)), e))
         if new_data != data:
             self.write_bin(unit, new_data, data)
+        # the script's own edits below keep its lines: each goes back into the file it is in
         if assigned and not conflicts and unit.kind not in ("database", "maptree"):
             text = insert_ids(text, assigned, unit.decorator or "event")
-            check_unchanged(unit.py_path, raw)
-            write_atomic(unit.py_path, text.encode("utf-8"))
-            raw = text.encode("utf-8")
+            found = self.write_script(unit, text, found)
         if not (bin_changed and py_changed):
             new_text = unit.after_import(text, specs, new_data)
             if new_text != text:
                 text = new_text
-                check_unchanged(unit.py_path, raw)
-                write_atomic(unit.py_path, text.encode("utf-8"))
-                raw = text.encode("utf-8")
+                found = self.write_script(unit, text, found)
         if summary.get("size") and not (bin_changed and py_changed):
             # an id past the end grew the table: show the new size in the script
             new_text = re.sub(r"^(\s*)size = \d+", r"\g<1>size = %d" % summary["size"][1], text, count=1, flags=re.M)
             if new_text != text:
                 text = new_text
-                check_unchanged(unit.py_path, raw)
-                write_atomic(unit.py_path, text.encode("utf-8"))
-                raw = text.encode("utf-8")
+                found = self.write_script(unit, text, found)
         if bin_changed and py_changed:
             # the merged result is the new truth for both sides
             merged_text = unit.decompile(new_data)
             if conflicts:
                 stamp = time.strftime("%Y%m%d-%H%M%S")
-                cpath = unit.py_path[:-3] + ".conflict-%s.py" % stamp
+                cpath = unit.py_path[:-3] + ".conflict-%s.py" % stamp  # the whole script, in one file
                 write_atomic(cpath, text.encode("utf-8"))
-            self.write_script(unit, merged_text, raw)
-            self.state.record(unit, new_data, merged_text)
+            found = self.write_script(unit, merged_text, found)
+            self.state.record(unit, new_data, found.text)
+            self.relayout(unit, new_data, found)
             msg = "both sides changed -> merged (%s)" % self.describe(summary, what)
             if conflicts:
                 msg += "; CONFLICT on %s %s: kept the editor version, your script version is in %s" % (
@@ -1161,17 +1261,19 @@ class Syncer:
             # show new entries with their id and the editor's defaults for omitted fields
             canonical = unit.decompile(new_data)
             if assigned or [s.key() for s in unit.compile(canonical)] != [s.key() for s in specs]:
-                self.write_script(unit, canonical, raw)
-                text = canonical
-        self.state.record(unit, new_data, text)
+                found = self.write_script(unit, canonical, found)
+        self.state.record(unit, new_data, found.text)
         msg = "%s -> %s: %s" % (
-            os.path.basename(unit.py_path),
+            unit.script_label(),
             os.path.basename(unit.bin_path),
             self.describe(summary, what),
         )
         if assigned:
             msg += " (new ids: %s)" % ", ".join(str(i) for _, i in assigned)
         note = unit.import_note()
+        if note:
+            msg += "; " + note
+        note = self.relayout(unit, new_data, found, refresh=True)
         if note:
             msg += "; " + note
         return Result(unit=unit.name, action="import", message=msg)

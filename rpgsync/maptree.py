@@ -866,17 +866,23 @@ def tree_problems(game_dir: str, script_dir: str, encoding: str) -> tuple[list[s
         mid = start.get(who + "_map_id")
         if mid and mid not in maps:
             errors.append("the %s starts on map %d, which is not in the map tree" % (who, mid))
-    for mid, name in sorted(script_map_ids(os.listdir(script_dir) if os.path.isdir(script_dir) else []).items()):
+    names = os.listdir(script_dir) if os.path.isdir(script_dir) else []
+    for mid, name in sorted(script_map_ids(names, script_dir).items()):
         if mid not in files:
             warnings.append("%s: the game has no map %d any more (deleted in the editor?)" % (name, mid))
     return errors, warnings
 
 
-def script_map_ids(names: list[str]) -> dict[int, str]:
-    """MapNNNN.py file names -> map id."""
+def script_map_ids(names: list[str], script_dir: str | None = None) -> dict[int, str]:
+    """MapNNNN.py file names (and MapNNNN/ folders of a map split in files, in
+    `script_dir`) -> map id."""
+    from .scriptfiles import is_package
+
     out = {}
     for name in names:
-        m = re.fullmatch(r"Map(\d{4})\.py", name)
-        if m:
+        m = re.fullmatch(r"Map(\d{4})(\.py)?", name)
+        if m and m.group(2):
             out[int(m.group(1))] = name
+        elif m and script_dir and is_package(os.path.join(script_dir, name + ".py")):
+            out[int(m.group(1))] = name + "/"
     return out

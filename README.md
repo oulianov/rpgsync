@@ -140,7 +140,7 @@ rpgsync is built so that **it should not**. If anything, you can always go back.
 - Only what you changed is written.
 - If the same event changed on both sides,
   the editor's version is kept and your script is saved next to it as
-  `MapXXXX.conflict-<time>.py`.
+  `MapXXXX.conflict-<time>.py` (in one file, for a script split in files).
 - The RPG Maker editor does not reload files by itself: close it while you
   edit the scripts (see [Choose your editor workflow](#4-choose-your-editor-workflow)).
 
@@ -220,6 +220,39 @@ class TroopEvents(TroopEventTable):
             text("The slime is weak!")
             if battle_condition(enemies[1].can_act):
                 enemies[1].change_hp(-10)
+```
+
+### Big scripts: a folder of files
+
+GitLab shows no diff of a file over 200 KB. A script bigger than 160 KB
+(common events, troop events, a database table, a map) is written as a folder
+instead, `database/common_events/` for `database/common_events.py`:
+
+```
+database/common_events/__init__.py           the header, Config and `common_events = CommonEvents()`
+database/common_events/events_0001_0021.py   class Events_0001_0021(CommonEventTable): ...
+database/common_events/events_0022_0022.py   ...
+```
+
+The class of `__init__.py` is made of the classes of its files, so
+`common_events.mr_clean()`, `items.potion`... work as before, in ty and VS Code
+too. A map's folder (`Map0195/`) holds its events; a file imports the events of
+the other files it names.
+
+Move entries between the files, reorder them, rename the files: rpgsync keeps
+every entry where it is. A new entry goes after the one before it, a file grown
+over the limit is cut in two, an emptied one is removed. The first split cuts
+the script in id order, in files named after their first and last ids. What is
+above the class of each file, and the imports and the class statement of
+`__init__.py`, are rpgsync's. rpgsync reads every `.py` file of the folder, in
+the order of their names. A folder and a `.py` file for the same script is an
+error.
+
+Set the limit in `Scripts/pyproject.toml` (`0`: never split):
+
+```toml
+[tool.rpgsync]
+max_file_kb = 160
 ```
 
 ### The map tree

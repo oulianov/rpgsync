@@ -29,6 +29,7 @@ from __future__ import annotations
 import difflib
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,9 +45,10 @@ from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
-from . import dynrpg
+from . import dynrpg, scriptfiles
+from .commands import TableSize
 from .compat import check_specs, check_warnings, load_rules, target_engine
-from .maptree import map_reference_problems, map_tree_maps, tree_problems
+from .maptree import StartSpec, TreeOrder, map_reference_problems, map_tree_maps, tree_problems
 from .project import Project
 from .resources import Collector
 from .resources import key as resource_key
@@ -427,7 +429,7 @@ def _run(syncer: CliSyncer, units, prefer: str | None, initial: bool = False, fo
 
 Part = tuple[str, str]  # (text, rich style)
 
-PLURAL = {"event": "events", "common event": "common events", "troop": "troops", "entry": "entries"}
+PLURAL = {"event": "events", "common event": "common events", "troop": "troops", "map": "maps", "entry": "entries"}
 
 
 def _ids(ids: list[int], limit: int = 8) -> str:
@@ -449,15 +451,23 @@ def _entry_diff(old: list, new: list, what: str) -> list[Part]:
     a = {s.id: s for s in old if s.id is not None}
     b = {s.id: s for s in new if s.id is not None}
     parts: list[Part] = []
-    if 0 in a and 0 in b and a[0].key() != b[0].key():  # id 0: the table size
-        parts.append(("size %d -> %d" % (a[0].size, b[0].size), "yellow"))
+    pa, pb = a.get(0), b.get(0)  # pseudo-entry 0: the table's size, or the map tree's order
+    if isinstance(pa, TableSize) and isinstance(pb, TableSize) and pa.size != pb.size:
+        parts.append(("size %d -> %d" % (pa.size, pb.size), "yellow"))
     for label, ids, style in (
-        ("changed", sorted(i for i in a.keys() & b.keys() if i and a[i].key() != b[i].key()), "yellow"),
-        ("added", sorted(i for i in b.keys() - a.keys() if i), "green"),
-        ("removed", sorted(i for i in a.keys() - b.keys() if i), "red"),
+        ("changed", sorted(i for i in a.keys() & b.keys() if i > 0 and a[i].key() != b[i].key()), "yellow"),
+        ("added", sorted(i for i in b.keys() - a.keys() if i > 0), "green"),
+        ("removed", sorted(i for i in a.keys() - b.keys() if i > 0), "red"),
     ):
         if ids:
             parts.append(("%s %s %s" % (PLURAL[what] if len(ids) > 1 else what, _ids(ids), label), style))
+    if isinstance(pa, TreeOrder) and isinstance(pb, TreeOrder):
+        both = set(pa.order) & set(pb.order)  # maps added or removed are listed above
+        if [m for m in pa.order if m in both] != [m for m in pb.order if m in both]:
+            parts.append(("new tree order", "yellow"))
+    sa, sb = a.get(-1), b.get(-1)  # pseudo-entry -1: the map tree's start
+    if isinstance(sa, StartSpec) and isinstance(sb, StartSpec) and sa.key() != sb.key():
+        parts.append(("new start positions", "yellow"))
     return parts
 
 
@@ -510,6 +520,12 @@ def _render(ui: UI, kind: str, title: str, lines: list[StatusLine], label: str, 
         console.print(t)
 
 
+def _error_name(e: ScriptError, script_dir: str) -> str:
+    """A script error as status lists it: path:line (relative to the scripts folder): message."""
+    line = ":%d" % e.line if e.line else ""
+    return "%s%s: %s" % (os.path.relpath(e.path, script_dir), line, e.err)
+
+
 def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
     project = syncer.project
     out: dict[str, list[StatusLine]] = {k: [] for k in ("script", "game", "both", "unsynced", "errors", "new")}
@@ -520,8 +536,8 @@ def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
         data = data_of[u.bin_path]
         if data is None:
             continue
-        what = {"map": "event", "common": "common event", "troop": "troop"}.get(u.kind, "entry")
-        py_name = os.path.relpath(u.py_path, project.script_dir)
+        what = {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(u.kind, "entry")
+        py_name = u.script_label(project.script_dir)
         bin_name = os.path.relpath(u.bin_path, project.game_dir)
         if u.kind == "database":
             bin_name += " [%s]" % u.table
@@ -529,11 +545,15 @@ def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
             bin_name += " [common events]"
         elif u.kind == "troop":
             bin_name += " [troop events]"
-        if not os.path.exists(u.py_path):
+        try:
+            found = u.read_script()
+        except ScriptError as e:
+            out["errors"].append(StatusLine(name=_error_name(e, project.script_dir)))
+            continue
+        if found is None:
             out["new"].append(StatusLine(name=py_name))
             continue
-        with open(u.py_path, encoding="utf-8") as f:
-            text = f.read()
+        text = found.text
         st = syncer.state.get(u)
         bin_changed = u.bin_changed(data, st)
         py_changed = st is None or sha(text.encode("utf-8")) != st["py"]
@@ -545,8 +565,7 @@ def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
             try:
                 specs, _ = u.compile_checked(text, data)
             except ScriptError as e:
-                line = ":%d" % e.err.lineno if e.err.lineno else ""
-                out["errors"].append(StatusLine(name="%s%s: %s" % (py_name, line, e.err)))
+                out["errors"].append(StatusLine(name=_error_name(e, project.script_dir)))
                 continue
             problems = syncer.check_engine(u, specs, data)
             if problems:
@@ -711,24 +730,20 @@ def locate(
         print("%s:%d" % _locate_tree_entry(proj, map_tree))
         return
     if map is not None and event is None and common_event is None and troop is None:
-        path = proj.script_for_map(map)
-        if not os.path.isfile(path):
-            raise _fail("no script %s: run rpgsync first" % path)
-        print("%s:1" % os.path.abspath(path))
+        found = _read_script(proj.script_for_map(map), scriptfiles.MAP)
+        print("%s:%d" % _abs_where(found, 1))
         return
     if troop is not None:
-        path = proj.troop_events_script
+        path, style = proj.troop_events_script, scriptfiles.TROOP_EVENTS
     elif common_event is not None:
-        path = proj.common_events_script
+        path, style = proj.common_events_script, scriptfiles.COMMON_EVENTS
     elif map is not None and event is not None:
-        path = proj.script_for_map(map)
+        path, style = proj.script_for_map(map), scriptfiles.MAP
     else:
         raise _fail("give --map and --event, --common-event, or --troop")
-    if not os.path.isfile(path):
-        raise _fail("no script %s: run rpgsync first" % path)
-    with open(path, encoding="utf-8") as f:
-        src = f.read()
-    # compiled from the file as it is now: the lines of the cache can be stale
+    found = _read_script(path, style)
+    src = found.text
+    # compiled from the files as they are now: the lines of the cache can be stale
     try:
         if troop is not None:
             specs = [s for s in compile_troop_events_source(src, ctx, path) if s.id == troop]
@@ -749,7 +764,7 @@ def locate(
             else:
                 line, commands = (specs[0].lineno if specs else None), []
     except CompileError as e:
-        raise _fail("%s:%s: %s" % (path, e.lineno or 1, e)) from None
+        raise _fail("%s:%s: %s" % (*_abs_where(found, e.lineno or 1), e)) from None
     if line is None:
         raise _fail("not in %s" % path)
     if command is not None and commands:
@@ -758,7 +773,24 @@ def locate(
         index = min(max(command, 0), len(commands) - 1)
         lines = [c.line for c in commands[: index + 1] if c.line is not None]
         line = lines[-1] if lines else line
-    print("%s:%d" % (os.path.abspath(path), line))
+    print("%s:%d" % _abs_where(found, line))
+
+
+def _read_script(path: str, style: scriptfiles.Style | None) -> scriptfiles.ScriptFiles:
+    """A script as it is now (one file or a folder), or a failure."""
+    try:
+        found = scriptfiles.read(path, style)
+    except scriptfiles.LayoutError as e:
+        raise _fail(str(e)) from None
+    if found is None:
+        raise _fail("no script %s: run rpgsync first" % path)
+    return found
+
+
+def _abs_where(found: scriptfiles.ScriptFiles, line: int) -> tuple[str, int]:
+    """The absolute path and the line of a line of a script's text."""
+    path, n = found.where(line)
+    return os.path.abspath(path), n or 1
 
 
 def _locate_tree_entry(proj: Project, map_id: int) -> tuple[str, int]:
@@ -921,7 +953,7 @@ def check(
         ui.print(("%d problem(s)" % errors, "bold red"), *([", ", warned] if warned else []), kind="error")
         raise typer.Exit(1)
     if chosen is not None and len(units) == 1:  # Map0004.py compiles and fits the engine
-        scripts, verbs = os.path.basename(units[0].py_path), ("compiles", "fits", "passes")
+        scripts, verbs = units[0].script_label(), ("compiles", "fits", "passes")
     else:
         scripts, verbs = "All scripts" if chosen is None else "The %d scripts" % len(units), ("compile", "fit", "pass")
     what = "%s and %s the engine" % verbs[:2] + (" and %s the type check" % verbs[2] if not no_types else "")
@@ -957,11 +989,18 @@ def _chosen_paths(proj: Project, paths: list[str] | None) -> list[Path] | None:
 
 
 def _chosen_units(units: list[Unit], chosen: list[Path]) -> list[Unit]:
-    """The units whose script is one of `chosen` or in one of its folders."""
+    """The units whose script is one of `chosen` or in one of its folders (a file of a
+    script split in files counts for the whole script)."""
     scripts = {u.py_path: Path(u.py_path).resolve() for u in units}
-    out = [u for u in units if any(p == scripts[u.py_path] or p in scripts[u.py_path].parents for p in chosen)]
+    folders = {u.py_path: Path(scriptfiles.package_dir(u.py_path)).resolve() for u in units}
+
+    def chose(p: Path, py_path: str) -> bool:
+        s, d = scripts[py_path], folders[py_path]
+        return p == s or p in s.parents or p == d or d in p.parents
+
+    out = [u for u in units if any(chose(p, u.py_path) for p in chosen)]
     for p in chosen:
-        if not any(p == s or p in s.parents for s in scripts.values()):
+        if not any(chose(p, u.py_path) for u in units):
             what = "holds no script" if p.is_dir() else "is not a script"
             raise _fail("%s %s of the game (a map, a database table, the common events...)" % (p, what))
     return out
@@ -982,32 +1021,37 @@ class _Rules(BaseModel):
 def _check_unit(u: Unit, rules: _Rules, files: Collector | None) -> list[tuple[str, str, str]]:
     """Compile a unit's script and check it.  -> the problems to print: (kind, where, problem)"""
     found: list[tuple[str, str, str]] = []
-    if not os.path.exists(u.py_path):
-        if files is not None:
-            _game_resources(files, u)
-        return found
-    with open(u.py_path, encoding="utf-8") as f:
-        text = f.read()
     try:
-        specs, _ = u.compile_checked(text)
+        script = u.read_script()
+        if script is None:
+            if files is not None:
+                _game_resources(files, u)
+            return found
+        specs, _ = u.compile_checked(script.text)
     except ScriptError as e:
         if files is not None:
             _game_resources(files, u)
         return [("error", "", str(e))]
     if files is not None:
-        files.specs(specs, u.py_path)
+        files.specs(specs, u.py_path, u.where if script.package else None)
+    entry_files = script.entry_files(u.split_style) if script.package else {}
+
+    def place(problem: str) -> str:  # "event 5 page 1: ...": the file of event 5, for a script in files
+        m = re.match(r"(?:event|common event|troop) (\d+)\b", problem)
+        return entry_files.get(int(m.group(1)), u.at(None)) if m and entry_files else u.at(None)
+
     for problem in check_specs(specs, rules.engine, rules.patches, rules.allow):
-        found.append(("error", u.py_path, problem))
+        found.append(("error", place(problem), problem))
     for problem in check_warnings(specs, rules.engine, rules.patches, rules.allow, rules.plugins, rules.tables):
-        found.append(("warning", u.py_path, problem))
+        found.append(("warning", place(problem), problem))
     if u.kind == "map":
         # the active page is the last one whose conditions hold: pages after it may hide it
         for line, problem in unreachable_pages(specs):
-            found.append(("warning", "%s:%d" % (u.py_path, line) if line else u.py_path, problem))
+            found.append(("warning", u.at(line), problem))
     if rules.tree_maps is not None and u.kind in ("map", "common", "troop", "maptree"):
         # teleports (vehicles, teleport / escape targets, start positions) to maps of the game, inside them
         for line, problem in map_reference_problems(specs, rules.tree_maps, rules.sizes):
-            found.append(("error", "%s:%d" % (u.py_path, line) if line else u.py_path, problem))
+            found.append(("error", u.at(line), problem))
     return found
 
 
@@ -1019,7 +1063,9 @@ def _checked_units(
 ) -> Iterator[tuple[list[tuple[str, str, str]], Collector | None]]:
     """_check_unit() of each unit, in order: (problems, the files it uses).  A large game's
     scripts compile in several processes (`jobs`, default one per CPU)."""
-    sizes = {u.py_path: os.path.getsize(u.py_path) if os.path.exists(u.py_path) else 0 for u in units}
+    sizes = {
+        u.py_path: sum(os.path.getsize(p) for p in scriptfiles.paths(u.py_path) if os.path.isfile(p)) for u in units
+    }
     if jobs is None:
         jobs = (os.cpu_count() or 1) if sum(sizes.values()) >= _PARALLEL_SIZE else 1
     jobs = min(jobs, len(units))

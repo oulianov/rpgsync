@@ -14,6 +14,7 @@ import configparser
 import os
 import re
 import unicodedata
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
@@ -177,6 +178,7 @@ class Collector:
     def __init__(self, encoding: str):
         self.encoding = encoding
         self.refs: list[Ref] = []
+        self._where: Callable[[int | None], tuple[str, int | None]] | None = None  # see specs()
         self.texts: list[str] = []  # comments: plugin commands may name files
         # (folder, prefix): names completed at runtime (a variable's number, DynParams) start
         # with these; folder None: any
@@ -195,13 +197,25 @@ class Collector:
         self, folder: str, name: bytes | str, path: str, line: int | None, what: str, active=True, event=False
     ) -> None:
         name = self._dec(name).strip()
+        if self._where is not None:  # a script split in files: the file and line of the reference
+            path, line = self._where(line)
         if name and name.lower() != _OFF:
             self.refs.append(Ref(folder=folder, name=name, path=path, line=line, what=what, active=active, event=event))
 
     # -- compiled scripts ------------------------------------------------------------
-    def specs(self, specs: list, path: str) -> None:
+    def specs(
+        self, specs: list, path: str, where: Callable[[int | None], tuple[str, int | None]] | None = None
+    ) -> None:
         """The references of a script's specs (events, common events, troop events,
-        database entries, map tree entries)."""
+        database entries, map tree entries).  where: the file and line of a line of the
+        script's text, when it is split in files."""
+        self._where = where
+        try:
+            self._specs(specs, path)
+        finally:
+            self._where = None
+
+    def _specs(self, specs: list, path: str) -> None:
         for spec in specs:
             if isinstance(spec, db.DbModel):
                 self._model(spec, path, getattr(spec, "lineno", None), True)

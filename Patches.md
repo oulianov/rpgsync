@@ -130,7 +130,7 @@ with `@`.
 
   | Plugin | Commands | DynRPG.ini |
   |---|---|---|
-  | DynTextPlugin.dll | `write_text(id, x, y, text, fixed?, color?, picture?)`, `append_line(id, text, end?)`, `append_text(id, text, end?)`, `change_text(id, text, color)` (`word.end`: same color), `change_position(id, x, y)`, `remove_text(id, end?)`, `remove_all()`; `end`: anything (`word.end`) | `[DynTextPlugin]` PictureID |
+  | DynTextPlugin.dll | `write_text(id, x, y, text, fixed?, color?, picture?)` (`fixed`: `word.fixed`, written `"fixed"`), `append_line(id, text, end?)`, `append_text(id, text, end?)`, `change_text(id, text, color)` (`word.end`: same color), `change_position(id, x, y)`, `remove_text(id, end?)`, `remove_all()`; `end`: anything (`word.end`) | `[DynTextPlugin]` PictureID |
   | DynParams.dll | the `dynparams_*` commands above | `[DynParams]` DebugLog |
   | msg_commands.dll | `process_cmd()` | |
   | EasyRPG Player (no DLL) | `call(function, ...)`, `easyrpg_output(mode, message, ...)`, `easyrpg_add(variable, value, ...)`, any `easyrpg_*` | |
@@ -141,7 +141,9 @@ with `@`.
 
   Their commands are typed methods of `dyn` (editor completion, ty): numbers
   take `12`, `variables.x`, `variables[...]` or `v[12]`; texts take `"..."` or
-  `actors[...].name`; words take `word...`. Arguments are positional, and more
+  `actors[...].name`; words take `word...`, written unquoted, except a plugin's
+  own words, written the way it reads them (`word.fixed` of `write_text`: the
+  `"fixed"` DynText compares). Arguments are positional, and more
   than a command reads are accepted (a plugin version may read them).
 - **Plugins that hook the engine** without event calls (battle plugins,
   graphics plugins configured by `.ini` files) don't appear in scripts.
@@ -155,6 +157,7 @@ with `@`.
   | Fewer arguments than a known command needs | `dyn.change_text() needs 3 arguments (id, text, color), got 2` |
   | An argument of the wrong kind | `dyn.change_position(): x (argument 2) is a number, not "10"` |
   | More arguments than the command reads | `dyn.change_position() reads 3 arguments (id, x, y): 2 more are ignored` |
+  | A plugin's own word written another way: bare (`@write_text "a", 1, 2, "x", fixed` stays a `comment(...)`, `word.fixed` writes `"fixed"`) or in another case | `dyn.write_text(): fixed (argument 5) works as the "string" "fixed" only (word.fixed), not the word fixed: the plugin ignores it (EasyRPG Player reads it)` |
   | A literal id the database lacks, in a DynText string (`\v[n]` variable, `\n[n]` actor, `\i[n]` / `\I[n]` item, `\t[n]` / `\T[n]` skill; `\i[\v[7]]` is dynamic) or a token (`V12`, `N3`) | `dyn.write_text(): \v[4000]: the database has no variable 4000 (it has 3327)` |
   | A command of a known plugin that isn't in `DynPlugins/` (any case) | `dyn.process_cmd() comes from msg_commands.dll, which isn't in DynPlugins` |
   | An unknown command, when every DLL of `DynPlugins/` is known (an unknown DLL may provide it) | `dyn.foo(): no plugin in DynPlugins provides it` |

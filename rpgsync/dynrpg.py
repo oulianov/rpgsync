@@ -39,6 +39,7 @@ class Param(BaseModel):
     name: str
     kinds: tuple[str, ...]  # what the plugin reads there: number (12, V12), string ("x", N3), word (end)
     optional: bool = False
+    words: tuple[str, ...] = ()  # the plugin's own words there, which it reads as a "string": word.fixed writes "fixed"
 
 
 class Function(BaseModel):
@@ -62,13 +63,18 @@ class Plugin(BaseModel):
     emulated: bool = False  # EasyRPG Player runs its commands without the DLL
 
 
-def _fn(name: str, *params: str, more: str = "", raw: bool = False) -> Function:
+def _fn(
+    name: str, *params: str, more: str = "", raw: bool = False, words: dict[str, tuple[str, ...]] | None = None
+) -> Function:
     """``_fn("write_text", "id: string", "fixed?: word|number")``: ``?`` marks an optional
-    argument, ``any`` is a number, a string or a word."""
+    argument, ``any`` is a number, a string or a word; ``words``: Param.words by name."""
     out = []
     for p in params:
         pname, kinds = p.split(": ")
-        out.append(Param(name=pname.rstrip("?"), kinds=_kinds(kinds), optional=pname.endswith("?")))
+        bare = pname.rstrip("?")
+        out.append(
+            Param(name=bare, kinds=_kinds(kinds), optional=pname.endswith("?"), words=(words or {}).get(bare, ()))
+        )
     return Function(name=name, params=out, more=_kinds(more) if more else (), raw=raw)
 
 
@@ -95,7 +101,8 @@ PLUGINS = [
     Plugin(
         dll="DynTextPlugin.dll",
         functions=[
-            # the text may be a number (V12); fixed: the word fixed scrolls the text with the map
+            # the text may be a number (V12); fixed: word.fixed, written "fixed", scrolls the text with
+            # the map (the DLL compares a "string" with "fixed": the bare word fixed leaves it on screen)
             _fn(
                 "write_text",
                 "id: string",
@@ -105,6 +112,7 @@ PLUGINS = [
                 "fixed?: any",
                 "color?: number",
                 "picture?: number",
+                words={"fixed": ("fixed",)},
             ),
             # end: anything (its readme: "just write anything here")
             _fn("append_line", "id: string", "text: string|number", "end?: any"),
@@ -199,6 +207,14 @@ def find(name: str) -> tuple[Plugin | None, Function | None]:
         return BY_FUNCTION[name]
     plugin = next((p for p in PLUGINS if p.prefix and name.startswith(p.prefix)), None)
     return plugin, None
+
+
+def param(name: str, index: int) -> Param | None:
+    """The argument `index` (from 0) of a known command, any case: None when unknown."""
+    _, fn = find(name.lower())
+    if fn is None or fn.raw or index >= len(fn.params):
+        return None
+    return fn.params[index]
 
 
 # --------------------------------------------------------------------------
@@ -449,6 +465,13 @@ def call_problems(
             what = "%s (argument %d)" % (fn.params[n - 1].name, n) if n <= len(fn.params) else "argument %d" % n
             if kinds and a.kind != EMPTY and a.kind not in kinds:
                 out.append("%s: %s is %s, not %s" % (call, what, " or ".join(KIND_NAMES[k] for k in kinds), _shown(a)))
+            for w in fn.params[n - 1].words if n <= len(fn.params) else ():
+                if a.text.lower() == w.lower() and not (a.quoted and a.text == w):
+                    player = "" if a.quoted else " (EasyRPG Player reads it)"
+                    out.append(
+                        '%s: %s works as the "string" "%s" only (word.%s), not %s: the plugin ignores it%s'
+                        % (call, what, w, w, _shown(a), player)
+                    )
         extra = len(args) - len(fn.params)
         if extra > 0 and not fn.more:
             names = " (%s)" % ", ".join(p.name for p in fn.params) if fn.params else ""

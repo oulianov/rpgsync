@@ -2617,10 +2617,12 @@ def _first_moved(old: list, new: list) -> int | None:
 
 
 def renumbered_page_calls(
-    old_text: str, new_text: str, m: Struct, changed: set[int], ctx: Ctx, fname: str
+    old_text: str, new_text: str, m: Struct, changed: set[int], ctx: Ctx, fname: str | Callable[[int], str]
 ) -> list[str]:
     """Calls of a map script that keep their page number although the pages of their
-    event moved in the editor (Call Event holds a number): "Map0011.py:40: ..."."""
+    event moved in the editor (Call Event holds a number): "Map0011.py:40: ...".
+    fname: the script's file name, or path:line of a line of `new_text` (a folder)."""
+    at = fname if callable(fname) else (lambda n: "%s:%d" % (fname, n))
     found = split_entries(old_text, "event", "")
     if found is None:
         return []
@@ -2660,8 +2662,8 @@ def renumbered_page_calls(
                 for hit in re.finditer(pat, line):
                     if int(hit.group(1)) > first:
                         out.append(
-                            "%s:%d: %s keeps its page number, but %s's pages changed in the editor: "
-                            "check it runs the page you want" % (fname, n + 1, hit.group(0), name)
+                            "%s: %s keeps its page number, but %s's pages changed in the editor: "
+                            "check it runs the page you want" % (at(n + 1), hit.group(0), name)
                         )
     return out
 

@@ -1,13 +1,14 @@
 """The command line: first run, `status`, finding the project, timing, consoles."""
 
 import re
+import shutil
 import sys
 
 import pytest
 from typer.testing import CliRunner
 
 from rpgsync import cli
-from rpgsync.lcf import LcfFile
+from rpgsync.lcf import LcfFile, MapTree
 
 runner = CliRunner()
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -62,6 +63,14 @@ def test_first_run_asks_first(game2003, monkeypatch):
     assert r.exit_code == 1 and not (game2003 / "Scripts").exists()
 
 
+def test_first_sync_adopts_the_scripts_that_agree(project):
+    shutil.rmtree(project / "Scripts" / ".rpgsync")  # scripts there (a clone), never synced here
+    out = _cli("pull", "-y", project)
+    assert "never synced" not in out
+    assert "CommonEvents: already in sync" in out  # `size = N` heads the script, the game lists it last
+    assert "All files are synced" in _cli("status", project)
+
+
 def test_status_clean(project):
     out = _cli("status", project)
     assert out.startswith("On %s (RPG Maker 2003)" % project.name)
@@ -100,6 +109,29 @@ def test_status_not_exported(project):
     (project / "Scripts" / "Map0002.py").unlink()
     out = _cli("status", project)
     assert re.search(r"Not exported yet.*\n\s+Map0002\.py$", out, re.M), out
+
+
+def test_status_map_tree_change(project):
+    tree = project / "Scripts" / "database" / "map_tree.py"
+    text = tree.read_text(encoding="utf-8")
+    maze, road = (re.search(r"^ *%s = .*\n" % name, text, re.M).group(0) for name in ("dungeon_maze", "dungeon_road"))
+    tree.write_text(text.replace(maze, "").replace(road, maze + road), encoding="utf-8")
+    _edit(tree, 'name="Dungeon Road"', 'name="Long Road"')
+    _edit(tree, "boat_x=21,", "boat_x=5,")
+    out = _cli("status", project)
+    line = next(ln for ln in out.splitlines() if "map_tree.py" in ln)
+    detail = "map 3 changed; new tree order; new start positions"
+    assert re.search(r"database/map_tree\.py\s+\+3 -3\s+%s$" % detail, line), line
+    _cli("push", project)
+    assert "All files are synced" in _cli("status", project)
+    # a map removed in the editor: the others keep their order
+    lmt = MapTree.load(project / "RPG_RT.lmt")
+    lmt.maps = [it for it in lmt.maps if it.id != 8]
+    lmt.tree_order = [m for m in lmt.tree_order if m != 8]
+    (project / "RPG_RT.lmt").write_bytes(lmt.to_bytes())
+    out = _cli("status", project)
+    line = next(ln for ln in out.splitlines() if "RPG_RT.lmt" in ln)
+    assert re.search(r"modified:\s+RPG_RT\.lmt\s+\+0 -1\s+map 8 removed$", line), line
 
 
 @pytest.mark.parametrize("sub", ["", "Scripts", "Scripts/database"])

@@ -45,6 +45,10 @@ def _compile(*src: str) -> list[Command]:
         (b"@dynparams_append_string Simu-Com Faceset 00", 'dyn.dynparams_append_string(word("Simu-Com Faceset 00"))'),
         (b"@dynparams_append_string  Page 2", 'dyn.dynparams_append_string(word(" Page 2"))'),  # the text's space
         (b"@call easyrpg_add, 1, 10", "dyn.call(word.easyrpg_add, 1, 10)"),
+        (b'@write_text "a", 1, 2, "x", "fixed", 0', 'dyn.write_text("a", 1, 2, "x", word.fixed, 0)'),  # DynText's word
+        (b'@Write_Text "a", 1, 2, "x", "fixed"', 'dyn.Write_Text("a", 1, 2, "x", word.fixed)'),
+        (b'@write_text "fixed", 1, 2, "fixed"', 'dyn.write_text("fixed", 1, 2, "fixed")'),  # other arguments: strings
+        (b'@write_text "a", 1, 2, "x", Fixed', 'dyn.write_text("a", 1, 2, "x", word.Fixed)'),
         (b"@f end , -x", 'dyn.f(word("end "), word("-x"))'),
         (b"@f class, __init__, caf\xe9", 'dyn.f(word("class"), word("__init__"), word.caf\xe9)'),  # no keyword, dunder
     ],
@@ -63,6 +67,7 @@ def test_words(comment, line):
         b"@f a, , b",  # an empty argument
         b"@f ",
         b"@f 007",
+        b'@write_text "a", 1, 2, "x", fixed, 0',  # word.fixed writes "fixed", which DynText reads
     ],
 )
 def test_what_is_no_word_stays_a_comment(comment):
@@ -73,6 +78,17 @@ def test_word_forms_mean_the_same():
     assert _compile("dyn.remove_text('x', word.end)") == _compile("dyn.remove_text('x', word('end'))")
     (c,) = _compile('dyn.dynparams_append_string(word(" Page 2"))')
     assert c.string == b"@dynparams_append_string  Page 2"
+
+
+def test_plugin_words_are_written_as_the_plugin_reads_them():
+    (c,) = _compile('dyn.write_text("a", 1, 2, "x", word.fixed)')
+    assert c.string == b'@write_text "a", 1, 2, "x", "fixed"'
+    assert _compile('dyn.write_text("a", 1, 2, "x", "fixed")') == [c]  # the string is the same
+    # another command or another argument: unquoted
+    assert [c.string for c in _compile("dyn.f(word.fixed)", 'dyn.write_text(word.fixed, 1, 2, "x")')] == [
+        b"@f fixed",
+        b'@write_text fixed, 1, 2, "x"',
+    ]
 
 
 @pytest.mark.parametrize("text", ['a"b', "a, b", "a\nb"])
@@ -113,6 +129,11 @@ def _warnings(*src: str, patches=("dynrpg",), plugins=None, tables=None) -> list
         ),
         ("dyn.remove_all(1)", "dyn.remove_all() reads no argument: 1 more is ignored"),
         ('dyn.change_position("a", actors[1].name, 2)', "x (argument 2) is a number, not N1 (an actor's name)"),
+        (
+            'comment(\'@write_text "a", 1, 2, "x", fixed\')',  # the DLL compares a "string" with "fixed"
+            'fixed (argument 5) works as the "string" "fixed" only (word.fixed), not the word fixed: the plugin ignores',
+        ),
+        ('dyn.write_text("a", 1, 2, "x", "Fixed")', 'works as the "string" "fixed" only (word.fixed), not "Fixed"'),
     ],
 )
 def test_signature_problem(src, message):
@@ -124,8 +145,8 @@ def test_signature_problem(src, message):
     "src",
     [
         'dyn.write_text("a", v[39], v[40], "x", 0, 3, 70)',
-        'dyn.write_text("a", 1, 2, "x", word.fixed)',
-        'dyn.write_text("blah2", 50, 60, "out of 76 battles", "fixed", 4, 98)',  # "fixed" as a string works too
+        'dyn.write_text("a", 1, 2, "x", word.fixed)',  # written "fixed"
+        'dyn.write_text("blah2", 50, 60, "out of 76 battles", "fixed", 4, 98)',  # the string works too
         'dyn.change_text("a", variables[10], word.end)',  # a number as the text
         'dyn.remove_text("a")',
         'dyn.remove_text("a", 0)',  # end: anything

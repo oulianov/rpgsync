@@ -955,7 +955,9 @@ class Word:
     the ``end`` of ``@remove_text "id", end``; ``word(" Page 2")`` (a text that is no
     Python name) keeps the spaces of ``@dynparams_append_string  Page 2``.  A word
     can't hold ``"``, ``,`` or a line break.  DynRPG gives most plugins a word
-    without its spaces, in lowercase: give texts as ``"strings"``."""
+    without its spaces, in lowercase: give texts as ``"strings"``.  A plugin's own
+    word is written the way the plugin reads it: ``word.fixed`` of ``dyn.write_text``
+    is the ``"fixed"`` DynText compares."""
 
 
 class _Words:
@@ -1006,7 +1008,8 @@ class DynRPG:
         (with its transparency): ``dyn.write_text("gold", 10, 10, r"\\v[4] G", 0, 3)``.
 
         Args:
-            fixed: ``word.fixed`` scrolls the text with the map; 0: it stays on screen.
+            fixed: ``word.fixed`` (written ``"fixed"``, as the plugin reads it) scrolls the
+                text with the map; 0: it stays on screen.
             color: 0-19, a color of the system graphic.
             picture: the picture it goes with (default: PictureID in DynRPG.ini).
         """

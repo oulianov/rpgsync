@@ -1247,7 +1247,8 @@ def dynrpg_src(line: str) -> str | None:
     """Python form of a one-line DynRPG comment, or None if it cannot be
     written back identically.  The first argument follows the name after one
     space, the others follow ", "; an argument that is no string, number or
-    token is a word, its spaces kept (``word(" Page 2")``)."""
+    token is a word, its spaces kept (``word(" Page 2")``).  A plugin's own word
+    is the "string" it reads: DynText's ``"fixed"`` is ``word.fixed``."""
     m = re.match(r"^@([A-Za-z_][A-Za-z0-9_]*)(?: (.*))?$", line)
     if not m:
         return None
@@ -1257,7 +1258,13 @@ def dynrpg_src(line: str) -> str | None:
         args = _split_dyn_args(rest)
         if args is None or not all(a.startswith(" ") for a in args[1:]):
             return None
-        for a in [args[0]] + [a[1:] for a in args[1:]]:
+        for i, a in enumerate([args[0]] + [a[1:] for a in args[1:]]):
+            words = p.words if (p := dynrpg.param(name, i)) else ()
+            if (m := _DYN_STRING.match(a)) and m.group(1) in words:
+                args_src.append(word_src(m.group(1)))  # DynText's "fixed": word.fixed
+                continue
+            if a in words:
+                return None  # the bare word, that word.fixed doesn't write: the comment stays as is
             src = _dyn_arg_src(a)
             if src is None:
                 return None
@@ -1283,7 +1290,7 @@ def dynrpg_text(call: Call) -> str:
         raise _err("DynRPG calls take positional arguments only", call)
     parts = []
     kinds = "numbers, strings, variables[...], actors[...].name or words (word.end)"
-    for a in call.args:
+    for i, a in enumerate(call.args):
         if isinstance(a, str):
             parts.append('"%s"' % a.replace('"', '""'))
         elif isinstance(a, bool):
@@ -1293,7 +1300,9 @@ def dynrpg_text(call: Call) -> str:
         elif _dyn_token(a) is not None:
             parts.append(_dyn_token(a))
         elif (text := _dyn_word(a)) is not None:
-            parts.append(text)  # as is, unquoted
+            p = dynrpg.param(call.name, i)
+            # a plugin's own word, as it reads it (word.fixed: DynText's "fixed"), else as is, unquoted
+            parts.append('"%s"' % text if p and text in p.words else text)
         else:
             raise _err("DynRPG arguments are %s (got %s)" % (kinds, show(a)), call)
     return "@" + call.name + (" " + ", ".join(parts) if parts else "")

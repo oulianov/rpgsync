@@ -60,6 +60,9 @@ engine = "{engine}"
 patches = {patches}
 # individual extra command codes allowed anyway
 allow_commands = []
+# a script bigger than this (KB) is written as a folder of files instead, as GitLab
+# shows no diff of a file over 200 KB (0: never)
+max_file_kb = 160
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -139,7 +142,7 @@ CONFIG = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["rpgsync"]
 GAME = (ROOT / CONFIG["game"]).resolve()
 
 syncer = Syncer(Project(str(GAME), str(ROOT)), log=lambda *_: None)
-UNITS = [u for u in syncer.units() if Path(u.py_path).exists()]
+UNITS = [u for u in syncer.units() if u.has_script()]
 PLACE_UNITS = [u for u in UNITS if u.kind in ("map", "common", "troop", "maptree")]  # scripts that name places
 MAP_UNITS = [u for u in UNITS if u.kind == "map"]
 MAPS, MAP_SIZES = map_tree_maps(syncer.project)  # the maps of RPG_RT.lmt, their sizes
@@ -147,7 +150,7 @@ MAPS, MAP_SIZES = map_tree_maps(syncer.project)  # the maps of RPG_RT.lmt, their
 
 def compile_unit(unit):
     try:
-        return unit.compile_checked(Path(unit.py_path).read_text(encoding="utf-8"))[0]
+        return unit.compile_checked(unit.read_script().text)[0]  # a script split in files: joined
     except ScriptError as e:
         pytest.fail(str(e), pytrace=False)
 
@@ -168,13 +171,13 @@ def test_engine_compatibility(unit):
 @pytest.mark.skipif(MAPS is None, reason="no map tree")
 def test_map_references(unit):
     problems = map_reference_problems(compile_unit(unit), MAPS or {}, MAP_SIZES)
-    assert not problems, "\\n".join("line %s: %s" % (line, problem) for line, problem in problems)
+    assert not problems, "\\n".join("%s: %s" % (unit.at(line), problem) for line, problem in problems)
 
 
 @pytest.mark.parametrize("unit", MAP_UNITS, ids=[u.name for u in MAP_UNITS])
 def test_pages_reachable(unit):
     for line, problem in unreachable_pages(compile_unit(unit)):
-        warnings.warn("%s:%s: %s" % (Path(unit.py_path).name, line, problem), stacklevel=1)
+        warnings.warn("%s: %s" % (unit.at(line), problem), stacklevel=1)
 
 
 # Example of a check of your own: uncomment it to make sure every message
@@ -367,10 +370,48 @@ def game_types(project: Project) -> str:
     return GAME_TYPES.format(why=why, body=body)
 
 
+# lines of tests/test_scripts.py as an older rpgsync wrote them -> as written now (a
+# script split in files is read through its unit)
+TEST_SCRIPTS_UPDATES = [
+    (
+        "UNITS = [u for u in syncer.units() if Path(u.py_path).exists()]",
+        "UNITS = [u for u in syncer.units() if u.has_script()]",
+    ),
+    (
+        '        return unit.compile_checked(Path(unit.py_path).read_text(encoding="utf-8"))[0]',
+        "        return unit.compile_checked(unit.read_script().text)[0]  # a script split in files: joined",
+    ),
+    (
+        '    assert not problems, "\\n".join("line %s: %s" % (line, problem) for line, problem in problems)',
+        '    assert not problems, "\\n".join("%s: %s" % (unit.at(line), problem) for line, problem in problems)',
+    ),
+    (
+        '        warnings.warn("%s:%s: %s" % (Path(unit.py_path).name, line, problem), stacklevel=1)',
+        '        warnings.warn("%s: %s" % (unit.at(line), problem), stacklevel=1)',
+    ),
+]
+
+
+def update_test_scripts(root: Path) -> bool:
+    """Bring the lines of tests/test_scripts.py an older rpgsync wrote up to date (the
+    ones found as they were written).  -> written"""
+    path = root / "tests" / "test_scripts.py"
+    try:
+        text = original = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for old, new in TEST_SCRIPTS_UPDATES:
+        text = text.replace(old, new)
+    if text == original:
+        return False
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 def update_scripts_project(project: Project) -> list[str]:
     """Bring the scripts folder of a set-up game up to date with this rpgsync: the
     rpgsync source and Pylance settings of pyproject.toml, the .rpgsync/rpgsync link,
-    database/game_types.py.  Returns the written paths."""
+    database/game_types.py, tests/test_scripts.py.  Returns the written paths."""
     root = Path(project.script_dir)
     pyproject = root / "pyproject.toml"
     if not pyproject.exists():
@@ -397,6 +438,8 @@ def update_scripts_project(project: Project) -> list[str]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         written.append(str(path))
+    if update_test_scripts(root):
+        written.append(str(root / "tests" / "test_scripts.py"))
     return written
 
 
