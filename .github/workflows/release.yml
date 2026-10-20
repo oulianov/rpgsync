@@ -1,25 +1,78 @@
-# Publishes rpgsync to PyPI when a GitHub release is published (see docs/development.md,
-# Releasing): the tests run on Python 3.11 to 3.15, the release's tag must be v +
-# pyproject.toml's version, then the sdist and wheel are built and uploaded with PyPI's
-# trusted publishing: no token or password is stored anywhere.
+# Tests and builds rpgsync's sdist and wheel, then, as "Run workflow" asks, attaches them
+# to the latest GitHub release and publishes them to PyPI (see docs/development.md,
+# Releasing).  The release comes first: publish it on GitHub, its tag v + pyproject.toml's
+# version, then run this workflow from master.  Nothing is attached or published unless
+# the tests pass on Python 3.11 to 3.15.
 #
-# One-time setup, before the first release: on PyPI,
+# One-time setup, before the first upload to PyPI: on PyPI,
 # https://pypi.org/manage/account/publishing/, "Add a new pending publisher", GitHub, with
 # PyPI project name rpgsync, owner oulianov, repository rpgsync, workflow name release.yml,
 # and no environment name.  The first upload creates the project, and the pending
-# publisher becomes its trusted publisher.
+# publisher becomes its trusted publisher: no token or password is stored anywhere.
 
 name: Release
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      git-ref:
+        description: Git Ref (Optional)
+        required: false
+      attach-to-latest-release:
+        description: Attach the sdist and wheel to the latest release
+        type: boolean
+        default: false
+      publish-to-pypi:
+        description: Publish to PyPI
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  # First, with "Attach" or "Publish": the latest published release's tag must be "v" and
+  # the version of pyproject.toml, or no job runs.  Without them, nothing to check
+  check-release:
+    name: Check the latest release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - name: Read the version to build
+        if: inputs.attach-to-latest-release || inputs.publish-to-pypi
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.git-ref || github.sha }}
+          sparse-checkout: pyproject.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Compare it with the latest release
+        id: check
+        if: inputs.attach-to-latest-release || inputs.publish-to-pypi
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          echo "To build: $version ($(git rev-parse --short HEAD)); latest release: $tag"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::The latest release is $tag, the version to build $version"
+            exit 1
+          fi
+          tagged="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
+          [ "$tagged" = "$(git rev-parse HEAD)" ] \
+            || echo "::warning::$tag is the commit ${tagged:0:7}, the one built $(git rev-parse --short HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   test:
+    name: Tests (Python ${{ matrix.python }})
+    needs: check-release
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -27,13 +80,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.git-ref || github.sha }}
           path: rpgsync
           persist-credentials: false
-      # the tests run on EasyRPG's test games, found next to rpgsync (tests/conftest.py)
+      # the tests run on EasyRPG's test games (the fork with the edits rpgsync's tests
+      # use), found next to rpgsync (tests/conftest.py)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: EasyRPG/TestGame
-          ref: 4bbedb73492c80b79d8290e0b06ea86875b0bdc8
+          repository: oulianov/TestGame
+          ref: 0aa7d7b50fad91b41768a60271902bceefc2f9da
           path: TestGame
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -45,20 +100,15 @@ jobs:
         run: uv run --locked pytest
 
   build:
+    name: Build
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.git-ref || github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      - name: The tag is pyproject.toml's version
-        run: |
-          version=$(uv version --short)
-          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "::error::the release's tag is $GITHUB_REF_NAME, pyproject.toml's version $version"
-            exit 1
-          fi
       - run: uv build
       - name: The wheel installs and runs
         run: uvx --isolated --from dist/rpgsync-*.whl rpgsync --help
@@ -68,8 +118,30 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # With "Attach to the latest release": the sdist and the wheel, replacing those of an
+  # earlier run
+  attach:
+    name: Attach to the latest release
+    if: inputs.attach-to-latest-release
+    needs: [check-release, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # gh release upload
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check-release.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # With "Publish to PyPI": the files PyPI has already (an earlier run) are skipped
   publish:
-    needs: build
+    name: Publish to PyPI
+    if: inputs.publish-to-pypi
+    needs: [check-release, build]
     runs-on: ubuntu-latest
     permissions:
       id-token: write # trusted publishing
@@ -81,4 +153,4 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
-      - run: uv publish --trusted-publishing always dist/*
+      - run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/ dist/*

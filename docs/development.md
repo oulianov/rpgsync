@@ -2,12 +2,12 @@
 
 ## Set up
 
-The tests run on [EasyRPG's test games](https://github.com/EasyRPG/TestGame), cloned
-next to rpgsync (or set `TESTGAME=/path/to/TestGame`):
+The tests run on EasyRPG's test games, from [the fork](https://github.com/oulianov/TestGame)
+with the edits they use, cloned next to rpgsync (or set `TESTGAME=/path/to/TestGame`):
 
 ```bash
 git clone https://github.com/oulianov/rpgsync.git
-git clone https://github.com/EasyRPG/TestGame.git
+git clone https://github.com/oulianov/TestGame.git
 cd rpgsync
 uv run pytest
 uv run ruff check && uv run ruff format --check
@@ -57,11 +57,19 @@ dependency with `rpgsync~=0.1.0`, delete the `[tool.uv.sources]` line of rpgsync
 3. Publish a GitHub release whose tag is `v` and the version, on master:
    `gh release create v0.3.0 --generate-notes`, or Releases > Draft a new release on
    GitHub.
+4. Run the [Release workflow](../.github/workflows/release.yml) from master, with
+   "Attach the sdist and wheel to the latest release" and "Publish to PyPI": Actions >
+   Release > Run workflow, or
 
-Publishing the release starts the
-[Release workflow](../.github/workflows/release.yml): the tests on Python 3.11 to
-3.15, the check that the tag is pyproject.toml's version, the build, then the upload
-to PyPI. Nothing is uploaded when a step fails.
+   ```bash
+   gh workflow run release.yml -f attach-to-latest-release=true -f publish-to-pypi=true
+   ```
+
+The workflow checks that the latest release's tag is pyproject.toml's version (it warns
+when the tag is another commit than the one built), runs the tests on Python 3.11 to
+3.15, builds, then attaches and publishes. Nothing is attached or published when a step
+fails, and a run again replaces the attached files and skips those PyPI has already.
+Without either option, it only tests and builds.
 
 The first time only, PyPI must trust the workflow: on
 <https://pypi.org/manage/account/publishing/>, "Add a new pending publisher" (GitHub)
