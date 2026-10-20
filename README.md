@@ -255,6 +255,11 @@ Set the limit in `Scripts/pyproject.toml` (`0`: never split):
 max_file_kb = 160
 ```
 
+The events of a script are methods of one class, so a diff names that class
+above each change. The set-up adds `*.py diff=python` to the `.gitattributes`
+at the root of your repository: git and GitLab then name the event (GitLab
+reads the default branch's).
+
 ### The map tree
 
 The editor's map tree (`RPG_RT.lmt`) is `database/map_tree.py`: one entry per

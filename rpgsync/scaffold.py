@@ -259,6 +259,11 @@ __pycache__/
 *.conflict-*.py
 """
 
+GITATTRIBUTES = """\
+# Diffs name the Python function around a change (by default: the class)
+*.py diff=python
+"""
+
 
 def rpgsync_checkout() -> Path | None:
     """The folder of the running rpgsync when it is a clone, None when it was
@@ -445,7 +450,8 @@ def update_scripts_project(project: Project) -> list[str]:
 
 def init_scripts_project(project: Project) -> list[str]:
     """Create pyproject.toml & co in the scripts folder (existing files are
-    kept).  Returns the written paths."""
+    kept), and add the diff rule of Python files to the repository's
+    .gitattributes.  Returns the written paths."""
     root = Path(project.script_dir)
     root.mkdir(parents=True, exist_ok=True)
     title = os.path.basename(project.game_dir)
@@ -474,6 +480,31 @@ def init_scripts_project(project: Project) -> list[str]:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         written.append(str(path))
+    attributes = add_gitattributes(project)
+    if attributes:
+        written.append(attributes)
     if _uses_link((root / "pyproject.toml").read_text(encoding="utf-8")):
         link_rpgsync(root)
     return written
+
+
+def add_gitattributes(project: Project) -> str | None:
+    """Add the `*.py diff=python` rule to the .gitattributes at the root of the git
+    repository of the scripts: every event of a script is a method of one class, and
+    the hunk headers of diffs name that class by default.  GitLab reads only the root
+    .gitattributes.  With no repository yet: the game folder's, or the scripts folder's
+    when they are outside the game.  Returns the path written, None when the file has
+    a rule for *.py already."""
+    scripts = Path(project.script_dir).resolve()
+    game = Path(project.game_dir).resolve()
+    root = next((p for p in (scripts, *scripts.parents) if (p / ".git").exists()), None)
+    if root is None:
+        root = game if scripts.is_relative_to(game) else scripts
+    path = root / ".gitattributes"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if re.search(r"^\s*\*\.py\s.*\bdiff\b", text, re.MULTILINE):
+        return None  # the rule, or the user's own diff setting for *.py
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.write_text(text + GITATTRIBUTES, encoding="utf-8")
+    return str(path)

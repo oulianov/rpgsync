@@ -7,6 +7,7 @@ import tomllib
 from rpgsync import dsl, named
 from rpgsync.project import Project
 from rpgsync.scaffold import (
+    GITATTRIBUTES,
     LINK_SOURCE,
     PYPROJECT,
     RPGSYNC_ROOT,
@@ -91,6 +92,21 @@ def test_game_types(game2003):
     assert update_scripts_project(project) == [str(types)]
     assert "Dynamic = Variable" in types.read_text()
     assert update_scripts_project(project) == []
+
+
+def test_gitattributes(game2003):
+    """Diffs name the function of an event, not the class of the script, also on
+    GitLab, which reads only the .gitattributes at the root of the repository."""
+    project = Project(str(game2003))
+    init_scripts_project(project)
+    assert (game2003 / ".gitattributes").read_text() == GITATTRIBUTES  # no repository yet: the game's
+    repo = game2003.parent  # a repository holding the game, with a .gitattributes of its own
+    (repo / ".git").mkdir()
+    (repo / ".gitattributes").write_text("Music/** filter=lfs diff=lfs merge=lfs -text")
+    (game2003 / "Scripts" / "pyproject.toml").unlink()
+    assert str(repo / ".gitattributes") in init_scripts_project(project)
+    assert (repo / ".gitattributes").read_text() == "Music/** filter=lfs diff=lfs merge=lfs -text\n" + GITATTRIBUTES
+    assert str(repo / ".gitattributes") not in init_scripts_project(project)  # added once
 
 
 def test_pyright_settings_added_once(game2003):
