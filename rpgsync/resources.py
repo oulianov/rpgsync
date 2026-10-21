@@ -116,8 +116,10 @@ class Ref(BaseModel):
 
 
 def key(name: str) -> str:
-    """A resource name as the engine looks it up: any case, no extension, / between folders."""
-    k = unicodedata.normalize("NFC", name.strip()).replace("\\", "/").lower().lstrip("/")
+    """A resource name as the engine looks it up: any case, no extension, / between folders.
+    Spaces are kept: the engine adds the extension to the name as written ("Theme " is
+    Theme .mp3)."""
+    k = unicodedata.normalize("NFC", name).replace("\\", "/").lower().lstrip("/")
     k = k[2:] if k.startswith("./") else k
     root, ext = os.path.splitext(k)
     return root if ext in _EXTENSIONS else k
@@ -196,10 +198,10 @@ class Collector:
     def add(
         self, folder: str, name: bytes | str, path: str, line: int | None, what: str, active=True, event=False
     ) -> None:
-        name = self._dec(name).strip()
+        name = self._dec(name)  # as written: "Theme " is Theme .mp3
         if self._where is not None:  # a script split in files: the file and line of the reference
             path, line = self._where(line)
-        if name and name.lower() != _OFF:
+        if name.strip() and name.strip().lower() != _OFF:
             self.refs.append(Ref(folder=folder, name=name, path=path, line=line, what=what, active=active, event=event))
 
     # -- compiled scripts ------------------------------------------------------------

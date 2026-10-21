@@ -56,6 +56,18 @@ def test_names_are_found_as_the_engine_finds_them(tmp_path):
     }
 
 
+def test_names_ending_with_a_space(tmp_path):
+    """The engine adds the extension to the name as written: "Theme " is Theme .mp3, not Theme.mp3."""
+    assert key("Theme ") == "theme " != key("Theme")
+    game = _game(tmp_path, Music=["Theme .mp3", "Battle.mp3"])
+    found = _check(
+        game,
+        _event(_cmd(11510, b"Theme ", [0, 100, 100, 50], line=8), _cmd(11510, b"Battle ", [0, 100, 100, 50], line=9)),
+    )
+    assert [(r.folder, r.name, r.line) for r in found.missing] == [("Music", "Battle ", 9)]
+    assert found.unused == {"Music": ["Battle.mp3"]}
+
+
 def test_missing_and_unused(tmp_path):
     game = _game(tmp_path, Picture=["used.png", "spare.png"], Sound=["Click.wav"])
     found = _check(

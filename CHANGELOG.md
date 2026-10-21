@@ -24,6 +24,8 @@ newer one; [Releasing](docs/development.md#releasing) makes a new one.
   named in one warning, in fewer words.
 - `rpgsync check` names files relative to the current folder (`Scripts/Map0004.py:12`
   run from the game folder), ty's problems too, so terminals and editors can open them.
+- `rpgsync check --resources`: a name ending with a space (`"Theme "`, whose file is
+  `Theme .mp3`) is found, instead of reported as not imported and its file as never used.
 - rpgsync knows CortiXCustomCrit.dll (Corti's critical hits): its `dyn.ccrit_*`
   commands, and its `[CortiCustomCrit]` and `[CortiLog]` sections of `DynRPG.ini`.
 
