@@ -1096,6 +1096,39 @@ class DynRPG:
     def easyrpg_add(self, variable: DynNumber, value: DynNumber, /, *values: DynNumber) -> None:
         """EasyRPG Player: variable number ``variable`` := the sum of the values."""
 
+    # CortiXCustomCrit.dll: critical hits of its own, which raise the battler's attack (its
+    # "bonus") until its next action that doesn't crit; the DLL refuses more arguments
+
+    def ccrit_getstatus(self, hero: DynNumber, switch: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: switch ``switch`` := ON while hero ``hero`` (database ID) has the bonus."""
+
+    def ccrit_resetstatus(self, hero: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: remove the bonus of hero ``hero`` (database ID)."""
+
+    def ccrit_monster_getstatus(self, monster: DynNumber, switch: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: switch ``switch`` := ON while the monster in place 1-8 has the bonus."""
+
+    def ccrit_monster_resetstatus(self, monster: DynNumber, unused: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: remove the bonus of the monster in place 1-8 (the DLL wants a
+        second number)."""
+
+    def ccrit_skill_addcon(self, skill: DynNumber, value: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: the skill's chance gets ``value`` % more (its SkillAddCon)."""
+
+    def ccrit_skill_addvar(self, skill: DynNumber, variable: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: the skill's chance gets the variable's value % more (its SkillAddVar)."""
+
+    def ccrit_skill_mulcon(self, skill: DynNumber, percent: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: the skill's chance is ``percent`` % of the battler's (its SkillMulCon);
+        a skill crits only with it when CritCalcOnSkillsDisabled=1."""
+
+    def ccrit_skill_mulvar(self, skill: DynNumber, variable: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: the skill's chance is multiplied by the variable's value % (its
+        SkillMulVar)."""
+
+    def ccrit_skill_delay(self, skill: DynNumber, frames: DynNumber, /, *rest: DynArg) -> None:
+        """CortiCustomCrit: frames before the skill's critical effect shows (its SkillDelay)."""
+
 
 ManiacValue = int | Value | Switch
 """A Maniac value: a number, ``variables[n]``, ``variables[variables[n]]`` or

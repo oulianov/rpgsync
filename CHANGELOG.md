@@ -18,10 +18,14 @@ newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
 ## Unreleased
 
+## 0.1.1
+
 - `rpgsync check`: the pages that one later page keeps from ever being active are
   named in one warning, in fewer words.
 - `rpgsync check` names files relative to the current folder (`Scripts/Map0004.py:12`
   run from the game folder), ty's problems too, so terminals and editors can open them.
+- rpgsync knows CortiXCustomCrit.dll (Corti's critical hits): its `dyn.ccrit_*`
+  commands, and its `[CortiCustomCrit]` and `[CortiLog]` sections of `DynRPG.ini`.
 
 ## 0.1.0
 

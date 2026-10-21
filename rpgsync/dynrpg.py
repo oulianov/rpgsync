@@ -56,6 +56,7 @@ class Plugin(BaseModel):
     functions: list[Function] = []
     prefix: str | None = None  # every command starting with it is the plugin's too
     section: str | None = None  # its DynRPG.ini section
+    other_sections: list[str] = []  # other DynRPG.ini sections it reads (a log's settings)
     keys: list[str] = []  # the settings it reads there (Image<n>: Image1, Image2...)
     required: list[str] = []  # the settings it can't do without
     variables: list[str] = []  # the settings that hold a variable id
@@ -95,6 +96,14 @@ _CLOCK_VARIABLES = [
     "BackgroundVar",
 ]
 _EXP_CURVES = ["CoefficientA", "CoefficientB", "CoefficientC", "CoefficientD", "CoefficientE"]
+# without one of these, CortiXCustomCrit gives no critical hits
+_CORTI_REQUIRED = [
+    "CritCalcType",
+    "CritAttackBonusType",
+    "CritAttackBonusTypeValue",
+    "CritCalcWeaponCriticalType",
+    "CritCalcWeaponCritBonusApplication",
+]
 
 PLUGINS = [
     # Kazesui's texts drawn on screen; EasyRPG Player: src/dynrpg_textplugin.cpp
@@ -193,6 +202,61 @@ PLUGINS = [
     # the EXP curve of every actor; a missing coefficient reads 0 (all 0: a linear curve)
     Plugin(dll="ExpBug-in.dll", section="Exp_Curves", keys=_EXP_CURVES, required=_EXP_CURVES),
     Plugin(dll="ATBWaitOnly.dll"),  # Wait ATB mode on new game and on load, no settings
+    # Corti's critical hits, rolled when a battler starts an attack or a skill: they raise its
+    # attack for that action (V0.9.2, its settings: CortiCustomCritReadme.txt of CortiWins'
+    # CortiPluginCollection); its logger reads [CortiLog]; EasyRPG Player:
+    # src/dynrpg_corticustomcrit.cpp
+    Plugin(
+        dll="CortiXCustomCrit.dll",
+        functions=[
+            _fn("ccrit_getstatus", "hero: number", "switch: number"),  # the switch: ON while the hero has the bonus
+            _fn("ccrit_resetstatus", "hero: number"),
+            _fn("ccrit_monster_getstatus", "monster: number", "switch: number"),  # monster: its place, 1-8
+            _fn("ccrit_monster_resetstatus", "monster: number", "unused: number"),  # the DLL wants 2 arguments
+            # a skill's chance: chance * MulCon / 100 * v[MulVar] / 100 + AddCon + v[AddVar]
+            _fn("ccrit_skill_addcon", "skill: number", "value: number"),
+            _fn("ccrit_skill_addvar", "skill: number", "variable: number"),
+            _fn("ccrit_skill_mulcon", "skill: number", "percent: number"),
+            _fn("ccrit_skill_mulvar", "skill: number", "variable: number"),
+            _fn("ccrit_skill_delay", "skill: number", "frames: number"),  # before its effect shows
+        ],
+        prefix="ccrit_",
+        section="CortiCustomCrit",
+        other_sections=["CortiLog"],
+        keys=[
+            *_CORTI_REQUIRED,
+            "CritCalcWithLevel",
+            "CritCalcWithLevelVariable",
+            "CritCalcOnSkillsDisabled",
+            "CritCalcOnHerosDisabled",
+            "t1CritChanceDefault",
+            "t1HeroCritHero_<n>_Id",
+            "t1HeroCritHero_<n>_FixCrit",
+            "t1HeroCritHero_<n>_Variable",
+            "t2CritSourceStat",
+            "t3CritSourceStat",
+            "t3RatingCoefficientHeroId",
+            "MonsterCritSourceStat",
+            "MonsterCritOnAttack",
+            "MonsterCritOnSkills",
+            "MonsterCritAttackBonus",
+            "MonsterCritAttackBonusPercentage",
+            "MonsterCritAttackBonusHeroDbId",
+            "SkillId<n>",
+            "SkillAddCon<n>",
+            "SkillAddVar<n>",
+            "SkillMulCon<n>",
+            "SkillMulVar<n>",
+            "SkillDelay<n>",
+            "VisualEffectType",
+            "VisualEffectAnimationDatabaseId",
+            "DelayFramesHeroes",
+            "DelayFramesMonsters",
+        ],
+        required=_CORTI_REQUIRED,
+        variables=["CritCalcWithLevelVariable"],
+        emulated=True,
+    ),
 ]
 
 BY_DLL = {p.dll.lower(): p for p in PLUGINS if p.dll}
@@ -551,12 +615,12 @@ def setup_problems(plugins: Installed, tables: dict[str, int] | None = None) -> 
     known = [p for p in PLUGINS if p.dll and plugins.provides(p.dll)]
     # DynRPG gives a plugin the section named after its DLL; a known one may read another
     readers = CORE_SECTIONS | {_name(d) for d in [*plugins.dlls, *(plugins.declared or [])]}
-    readers |= {p.section.lower() for p in known if p.section}
+    readers |= {s.lower() for p in known for s in _sections(p)}
     where = "DynPlugins" if plugins.declared is None else "DynPlugins or EasyRPG.ini's [DynRPG] Plugins"
     for low, section in by_lower.items():
         if low in readers:
             continue
-        owner = next((p for p in PLUGINS if p.section and p.section.lower() == low), None)
+        owner = next((p for p in PLUGINS if low in {s.lower() for s in _sections(p)}), None)
         if owner is not None:
             out.append("[%s] is read by %s, which isn't in %s" % (section, owner.dll, where))
         elif not plugins.unknown():
@@ -585,6 +649,10 @@ def setup_problems(plugins: Installed, tables: dict[str, int] | None = None) -> 
                 % (p.section, what, variables, _them(past), ", ".join(past))
             )
     return out
+
+
+def _sections(plugin: Plugin) -> list[str]:
+    return ([plugin.section] if plugin.section else []) + plugin.other_sections
 
 
 def easyrpg_ini_problems(plugins: Installed) -> list[str]:

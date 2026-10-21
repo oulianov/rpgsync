@@ -361,7 +361,9 @@ def test_easyrpg_ini_problems():
 def test_dynrpg_ini_problems_with_declared_plugins():
     plugins = dynrpg.Installed(ini=dynrpg.read_ini(INI), declared=["faster_atb_advanced", "game_clock"])
     found = dynrpg.setup_problems(plugins, {"variables": 5000})
-    assert found[0].startswith("[CortiCustomCrit]: no plugin in DynPlugins or EasyRPG.ini's [DynRPG] Plugins")
+    assert found[0] == (
+        "[CortiCustomCrit] is read by CortiXCustomCrit.dll, which isn't in DynPlugins or EasyRPG.ini's [DynRPG] Plugins"
+    )
     assert found[1].startswith("[Mystery]: no plugin in DynPlugins or EasyRPG.ini's [DynRPG] Plugins")
     assert found[2].startswith("[game_clock] lacks SessionCurrent")  # a declared plugin's settings are checked
     assert len(found) == 3  # [faster_atb_advanced] is read; ExpBug-in isn't declared, so no [Exp_Curves] needed
@@ -405,23 +407,32 @@ def test_dynrpg_ini_problems():
     plugins = dynrpg.Installed(dlls=["game_clock.dll", "ExpBug-in.dll", "Mystery.dll"], ini=ini)
     found = dynrpg.setup_problems(plugins, {"variables": 1000})
     assert found[0] == "[faster_atb_advanced] is read by faster_atb_advanced.dll, which isn't in DynPlugins"
+    assert found[1] == "[CortiCustomCrit] is read by CortiXCustomCrit.dll, which isn't in DynPlugins"
     assert (
-        found[1].startswith("[game_clock] lacks SessionCurrent, SessionSecs")
-        and "game_clock.dll needs them" in found[1]
-    )
-    assert found[2] == (
-        "[game_clock] names a variable past the database's 1000 (the editor doesn't show it): SessionStart=4003"
+        found[2].startswith("[game_clock] lacks SessionCurrent, SessionSecs")
+        and "game_clock.dll needs them" in found[2]
     )
     assert found[3] == (
+        "[game_clock] names a variable past the database's 1000 (the editor doesn't show it): SessionStart=4003"
+    )
+    assert found[4] == (
         "no [Exp_Curves] section: ExpBug-in.dll needs CoefficientA, CoefficientB, CoefficientC, CoefficientD, "
         "CoefficientE"
     )
-    assert len(found) == 4  # Mystery.dll: [Mystery] is its section, and it may read [CortiCustomCrit]
+    assert len(found) == 5  # Mystery.dll: [Mystery] is its section
     plugins = dynrpg.Installed(dlls=["faster_atb_advanced.dll"], ini=ini)
     assert dynrpg.setup_problems(plugins, {"variables": 3327}) == [
         "[game_clock] is read by game_clock.dll, which isn't in DynPlugins",
-        "[CortiCustomCrit]: no plugin in DynPlugins reads this section",
+        "[CortiCustomCrit] is read by CortiXCustomCrit.dll, which isn't in DynPlugins",
         "[Mystery]: no plugin in DynPlugins reads this section",
+    ]
+
+
+def test_a_plugin_reads_its_other_sections():
+    ini = dynrpg.read_ini("[CortiCustomCrit]\nCritCalcType=1\n[CortiLog]\nLogToFile=0\n")
+    assert dynrpg.setup_problems(dynrpg.Installed(dlls=["CortiXCustomCrit.dll"], ini=ini)) == [
+        "[CortiCustomCrit] lacks CritAttackBonusType, CritAttackBonusTypeValue, CritCalcWeaponCriticalType, "
+        "CritCalcWeaponCritBonusApplication: CortiXCustomCrit.dll needs them"
     ]
 
 
@@ -468,7 +479,7 @@ def test_check_warns_about_the_plugins(exported2003):
     (exported2003 / "DynRPG.ini").write_text("[QuickPatches]\n[CortiLog]\nLogToFile=0\n")
     r = CliRunner().invoke(cli.app, ["check", str(exported2003), "--no-types", "--patch", "dynrpg"])
     assert r.exit_code == 0, r.output
-    assert "DynRPG.ini: [CortiLog]: no plugin in DynPlugins reads this section" in r.output
+    assert "DynRPG.ini: [CortiLog] is read by CortiXCustomCrit.dll, which isn't in DynPlugins" in r.output
     assert "DynRPG.ini: no [faster_atb_advanced] section: faster_atb_advanced.dll needs" in r.output
     assert "dyn.write_text() comes from DynTextPlugin.dll, which isn't in DynPlugins" in r.output
     one = os.path.join(exported2003, "Scripts", "Map0001.py")

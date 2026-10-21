@@ -138,6 +138,7 @@ with `@`.
   | game_clock.dll | none | `[game_clock]` SessionStart ... BackgroundVar (variables), ForegroundImage(N), BackgroundImage(N), DummyImage, TimeTextDisplay |
   | ExpBug-in.dll | none | `[Exp_Curves]` CoefficientA-E |
   | ATBWaitOnly.dll | none | |
+  | CortiXCustomCrit.dll | `ccrit_getstatus(hero, switch)`, `ccrit_resetstatus(hero)`, `ccrit_monster_getstatus(monster, switch)`, `ccrit_monster_resetstatus(monster, unused)`, `ccrit_skill_addcon/addvar/mulcon/mulvar/delay(skill, value)` | `[CortiCustomCrit]` CritCalcType, CritAttackBonusType(Value), CritCalcWeaponCriticalType, CritCalcWeaponCritBonusApplication (needed), t1/t2/t3..., Monster..., Skill...(N), VisualEffect..., DelayFrames...; `[CortiLog]` LogToConsole, LogToFile |
 
   Their commands are typed methods of `dyn` (editor completion, ty): numbers
   take `12`, `variables.x`, `variables[...]` or `v[12]`; texts take `"..."` or
