@@ -923,7 +923,7 @@ def check(
     for found, part in _checked_units(proj, units, rules, resources, jobs):
         for kind, where, problem in found:
             color = "red" if kind == "error" else "yellow"
-            err.print(*([(where, "cyan"), ": "] if where else []), (problem, color), kind=kind)
+            err.print(*([(_here(where), "cyan"), ": "] if where else []), (problem, color), kind=kind)
             errors += kind == "error"
             warnings += kind == "warning"
         if files is not None and part is not None:
@@ -1133,6 +1133,7 @@ def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, compl
         ref = refs[0]
         where = "%s:%d" % (ref.path, ref.line) if ref.line else ref.path
         problem = "%s uses %s/%s, which is not imported" % (ref.what, ref.folder, ref.name)
+        where = _here(where)
         if len(refs) > 1:
             others = [
                 "%s:%d" % (os.path.basename(r.path), r.line) if r.line else os.path.basename(r.path) for r in refs[1:4]
@@ -1141,7 +1142,7 @@ def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, compl
             problem += " (also used at %s%s)" % (", ".join(others), more)
         err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
     for (path, folder), refs in grouped.items():
-        where = "%s:%d" % (path, refs[0].line) if refs[0].line else path
+        where = _here("%s:%d" % (path, refs[0].line) if refs[0].line else path)
         names = list(dict.fromkeys(r.name for r in refs))
         shown = ", ".join(names[:8]) + (" and %d more" % (len(names) - 8) if len(names) > 8 else "")
         if len(refs) == 1:
@@ -1183,8 +1184,25 @@ def _check_types(script_dir: str, ui: UI, err: UI, paths: list[Path] | None = No
     if result.returncode == 0 or not lines:
         return 0
     for line in lines:
+        m = re.match(r"([^:\s][^:]*\.pyi?)(:\d+:\d+: .*)$", line)  # ty's paths: relative to the scripts folder
+        if m:
+            line = _here(os.path.join(script_dir, m.group(1))) + m.group(2)
         err.print((line, "red"), kind="error")
     return max(len(lines), 1)
+
+
+def _here(where: str) -> str:
+    """A place `check` names (a path, path:line, or a file of the game: RPG_RT.lmt), with
+    its path relative to the current folder when it is in it: Scripts/Map0004.py:12, run
+    from the game folder."""
+    m = re.match(r"(.+?)((?::\d+)*)$", where)
+    if m is None or not os.path.isabs(m.group(1)):
+        return where
+    try:
+        path = os.path.relpath(m.group(1))
+    except ValueError:  # on another drive (Windows)
+        return where
+    return where if path == os.pardir or path.startswith(os.pardir + os.sep) else path + m.group(2)
 
 
 def clean(

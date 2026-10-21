@@ -18,6 +18,11 @@ newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
 ## Unreleased
 
+- `rpgsync check`: the pages that one later page keeps from ever being active are
+  named in one warning, in fewer words.
+- `rpgsync check` names files relative to the current folder (`Scripts/Map0004.py:12`
+  run from the game folder), ty's problems too, so terminals and editors can open them.
+
 ## 0.1.0
 
 First release on PyPI.

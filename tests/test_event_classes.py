@@ -358,10 +358,25 @@ def test_unreachable_pages(first, then, hidden):
     )
     problems = S.unreachable_pages(_compile(src))
     if hidden:
-        why = "no condition" if not then else "its conditions are among page_1's"
-        assert problems == [(7, "A.page_1 is never active: page_2, after it, holds whenever page_1 does (%s)" % why)]
+        why = "has no condition" if not then else "holds whenever it does"
+        assert problems == [(7, "A.page_1 is never active: page_2, after it, %s" % why)]
     else:
         assert problems == []
+
+
+def test_pages_hidden_by_one_page_in_one_warning():
+    """The pages a page hides are named in one warning, at the line of the first one."""
+
+    def event(conditions):
+        pages = "".join(
+            "    @page(when=%s)\n    def page_%d(self):\n        pass\n\n" % (c, n) for n, c in enumerate(conditions, 1)
+        )
+        return '@event(1, "A", x=0, y=0)\nclass A(Event):\n' + pages
+
+    problems = S.unreachable_pages(_compile(event(["switches[1]"] * 5)))
+    assert problems == [(7, "A.page_1 to page_4 are never active: page_5, after them, holds whenever they do")]
+    problems = S.unreachable_pages(_compile(event(["switches[1]", "switches[2]", "switches[1]", "switches[1]"])))
+    assert problems == [(7, "A.page_1 and page_3 are never active: page_4, after them, holds whenever they do")]
 
 
 def test_gary_has_no_unreachable_page():
@@ -370,7 +385,7 @@ def test_gary_has_no_unreachable_page():
     assert S.unreachable_pages(_compile(GARY.replace("    @page(when=switches[1])\n", ""))) == []
     hidden = GARY.replace("    @page(when=switches[1])\n", "").replace("Gary.page_1()", "wait(1)")
     assert [p for _, p in S.unreachable_pages(_compile(hidden))] == [
-        "Gary.page_1 is never active: page_2, after it, holds whenever page_1 does (no condition)"
+        "Gary.page_1 is never active: page_2, after it, has no condition"
     ]
 
 
@@ -380,9 +395,7 @@ def test_check_warns_about_unreachable_pages(exported2003):
     _append(unit, src.replace("        Gary.page_1()\n", ""))
     assert syncer.sync(unit).action == "import"
     out = _cli("check", exported2003, "--no-types")
-    assert re.search(
-        r"Map0001\.py:\d+: Gary\.page_1 is never active: page_2, after it, holds whenever page_1 does", out
-    )
+    assert re.search(r"Map0001\.py:\d+: Gary\.page_1 is never active: page_2, after it, has no condition", out)
 
 
 # -- migration ------------------------------------------------------------------------

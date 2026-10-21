@@ -2730,20 +2730,35 @@ def unreachable_pages(events: list) -> list[tuple[int | None, str]]:
             continue
         who = ev.ident or "events[%s]" % ev.id
         conds = [pg.props["condition"] for pg in ev.pages]
+        hidden: dict[int, list[int]] = {}  # page -> the pages before it that it hides
         for i, cond in enumerate(conds):
             if (ev.id, i + 1) in called:
                 continue
-            j = next((j for j in range(i + 1, len(conds)) if _implies(cond, conds[j])), None)
+            # the last page that holds whenever it does: the pages it hides go in one warning
+            j = max((j for j in range(i + 1, len(conds)) if _implies(cond, conds[j])), default=None)
             if j is not None:
-                why = "no condition" if not conds[j] else "its conditions are among page_%d's" % (i + 1)
-                out.append(
-                    (
-                        ev.pages[i].lineno,
-                        "%s.page_%d is never active: page_%d, after it, holds whenever page_%d does (%s)"
-                        % (who, i + 1, j + 1, i + 1, why),
-                    )
-                )
+                hidden.setdefault(j, []).append(i)
+        for j, pages in sorted(hidden.items(), key=lambda item: item[1][0]):
+            one = len(pages) == 1
+            why = "has no condition" if not conds[j] else "holds whenever %s" % ("it does" if one else "they do")
+            problem = "%s.%s %s never active: page_%d, after %s, %s" % (
+                who,
+                _page_list([i + 1 for i in pages]),
+                "is" if one else "are",
+                j + 1,
+                "it" if one else "them",
+                why,
+            )
+            out.append((ev.pages[pages[0]].lineno, problem))
     return out
+
+
+def _page_list(numbers: list[int]) -> str:
+    """page_1 / page_1 and page_2 / page_1 to page_4 / page_1, page_3 and page_4"""
+    names = ["page_%d" % n for n in numbers]
+    if len(names) > 2 and numbers == list(range(numbers[0], numbers[-1] + 1)):
+        return "%s to %s" % (names[0], names[-1])
+    return names[0] if len(names) == 1 else "%s and %s" % (", ".join(names[:-1]), names[-1])
 
 
 def assign_ids(specs, start_ids=()) -> list[tuple[Any, int]]:
