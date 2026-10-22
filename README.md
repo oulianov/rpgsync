@@ -9,8 +9,9 @@ A Python twin of your RPG Maker 2000/2003 game.
 - Implement automated tests to verify game mechanics
 - Improve your game using the modern developer's toolkit
 
+<img width="1920" height="754" alt="rpgsync" src="https://github.com/user-attachments/assets/11a3fc5a-7884-4c7c-9aef-ee9ee54aa4bc" />
 
-## Code example
+## Example
 
 ```python
 @event(10, "Jeremy", x=15, y=38)
@@ -50,11 +51,7 @@ class Ulysse(Event):  # The other event!
         pass
 ```
 
-Every command, option and value is typed and documented in
-[`rpgsync/dsl.py`](https://github.com/oulianov/rpgsync/blob/master/rpgsync/dsl.py): your
-editor shows the docs on hover and flags wrong values (a misspelled direction, a sprite
-index above 7, ...). [Writing scripts](https://github.com/oulianov/rpgsync/blob/master/docs/scripts.md)
-explains events and pages, variables by name, the database and the map tree.
+Every command, option and value is typed and documented. The database, the map tree, the variable names, battle command events are also transformer. [Learn more here.](https://github.com/oulianov/rpgsync/blob/master/docs/scripts.md)
 
 ## Demo
 
