@@ -108,6 +108,38 @@ def test_names_known_when_the_game_runs(tmp_path):
     assert found.unused == {"FaceSet": ["Hero.png"]}  # num*, oth* and sheet* are names built at runtime
 
 
+def test_names_dynparams_builds_for_a_command(tmp_path):
+    """A name DynParams builds for a command it rewrites is matched whole, in the folder of that
+    command: even a letter and a number (f"w{variables.sheet}" in a script)."""
+    pictures = ["w4.png", "w31.png", "s101.png", "gun3.png", "gun4.png", "wall.png", "statusbar.png", "hurt.png"]
+    game = _game(tmp_path, Picture=pictures, FaceSet=["w5.png"])
+    show = [1] + [0] * 13
+    commands = (
+        _cmd(12410, b"@dynparams_add_param 1, V42"),
+        _cmd(12410, b"@dynparams_append_string w"),
+        _cmd(12410, b"@dynparams_append_number V60"),
+        _cmd(12410, b"@dynparams_overwrite_next"),
+        _cmd(11110, b"w1", show),  # a placeholder: its name is replaced
+        _cmd(12410, b"@dynparams_append_string s"),
+        _cmd(12410, b"@dynparams_append_number VV93"),
+        _cmd(12410, b"@dynparams_overwrite_next"),
+        _cmd(11110, b"s1", show),
+        _cmd(12410, b'@dynparams_append_string "gun"'),
+        _cmd(12410, b"@dynparams_append_number 3"),
+        _cmd(12410, b"@dynparams_overwrite_next"),
+        _cmd(11110, b"gun0", show),
+        _cmd(12410, b"@dynparams_add_param 1, V42"),
+        _cmd(12410, b"@dynparams_overwrite_next"),
+        _cmd(11110, b"hurt", show),  # its parameters only: its own name is shown
+        _cmd(12410, b"@dynparams_add_param 1, V42"),
+        _cmd(12410, b"@dynparams_overwrite_next"),
+        _cmd(11110, b"lost", show, line=9),
+    )
+    found = _check(game, _event(*commands))
+    assert [(r.name, r.line) for r in found.missing] == [("lost", 9)]
+    assert found.unused == {"FaceSet": ["w5.png"], "Picture": ["gun4.png", "statusbar.png", "wall.png"]}
+
+
 def test_plugin_comments_name_files(tmp_path):
     game = _game(tmp_path, Picture=["hud.png", "boss.png", "a.png"])
     found = _check(game, _event(_cmd(12410, b'@show_hud "hud", 1'), _cmd(22410, b"boss and more")))

@@ -144,6 +144,7 @@ class Overwrite(BaseModel):
     at: int | None = None  # the @dynparams_overwrite_next comment, None if not reached
     target: int | None = None  # the rewritten command, None when not among the commands
     params: list[tuple[int, int]] = []  # (comment, 1-based parameter index)
+    text: list[int] = []  # the comments building the command's text (a file name), in order
     lines: list[tuple[int, int]] = []  # (comment, message line)
     choices: list[tuple[int, int]] = []  # (comment, choice)
 
@@ -178,6 +179,8 @@ def play(cmds: list[Command]) -> list[Overwrite]:
                 cur.params.append((i, n))
         elif func == "dynparams_set_index":
             index = n  # None: set from a variable, unknown
+        elif func in ("dynparams_append_string", "dynparams_append_number"):
+            cur.text.append(i)
         elif func in ("dynparams_message_line_append_string", "dynparams_message_line_append_number"):
             if n is not None:
                 cur.lines.append((i, n))

@@ -23,6 +23,11 @@ newer one; [Releasing](docs/development.md#releasing) makes a new one.
   the imported files never used. A list too long for its line goes under it, wrapped to
   the terminal's width without cutting a name. A file used several times in one game file
   (`Map0003.lmu`) is no longer named again in "also used at".
+- `rpgsync check --resources` reads a name DynParams builds for a command
+  (`pictures[2].show(f"w{variables.sheet}")`) whole, in that command's folder, numbers
+  from variables as digits: `Picture/w4.png` counts as used, as a name of one letter
+  then a number is no longer too short to tell, and `Picture/wall.png` doesn't. The name
+  of a command whose parameters alone DynParams rewrites is checked like any other.
 
 ## 0.1.1
 

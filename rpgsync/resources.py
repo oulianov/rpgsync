@@ -81,6 +81,8 @@ STRING_VARIABLES = {
 }
 _COMMENTS = (12410, 22410)
 _SEPARATORS = re.compile(r"[\s\"'`,;:()\[\]{}<>=|/\\*?!]+")  # around a name in a comment or setting
+# a part of a name DynParams builds: its text, "quoted" or not (DynRPG takes both)
+_APPEND = re.compile(r"\s*@dynparams_\w*append_string\s+(?:\"((?:[^\"]|\"\")+)\"|(.+))$", re.I)
 # the entries holding files in their own entries (the other fields are not walked: an
 # item's battle animations per actor alone are tens of thousands of entries)
 NESTED = {
@@ -119,10 +121,20 @@ def key(name: str) -> str:
     """A resource name as the engine looks it up: any case, no extension, / between folders.
     Spaces are kept: the engine adds the extension to the name as written ("Theme " is
     Theme .mp3)."""
-    k = unicodedata.normalize("NFC", name).replace("\\", "/").lower().lstrip("/")
+    k = _normal(name).lstrip("/")
     k = k[2:] if k.startswith("./") else k
     root, ext = os.path.splitext(k)
     return root if ext in _EXTENSIONS else k
+
+
+def _normal(name: str) -> str:
+    """A part of a name in any case, / between folders."""
+    return unicodedata.normalize("NFC", name).replace("\\", "/").lower()
+
+
+def _appended(m: re.Match[str]) -> str:
+    """The text of a match of _APPEND."""
+    return m.group(1).replace('""', '"') if m.group(1) is not None else m.group(2)
 
 
 def files(root: str) -> dict[str, dict[str, str]]:
@@ -185,12 +197,16 @@ class Collector:
         # (folder, prefix): names completed at runtime (a variable's number, DynParams) start
         # with these; folder None: any
         self.prefixes: set[tuple[str | None, str]] = set()
+        # (folder, pattern): names DynParams builds for a command, whole: a pattern of keys,
+        # numbers from variables as digits (f"w{variables.sheet}": w, then digits)
+        self.patterns: set[tuple[str, str]] = set()
 
     def merge(self, other: Collector) -> None:
         """Add what another collector gathered (a script checked in another process)."""
         self.refs += other.refs
         self.texts += other.texts
         self.prefixes |= other.prefixes
+        self.patterns |= other.patterns
 
     def _dec(self, raw: bytes | str) -> str:
         return raw if isinstance(raw, str) else bytes(raw).decode(self.encoding, "replace")
@@ -234,21 +250,43 @@ class Collector:
                         self.add(MOVES[m.code][0], m.string, path, line, MOVES[m.code][1], event=True)
                 self.commands(getattr(page, "commands", None) or [], path)
 
+    def _built(self, cmds: list, at: list[int]) -> str:
+        """The pattern of the name the DynParams comments at these positions build."""
+        from .dynparams import _call, _int
+
+        out = ""
+        for i in at:
+            m = _APPEND.match(self._dec(cmds[i].string))
+            if m:
+                out += re.escape(_normal(_appended(m)))
+                continue
+            call = _call(cmds, i)  # @dynparams_append_number: a number, or a variable's
+            n = _int(call[1][0]) if call and call[1] else None
+            out += str(n) if n is not None else r"-?\d+"
+        return out
+
     def commands(self, cmds: list, path: str) -> None:
         from .dynparams import play
 
         rewritten = set()  # commands whose string DynParams replaces
+        built = set()  # comments building the name of a command they are known to rewrite
         if any(c.code == 12410 and c.string[:11].lower() == b"@dynparams_" for c in cmds):
-            rewritten = {o.target for o in play(cmds) if o.target is not None}
+            for o in play(cmds):
+                if o.target is None or not o.text:
+                    continue
+                rewritten.add(o.target)
+                spec = COMMANDS.get(cmds[o.target].code)
+                if spec:
+                    self.patterns.add((spec[0], self._built(cmds, o.text)))
+                    built.update(o.text)
         for i, c in enumerate(cmds):
             if c.code in _COMMENTS:
                 text = self._dec(c.string)
                 self.texts.append(text.lower())
-                # a name DynParams builds: its text, "quoted" or not (DynRPG takes both)
-                m = re.match(r"\s*@dynparams_\w*append_string\s+(?:\"((?:[^\"]|\"\")+)\"|(.+))$", text, re.I)
-                if m:
-                    part = m.group(1).replace('""', '"') if m.group(1) is not None else m.group(2)
-                    self.prefixes.add((None, key(part)))
+                # a name DynParams builds for a command not known: it starts with its text
+                m = _APPEND.match(text)
+                if m and i not in built:
+                    self.prefixes.add((None, key(_appended(m))))
                 continue
             p = list(c.params)
             if c.code == 11330 and len(p) > 4:  # a move route: graphics and sounds of its steps
@@ -444,10 +482,13 @@ def problems(collector: Collector, game_dir: str, engine: str, complete: bool) -
                 words.add(os.path.splitext(w)[0])
         for folder, found in sorted(have.items()):
             prefixes = [p for f, p in collector.prefixes if f in (None, folder) and len(p) > 1]
+            built = [re.compile(p) for f, p in collector.patterns if f == folder]
             unused = []
             for k, rel in sorted(found.items()):
                 if (folder, k) in used or any(k.startswith(p) for p in prefixes):
                     continue
+                if any(b.fullmatch(k) or b.fullmatch(_normal(rel)) for b in built):
+                    continue  # DynParams builds its name
                 name = os.path.basename(k)
                 if name in words or (_SEPARATORS.search(name) and name in texts):
                     continue  # a plugin command or setting names it
