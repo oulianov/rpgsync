@@ -18,6 +18,12 @@ newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
 ## Unreleased
 
+- `rpgsync check --resources` names every file in its warnings, instead of the first 8 and
+  how many more: the files the database's entries use, sorted, with their number, and
+  the imported files never used. A list too long for its line goes under it, wrapped to
+  the terminal's width without cutting a name. A file used several times in one game file
+  (`Map0003.lmu`) is no longer named again in "also used at".
+
 ## 0.1.1
 
 - `rpgsync check`: the pages that one later page keeps from ever being active are

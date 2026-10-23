@@ -158,3 +158,19 @@ def test_check_warns(exported2003):
     assert "Map0001.py:%d: %s" % (at + 2, problem % (at + 3)) in out
     assert "Picture/: 1 imported file never used: spare.png" in out
     assert os.path.basename(str(script)) in out
+
+
+def test_long_lists_name_every_file(capsys):
+    err = cli.UI(err=True)
+    err.console.width = 40
+    names = ["Male Hero A", "Male Hero B", "Female Hero A", "Female Hero B", "Chinese Man A", "Samurai B"] * 2
+    cli._print_list(err, "RPG_RT.ldb", "12 entries use 6 BattleCharSet files that are not imported", names)
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0].endswith("RPG_RT.ldb: 12 entries use 6 BattleCharSet files that are not imported:")
+    assert all(len(line) <= 40 and line.startswith("    ") for line in lines[1:])
+    assert " ".join(line.strip() for line in lines[1:]) == ", ".join(names)  # all of them, none cut in two
+
+
+def test_short_lists_stay_on_their_line(capsys):
+    cli._print_list(cli.UI(err=True), "Picture/", "2 imported files never used", ["a.png", "b.png"])
+    assert capsys.readouterr().err.splitlines()[0].endswith("Picture/: 2 imported files never used: a.png, b.png")

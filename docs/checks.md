@@ -35,7 +35,8 @@ With `--resources`, it also checks the game's resource files (`CharSet/`,
 doesn't have (not imported, and not in the RTP when the game uses one), and
 about the imported files nothing uses. Plugin comments naming a file count as
 a use, and so do names completed when the game runs (a picture's number from a
-variable, DynParams). A missing file gets one warning, at its first use.
+variable, DynParams). A missing file gets one warning, at its first use, and each
+warning names every file it is about.
 
 A large game's scripts compile in several processes, one per CPU; `--jobs N`
 sets how many (`--jobs 1`: one).

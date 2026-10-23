@@ -1125,7 +1125,7 @@ def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, compl
     grouped: dict[tuple[str, str], list] = {}  # (database file, folder) -> its references
     uses: dict[tuple[str, str], list] = {}  # (folder, file) -> the events using it
     for ref in found.missing:
-        if not ref.event:  # the database keeps many (default entries never shown): one line per folder
+        if not ref.event:  # the database keeps many (default entries never shown): one warning per folder
             grouped.setdefault((ref.path, ref.folder), []).append(ref)
         else:  # one line per file, at its first use
             uses.setdefault((ref.folder, resource_key(ref.name)), []).append(ref)
@@ -1133,29 +1133,49 @@ def _check_resources(resources: Collector, proj: Project, ui: UI, err: UI, compl
         ref = refs[0]
         where = "%s:%d" % (ref.path, ref.line) if ref.line else ref.path
         problem = "%s uses %s/%s, which is not imported" % (ref.what, ref.folder, ref.name)
-        where = _here(where)
-        if len(refs) > 1:
-            others = [
-                "%s:%d" % (os.path.basename(r.path), r.line) if r.line else os.path.basename(r.path) for r in refs[1:4]
-            ]
-            more = " and %d more" % (len(refs) - 4) if len(refs) > 4 else ""
-            problem += " (also used at %s%s)" % (", ".join(others), more)
-        err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
+        # its other places, each once: a game file (Map0003.lmu) has no lines
+        others = list(dict.fromkeys(os.path.basename(r.path) + (":%d" % r.line if r.line else "") for r in refs[1:]))
+        others = [o for o in others if o != os.path.basename(where)]
+        if others:
+            more = " and %d more" % (len(others) - 3) if len(others) > 3 else ""
+            problem += " (also used at %s%s)" % (", ".join(others[:3]), more)
+        err.print((_here(where), "cyan"), ": ", (problem, "yellow"), kind="warning")
     for (path, folder), refs in grouped.items():
         where = _here("%s:%d" % (path, refs[0].line) if refs[0].line else path)
-        names = list(dict.fromkeys(r.name for r in refs))
-        shown = ", ".join(names[:8]) + (" and %d more" % (len(names) - 8) if len(names) > 8 else "")
         if len(refs) == 1:
             problem = "%s uses %s/%s, which is not imported" % (refs[0].what, folder, refs[0].name)
-        else:
-            problem = "%d entries use %s files that are not imported: %s" % (len(refs), folder, shown)
-        err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
+            err.print((where, "cyan"), ": ", (problem, "yellow"), kind="warning")
+            continue
+        names = sorted(dict.fromkeys(r.name for r in refs), key=str.casefold)
+        files = "%d %s file%s" % (len(names), folder, "s that are" if len(names) > 1 else " that is")
+        _print_list(err, where, "%d entries use %s not imported" % (len(refs), files), names)
     for folder, names in found.unused.items():
-        problem = "%d imported file%s never used: %s" % (len(names), "s" * (len(names) > 1), ", ".join(names))
-        err.print((folder + "/", "cyan"), ": ", (problem, "yellow"), kind="warning")
+        problem = "%d imported file%s never used" % (len(names), "s" * (len(names) > 1))
+        _print_list(err, folder + "/", problem, names)
     if found.note:
         ui.print(found.note, kind="info")
     return len(uses) + len(grouped) + len(found.unused)
+
+
+def _print_list(err: UI, where: str, problem: str, names: list[str]) -> None:
+    """A warning about files, all of them named: on its line when they fit, else under it,
+    in indented lines as wide as the terminal, a name never cut in two."""
+    listed = ", ".join(names)
+    width = err.console.width
+    if len(err.marker("warning")) + len("%s: %s: %s" % (where, problem, listed)) <= width:
+        err.print((where, "cyan"), ": ", ("%s: %s" % (problem, listed), "yellow"), kind="warning")
+        return
+    err.print((where, "cyan"), ": ", (problem + ":", "yellow"), kind="warning")
+    indent = "    "
+    row = ""
+    for i, name in enumerate(names):
+        item = name + ("," if i < len(names) - 1 else "")
+        if row and len(indent) + len(row) + 1 + len(item) > width:
+            err.print((indent + row, "yellow"))
+            row = item
+        else:
+            row = row + " " + item if row else item
+    err.print((indent + row, "yellow"))
 
 
 def _ty(script_dir: str) -> str | None:
