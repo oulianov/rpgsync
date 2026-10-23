@@ -16,7 +16,7 @@ A game's `Scripts/pyproject.toml` depends on the version that set it up,
 pins the exact one. [Upgrading rpgsync](README.md#upgrading-rpgsync) moves a game to a
 newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
-## Unreleased
+## 0.1.2
 
 - `rpgsync check --resources` names every file in its warnings, instead of the first 8 and
   how many more: the files the database's entries use, sorted, with their number, and
