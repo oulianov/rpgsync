@@ -16,7 +16,7 @@ A game's `Scripts/pyproject.toml` depends on the version that set it up,
 pins the exact one. [Upgrading rpgsync](README.md#upgrading-rpgsync) moves a game to a
 newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
-## 0.1.3
+## 0.2.0
 
 The scripts of Maniac Patch games change: `rpgsync pull` writes them differently.
 
