@@ -983,6 +983,24 @@ def decode(c: Command, ctx: Ctx) -> str | None:
     return maniac.decode_generic(c, ctx)  # any other Maniac command: by name, raw parameters
 
 
+def decode_all(c: Command, ctx: Ctx):
+    """Every named form of a command (the specs that read it), then its Maniac form by name."""
+    from . import maniac
+
+    if c.code == 11060:
+        src = _decode_pan(c)
+        if src is not None:
+            yield src
+    for spec in BY_CODE.get(c.code, []):
+        src = spec.decode(c, ctx)
+        if src is not None:
+            yield src
+    yield from maniac.decode_forms(c, ctx)
+    src = maniac.decode_generic(c, ctx)
+    if src is not None:
+        yield src
+
+
 def encode(call: Call, ctx: Ctx) -> Command | None:
     from . import maniac
     from . import pyexpr as P
@@ -990,7 +1008,9 @@ def encode(call: Call, ctx: Ctx) -> Command | None:
     if isinstance(call.target, P.Sym) and call.target.name == maniac.NAMESPACE:
         # named specs take keyword arguments only: positional numbers are the raw parameters
         spec = NAMESPACED.get((maniac.NAMESPACE, call.name))
-        cmd = spec.encode(call, ctx) if spec and not call.args else maniac.encode_generic(call, ctx)
+        cmd = maniac.encode_form(call, ctx)
+        if cmd is None:
+            cmd = spec.encode(call, ctx) if spec and not call.args else maniac.encode_generic(call, ctx)
         if cmd is None:
             raise CompileError("unknown Maniac command %s.%s()" % (maniac.NAMESPACE, call.name), call.node)
         return cmd

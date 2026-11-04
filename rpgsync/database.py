@@ -21,6 +21,9 @@ database/troop_events.py) and unknown chunks stay byte-for-byte identical.  Like
 tables are indexed by position (id N is element N), so they never get holes:
 an entry missing from a file is reset to an empty slot, new ids past the end
 are appended (gaps are filled with empty slots).
+
+The terms and the system settings are one structure each, not tables: their
+files hold one model (``terms = Terms(...)``, ``system = System(...)``).
 """
 
 from __future__ import annotations
@@ -33,17 +36,21 @@ from collections.abc import Callable
 from functools import cache
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, SkipValidation, ValidationError
 
 from . import db as M
 from .commands import CompileError, Ctx, TableSize, config_src, pystr, size_stmt, split_size, table_length
 from .dbschema import ENUMS, FLAGS, INDEXED, MODEL_STRUCTS, STRUCTS, FieldDef
+from .dbschema import SINGLES as _SINGLE_INFO
 from .dbschema import TABLES as _TABLE_INFO
-from .lcf import ArrayItem, IntVector, LcfError, Struct
+from .lcf import ArrayItem, IntVector, LcfError, Struct, ber
 
 #: Exported tables, in file order.  Tables missing from a database (classes
 #: and battler animations in RPG Maker 2000) are skipped.
 TABLES: list[str] = list(_TABLE_INFO)
+
+#: Single structures exported as one model each (terms, system), in file order.
+SINGLES: list[str] = list(_SINGLE_INFO)
 
 #: Model classes that may appear in database files.
 MODEL_CLASSES: dict[str, type] = {name: getattr(M, name) for name in MODEL_STRUCTS}
@@ -66,10 +73,11 @@ HEADER_NOTE = """\
 TABLE_CLASSES = {
     "variables": ("Variables", "VariableTable"),
     "switches": ("Switches", "SwitchTable"),
+    "strings": ("Strings", "StringTable"),
     "battleranimations": ("BattlerAnimations", "Table"),
 }
 # entries written Model(id, "name") instead of Model(id=..., name=...)
-POSITIONAL = ("Variable", "Switch")
+POSITIONAL = ("Variable", "Switch", "StringVariable")
 
 WIDTH = 120
 
@@ -654,7 +662,9 @@ def identifiers(name: str, names: dict[int, str], keep: dict[int, str] | None = 
     from . import dsl
     from .script import _slug
 
-    base = {"VariableTable": dsl.Variables, "SwitchTable": dsl.Switches}.get(table_class(name)[1], object)
+    base = {"VariableTable": dsl.Variables, "SwitchTable": dsl.Switches, "StringTable": dsl.StringVars}.get(
+        table_class(name)[1], object
+    )
     reserved = set(dir(base)) | set(keyword.kwlist) | {"size", "Config"}
     singular = _snake(table_struct(name))
     out: dict[int, str] = {}
@@ -1023,3 +1033,155 @@ def compile_table_sized(
         entry._ident = ident
         entries.append(entry)
     return entries, size
+
+
+# --------------------------------------------------------------------------
+# Single structures: terms, system
+# --------------------------------------------------------------------------
+#
+# database/terms.py and database/system.py hold one model each.  The sync handles
+# them as one entry per field (FieldValue): a term changed in the editor and
+# another one in the script merge, as two entries of a table do.
+
+SINGLE_NOTE = """\
+# Edit freely: changes are written back to {target} by rpgsync.
+# A field left out has its default value (see {model} in rpgsync.db)."""
+
+
+def single_struct(name: str) -> str:
+    """Model / LCF structure name of a single structure ("terms" -> "Terms")."""
+    return _SINGLE_INFO[name][1]
+
+
+def has_single(db: Struct, name: str) -> bool:
+    return db._chunk(_SINGLE_INFO[name][0]) is not None
+
+
+def single_from_bin(db: Struct, name: str, ctx: Ctx) -> M.DbModel:
+    """The model of a single structure of the database."""
+    return struct_to_model(db.get(name), single_struct(name), ctx)
+
+
+def single_fingerprint(db: Struct, name: str) -> bytes:
+    """The bytes of the exported fields of a single structure: what its file shows
+    (the editor's save counter of System, kept out of it, changes at each save)."""
+    if not has_single(db, name):
+        return b""
+    exported = {f.id for f in _fields(single_struct(name))}
+    out = bytearray()
+    for c in db.get(name).chunks:
+        if c.id in exported:
+            out += ber(c.id) + ber(len(c.raw)) + c.raw
+    return bytes(out)
+
+
+def render_single(name: str, model: M.DbModel, target: str = "RPG_RT.ldb", skip_width: int | None = None) -> str:
+    """The file of a single structure: ``terms = Terms(...)`` with its non-default fields."""
+    sname = single_struct(name)
+    src = "%s = %s" % (name, _fmt(_model_node(model, sname), 0, len(name) + 3, 0))
+    if skip_width is not None and any(len(line) > skip_width for line in src.split("\n")):
+        src += "  # fmt: skip"  # keep the long lists on one line each
+    out = [
+        '"""%s - %s"""' % (_SINGLE_INFO[name][2], target),
+        "",
+        SINGLE_NOTE.format(target=target, model=sname),
+        "from rpgsync.tables import *",
+        "",
+        src,
+    ]
+    return "\n".join(out) + "\n"
+
+
+def export_singles(db: Struct, ctx: Ctx, target: str = "RPG_RT.ldb", skip_width: int | None = None) -> dict[str, str]:
+    """Single structure name -> file text, for every one present in `db`."""
+    return {
+        name: render_single(name, single_from_bin(db, name, ctx), target, skip_width)
+        for name in SINGLES
+        if has_single(db, name)
+    }
+
+
+def compile_single(name: str, text: str, ctx: Ctx, filename: str = "<database>") -> M.DbModel:
+    """Parse the file of a single structure into its (validated) model."""
+    if name not in _SINGLE_INFO:
+        raise CompileError("unknown database structure %r" % name)
+    sname = single_struct(name)
+    try:
+        tree = ast.parse(text, filename)
+    except SyntaxError as e:
+        raise CompileError("syntax error: %s" % e.msg, e) from None
+    found = None
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
+            continue
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            continue
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == name
+        ):
+            if found is not None:
+                raise CompileError("%s is assigned twice (also on line %d)" % (name, found.lineno), stmt)
+            found = stmt
+            continue
+        raise CompileError("this file only holds `%s = %s(...)`" % (name, sname), stmt)
+    if found is None:
+        # an emptied file must not reset every field
+        raise CompileError("missing `%s = %s(...)`" % (name, sname))
+    model = _eval(found.value)
+    if not isinstance(model, MODEL_CLASSES[sname]):
+        raise CompileError("%s must be %s(...)" % (name, sname), found.value)
+    _normalize(model, sname)
+    _check_limits(model, sname, ctx.engine, found)
+    _check_encodable(model, sname, ctx, found)
+    model._lineno = found.lineno
+    model._ident = name
+    return model
+
+
+class FieldValue(BaseModel):
+    """One field of a single structure, as the sync handles entries (merged field by field)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: int  # position of the field in the structure, from 1
+    name: str
+    value: SkipValidation[Any]
+
+    def key(self) -> tuple:
+        return (self.name, M._freeze(_plain(self.value)))
+
+
+def single_fields(name: str) -> list[str]:
+    """The exported fields of a single structure, in order: entry N is field N."""
+    return [f.name for f in _fields(single_struct(name))]
+
+
+def single_entries(name: str, model: M.DbModel) -> list[FieldValue]:
+    """The fields of a single structure's model, one entry each."""
+    return [
+        FieldValue(id=n, name=f.name, value=getattr(model, f.name))
+        for n, f in enumerate(_fields(single_struct(name)), 1)
+    ]
+
+
+def apply_single(db: Struct, name: str, entries: list[FieldValue], ctx: Ctx) -> dict[str, list]:
+    """Patch a single structure of the database to hold the fields of `entries` (a
+    field left out keeps its value).  -> {"changed": [field names]}"""
+    sname = single_struct(name)
+    engine = db_engine(db)
+    st = db.get(name) if has_single(db, name) else new_struct(sname, engine)
+    current = struct_to_model(st, sname, ctx)
+    given = {e.name: e.value for e in entries}
+    fields = _fields(sname)
+    target = MODEL_CLASSES[sname].model_construct(
+        **{f.name: given.get(f.name, getattr(current, f.name)) for f in fields}
+    )
+    changed = [
+        f.name for f in fields if _cmp(f, getattr(current, f.name), ctx) != _cmp(f, getattr(target, f.name), ctx)
+    ]
+    if patch_struct(st, sname, target, ctx, engine) or not has_single(db, name):
+        db.set(name, st)
+    return {"changed": changed} if changed else {}

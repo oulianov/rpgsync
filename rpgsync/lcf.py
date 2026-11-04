@@ -369,6 +369,10 @@ SIZE_FIELDS = {
 
 OPTIONAL_SIZE_FIELDS = {("MoveRoute", 0x0B)}
 
+# Size fields that count the elements of their vector (liblcf Count<...>, e.g. the
+# starting party of System): (structure, size chunk) -> bytes per element
+SIZE_UNITS: dict[tuple[str, int], int] = {}
+
 # Order in which RPG Maker writes the chunks of a freshly created structure.
 CHUNK_ORDER = {name: sorted(fields) for name, fields in SCHEMA.items()}
 
@@ -623,13 +627,14 @@ def _is_container_dirty(value) -> bool:
 
 def write_struct(s: Struct, terminate: bool | None = None) -> bytes:
     payloads = [(c, _chunk_bytes(s, c)) for c in s.chunks]
-    # keep size chunks consistent with their data chunk
+    # keep size chunks consistent with their data chunk: a byte count (RPG_RT stores the
+    # length of event and move commands, terminator included), or a number of elements
     sizes = {}
     for (sname, size_id), data_id in SIZE_FIELDS.items():
         if sname == s.name:
             for c, p in payloads:
                 if c.id == data_id:
-                    sizes[size_id] = _logical_size(s, c, p)
+                    sizes[size_id] = len(p) // SIZE_UNITS.get((sname, size_id), 1)
     out = bytearray()
     for c, p in payloads:
         if c.id in sizes:
@@ -643,14 +648,6 @@ def write_struct(s: Struct, terminate: bool | None = None) -> bytes:
     if s.terminated if terminate is None else terminate:
         out += b"\0"
     return bytes(out)
-
-
-def _logical_size(s: Struct, c: Chunk, payload: bytes) -> int:
-    """The 'size' chunk preceding event commands stores a byte count.
-
-    RPG_RT stores the byte length of the command data (including the 4 byte
-    terminator) for event commands and move commands."""
-    return len(payload)
 
 
 def write_array(items: list[ArrayItem]) -> bytes:
@@ -785,8 +782,9 @@ def _register_db_schema() -> None:
     to SCHEMA / DEFAULTS / SIZE_FIELDS.
 
     Structures already described above (CommonEvent, ...) are left alone;
-    unexported tables (animations, terms, system, ...) stay raw.  The condition
-    of troop pages is added too, for the troop events (it is not a table field)."""
+    unexported tables (animations, chipsets, ...) stay raw.  The single structures
+    (terms, system) are added as structures of the database.  The condition of troop
+    pages is added too, for the troop events (it is not a table field)."""
     from . import dbschema
 
     for sname in [*dbschema.MODEL_STRUCTS, "TroopPageCondition"]:  # (and the map tree's)
@@ -800,6 +798,8 @@ def _register_db_schema() -> None:
             if f.size_of is not None:
                 fields[f.id] = (f.name + "_size", "int")
                 SIZE_FIELDS[(sname, f.id)] = f.size_of
+                if f.size_unit != 1:
+                    SIZE_UNITS[(sname, f.id)] = f.size_unit
                 if not f.persist:
                     OPTIONAL_SIZE_FIELDS.add((sname, f.id))
                 continue
@@ -820,6 +820,9 @@ def _register_db_schema() -> None:
     for table, (cid, sname, _title) in dbschema.TABLES.items():
         if sname in SCHEMA:
             SCHEMA["Database"][cid] = (table, "A:" + sname)
+    for single, (cid, sname, _title) in dbschema.SINGLES.items():
+        if sname in SCHEMA:
+            SCHEMA["Database"][cid] = (single, "S:" + sname)
     CHUNK_ORDER["Database"] = sorted(SCHEMA["Database"])
 
 

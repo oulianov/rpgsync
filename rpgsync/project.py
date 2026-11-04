@@ -189,6 +189,11 @@ class Project:
             ctx.engine = "2k3" if (db._chunk(0x1D) is not None or db._chunk(0x1E) is not None) else "2k"
             for key in ("switches", "variables", "items", "actors", "commonevents"):
                 ctx.names[key] = {it.id: ctx.dec(it.struct.get("name")) for it in db.get(key) if it.struct.get("name")}
+            if db._chunk(db._field("strings")[0]) is not None:  # Maniac Patch string variables
+                ctx.names["strings"] = {
+                    it.id: ctx.dec(it.struct.get("name")) for it in db.get("strings") if it.struct.get("name")
+                }
+            ctx.maniac_layout = self.maniac_layout()
             ctx.choice_sep = self.choice_separator()
             ctx.dynparams = self.has_dynparams()
             self._ctx = ctx
@@ -239,6 +244,8 @@ class Project:
         key = (ctx.engine, ctx.encoding, ctx.choice_sep, sorted((k, sorted(v.items())) for k, v in ctx.handles.items()))
         if ctx.dynparams:  # (left out otherwise: the signatures of existing states stay valid)
             key += ("dynparams",)
+        if ctx.maniac_layout:
+            key += ("maniac_layout",)
         return hashlib.sha1(repr(key).encode("utf-8")).hexdigest()
 
     def table_script(self, table: str) -> str:
@@ -248,7 +255,10 @@ class Project:
         from .database import identifiers, read_identifiers
 
         out = {}
-        for table in ("variables", "switches"):
+        tables = ["variables", "switches"]
+        if os.path.exists(self.table_script("strings")) or "strings" in ctx.names:
+            tables.append("strings")  # Maniac Patch: the string variables, when the game has them
+        for table in tables:
             text = self._script_text(self.table_script(table), scriptfiles.table_style(table))
             keep = read_identifiers(text) if text is not None else {}
             # entries of the file count too: a new variable is usable before it reaches the game
@@ -309,6 +319,17 @@ class Project:
             cfg["choice_separator"] = detect_choice_sep(self.map_paths().values())
             self._store_config(cfg)
         return cfg["choice_separator"]
+
+    def maniac_layout(self) -> bool:
+        """Are most commands stored the way the Maniac Patch editor writes them?
+        Detected once per game, then kept in .rpgsync/config.json."""
+        cfg = self._load_config()
+        if "maniac_layout" not in cfg:
+            from .layout import detect_maniac_layout
+
+            cfg["maniac_layout"] = detect_maniac_layout(self.map_paths().values(), self.ldb_path)
+            self._store_config(cfg)
+        return bool(cfg["maniac_layout"])
 
     def map_names(self) -> dict[int, str]:
         """Map id -> name in the map tree (not the root: the game's title)."""

@@ -176,37 +176,80 @@ with `@`.
 
 ## Maniac Patch
 
-New event commands (codes 3001-3038), and extensions of standard commands.
+New event commands (codes 3001-3038), extensions of standard commands, string
+variables, and new database fields.
 
-- **In scripts:** every Maniac command is `maniac.name(...)`. Commands with a
-  known layout take named arguments; values take any of Maniac's forms: a
-  number, `variables[n]`, `variables[variables[n]]` or `switches[n]`:
+- **Values** take any of Maniac's forms where the patch reads one: a number,
+  `variables[n]`, `variables[variables[n]]` or `switches[n]`. Variables hold any
+  32-bit number (`variables[1] = 2147483647`).
+- **Maniac commands** are `maniac.name(...)`, with named arguments:
 
   ```python
   maniac.get_mouse_position(x=variables.mouse_x, y=variables.mouse_y)
   maniac.save(slot=variables.slot, result=variables.saved)
-  maniac.rewrite_map(tile=91, x=variables[3], y=variables[4], width=1, height=1, layer="upper")
+  maniac.show_string_picture(picture=1, x=160, y=120, text="Hello \\v[1]", system="System2")
+  maniac.console_print(strings.log, expand=True)
+  maniac.set_media_option("show_fps", 1)
+  maniac.get_game_info("map_size", into=variables.width)
+  maniac.script("v[1] = 123;", "t[2] = 'a';", results=[variables[1], strings[2]])
   ```
 
-- **Named arguments:** saves and loads, mouse, key input, picture info and
-  pixels, picture ids, map tiles, global save, game options, variable arrays,
-  message hooks, zoom, battle commands (22 commands).
-- **Raw parameters** (positional numbers) for the others:
-  `control_strings`, `show_string_picture`, `get_game_info`,
-  `control_self_variable`, `script`, `console`, `call_command`, ...:
+  Saves, mouse, keys, pictures (string pictures, info, pixels, ids, output), map
+  tiles, global save, game options, variable arrays, message hooks, zoom, battle,
+  console, media options, scripts (one call holding every line), game info.
+- **String variables** (Control Strings) are Python statements on `strings`,
+  named in `database/strings.py` like the variables:
 
   ```python
-  maniac.control_strings(0, 1, 0, 0, 7, 0, 0, text="no zoom")
+  strings.name = "Alex"
+  strings[2] = str(variables.gold).rjust(6, "0")
+  strings[3] = db_name("item", variables.item)
+  variables.n = len(strings.name)
+  variables.at = strings[1].find("sit")
+  if strings.answer == "yes":
+      ...
   ```
 
-  A named command also falls back to raw parameters when its values don't fit
-  its named form (a selector rpgsync doesn't know).
+- **Standard commands** take Maniac's options as Python:
+
+  ```python
+  variables.x = variables.a * 2              # Control Variables: one operation, functions
+  variables.d = sqrt(variables.n, 10)         # sqrt, sin, cos, atan2, min, max, abs, lerp...
+  variables.hp = party[0].hp                  # party members, game.date, game.frames...
+  for variables.i in range(1, 11):            # Loop: count, count up / down, while
+      continue                                # Break Loop: next turn
+  while variables.hp > 0:
+      wait(frames=1)                          # Wait in frames, or by variable
+  common_events[variables.ce]()               # Call Event by variable
+  events[variables.target].erase()            # Erase Event of another event, restore()
+  play_bgm(strings.music, volume=variables.v) # names from string variables
+  face(strings.face, variables.index)
+  message_options(width=320, height=96, font="Arial")
+  pan_screen_to(160, 120, frames=60, wait=True)
+  call_system_function("load")                # Call System Functions
+  disable_system_functions(save=True)         # Control System Functions
+  ```
+
+- **Layouts:** the Maniac Patch's editor stores some standard commands with other
+  parameters for the same meaning (a Control Variables of one variable has 0 as
+  its last id, a loop or a Break Loop has zero parameters more). rpgsync detects
+  the layout most of a game uses (kept in `.rpgsync/config.json`) and writes the
+  same Python either way; a command stored the other way says so at the end of
+  its line: `variables[1] = 5  # layout: rpg_maker`.
+- **Raw parameters** (positional numbers) where the layout is unknown or a value
+  doesn't fit the named form: `maniac.control_self_variable(...)` (its layout is
+  only guessed), `call_command`, `add_move_route`, a string picture whose text
+  comes from a string variable, more than 4 choices, Conditional Branch with an
+  expression or ignoring case...: `maniac.control_strings(0, 1, 0, 0, 7, 0, 0, text="no zoom")`.
 - **Unknown codes** are `maniac.command_NNNN(...)`.
-- **Extensions of standard commands** (Control Variables with Maniac operands,
-  pictures with Maniac options, loops with conditions, Call Event by variable)
-  are raw `cmd("ControlVars", ...)` lines.
+- **Database:** `database/strings.py` (string variables), `database/terms.py` and
+  `database/system.py` hold Maniac's fields (title and save scene hooks, message
+  window font and layout...); common events run on `"battle_start"` and
+  `"battle_parallel"`.
 - **Self variables** (negative ids) are written `variables[-1]`.
-- **`check`:** needs `"maniac"` in `patches`.
+- **`check`:** needs `"maniac"` in `patches`; without it, Maniac options of
+  standard commands are reported as warnings. With it, `database/game_types.py`
+  lets variables stand where the patch reads them (`randint(1, variables.max)`).
 
 ## EasyRPG commands
 

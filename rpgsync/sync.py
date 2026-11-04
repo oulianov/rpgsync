@@ -82,6 +82,7 @@ class Unit:
     kind: str
 
     split_style: F.Style | None = None  # how the script is split in files when too big (None: never)
+    what: str | None = None  # what its entries are called in messages (None: from its kind)
 
     def __init__(self, project: Project):
         self.project = project
@@ -135,6 +136,10 @@ class Unit:
     def fingerprint(self, data: bytes | None) -> str:
         """Hash of the part of the game file this unit covers."""
         return sha(data)
+
+    def label(self, eid: int) -> str:
+        """An entry as messages name it: its id."""
+        return str(eid)
 
     def bin_changed(self, data: bytes | None, st: dict | None) -> bool:
         """Did the part of the game file this unit covers change since the last sync (`st`)?"""
@@ -631,6 +636,67 @@ class DatabaseUnit(Unit):
         return f.to_bytes(), summary
 
 
+class SingleUnit(Unit):
+    """The terms or the system settings (one structure of RPG_RT.ldb) <->
+    Scripts/database/terms.py / system.py, one model each.  Its entries are the
+    fields (database.FieldValue): a field changed in the editor and another one in
+    the script merge."""
+
+    kind = "database"
+    what = "field"
+
+    def __init__(self, project: Project, table: str):
+        super().__init__(project)
+        self.table = table
+        self.name = "database/" + table
+        self.bin_path = project.ldb_path
+        self.py_path = project.table_script(table)
+
+    def decompile(self, data):
+        from . import database
+        from .fmt import line_length
+
+        root = LcfFile.parse(data).root
+        model = database.single_from_bin(root, self.table, self.project.context())
+        return self.formatted(
+            database.render_single(self.table, model, skip_width=line_length(self.project.script_dir))
+        )
+
+    def compile(self, text):
+        from . import database
+
+        model = database.compile_single(self.table, text, self.project.context(), self.py_path)
+        return database.single_entries(self.table, model)
+
+    def specs_from_bin(self, data):
+        from . import database
+
+        root = LcfFile.parse(data).root
+        return database.single_entries(self.table, database.single_from_bin(root, self.table, self.project.context()))
+
+    def fingerprint(self, data):
+        from . import database
+
+        if data is None:
+            return "missing"
+        return sha(database.single_fingerprint(LcfFile.parse(data).root, self.table))
+
+    def existing_ids(self, data):
+        return []  # its entries are its fields: none is ever added
+
+    def label(self, eid):
+        from . import database
+
+        return database.single_fields(self.table)[eid - 1]  # entry N is the N-th field
+
+    def apply(self, data, specs):
+        from . import database
+
+        f = LcfFile.parse(data)
+        summary = database.apply_single(f.root, self.table, specs, self.project.context())
+        return f.to_bytes(), summary
+
+
 class MapTreeUnit(Unit):
     """The map tree (RPG_RT.lmt) <-> Scripts/database/map_tree.py: the maps and areas,
     their properties and order, and where a new game starts.  Adding a map creates
@@ -936,7 +1002,8 @@ class Syncer:
         self.keep_history = keep_history
         self.history_dir = os.path.join(project.state_dir, "history")
         self._failed: dict[str, str] = {}  # unit -> py hash that failed to compile
-        self._tables: tuple[tuple | None, list[str]] = (None, [])  # RPG_RT.ldb stat -> its tables
+        # RPG_RT.ldb stat -> its tables and single structures (terms, system)
+        self._tables: tuple[tuple | None, list[str]] = (None, [])
 
     def units(self) -> list[Unit]:
         from . import database
@@ -952,8 +1019,12 @@ class Syncer:
                 stat = self._tables[0]
             if root is not None or db is None:
                 tables = [t for t in database.TABLES if root is not None and database.has_table(root, t)]
+                tables += [t for t in database.SINGLES if root is not None and database.has_single(root, t)]
                 self._tables = (stat, tables)
-        out += [DatabaseUnit(self.project, t) for t in self._tables[1]]
+        out += [
+            SingleUnit(self.project, t) if t in database.SINGLES else DatabaseUnit(self.project, t)
+            for t in self._tables[1]
+        ]
         if "troops" in self._tables[1]:  # after troops.py: a troop it adds can get battle events in the same pass
             out.append(TroopEventsUnit(self.project))
         if os.path.exists(self.project.lmt_path):  # before the maps: the maps it adds are synced next pass
@@ -1111,7 +1182,9 @@ class Syncer:
             return Result(unit=unit.name, action="error", message=str(e))
 
     def _sync(self, unit: Unit, prefer: str | None, force: bool = False) -> Result:
-        what = {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(unit.kind, "entry")
+        what = unit.what or {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(
+            unit.kind, "entry"
+        )
         data = read_bytes(unit.bin_path)
         if data is None:
             if unit.kind == "map" and not unit.has_script():
@@ -1252,7 +1325,7 @@ class Syncer:
             if conflicts:
                 msg += "; CONFLICT on %s %s: kept the editor version, your script version is in %s" % (
                     what,
-                    ", ".join(map(str, conflicts)),
+                    ", ".join(map(unit.label, conflicts)),
                     os.path.basename(cpath),
                 )
                 return Result(unit=unit.name, action="conflict", message=msg)

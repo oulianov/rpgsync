@@ -39,6 +39,8 @@ __all__ = [
     "ItemTrajectory",
     "ItemType",
     "Learning",
+    "ManiacSaveSceneHookFlags",
+    "ManiacTitleSceneHookFlags",
     "MapInfo",
     "MapInfoBGMType",
     "MapInfoMusicType",
@@ -56,11 +58,22 @@ __all__ = [
     "StateChangeType",
     "StatePersistence",
     "StateRestriction",
+    "StringVariable",
     "Switch",
+    "System",
+    "SystemBattleCondition",
+    "SystemBattleFormation",
+    "SystemEquipmentSetting",
+    "SystemFadeIn",
+    "SystemFadeOut",
+    "SystemFont",
+    "SystemStretch",
+    "Terms",
     "Terrain",
     "TerrainBGAssociation",
     "TerrainBushDepth",
     "TerrainFlags",
+    "TestBattler",
     "TreeMapMapType",
     "Troop",
     "TroopMember",
@@ -144,6 +157,59 @@ TerrainBushDepth = Literal["normal", "third", "half", "full"]
 TerrainBGAssociation = Literal["background", "frame"]
 BattlerAnimationPoseAnimType = Literal["character", "battle"]
 BattlerAnimationSpeed = Literal["slow", "medium", "fast"]
+SystemFadeOut = Literal[
+    "default",
+    "fade_out",
+    "remove_blocks",
+    "wipe_downward",
+    "wipe_upward",
+    "venetian_blinds",
+    "vertical_blinds",
+    "horizontal_blinds",
+    "receding_square",
+    "expanding_square",
+    "screen_moves_up",
+    "screen_moves_down",
+    "screen_moves_left",
+    "screen_moves_right",
+    "vertical_div",
+    "horizontal_div",
+    "quadrasection",
+    "zoom_in",
+    "mosaic",
+    "waver_screen",
+    "instantaneous",
+    "none",
+]
+SystemFadeIn = Literal[
+    "default",
+    "fade_in",
+    "reconstitute_blocks",
+    "unwipe_downward",
+    "unwipe_upward",
+    "venetian_blinds",
+    "vertical_blinds",
+    "horizontal_blinds",
+    "receding_square",
+    "expanding_square",
+    "screen_moves_down",
+    "screen_moves_up",
+    "screen_moves_right",
+    "screen_moves_left",
+    "vertical_unify",
+    "horizontal_unify",
+    "unify_quadrants",
+    "zoom_out",
+    "mosaic",
+    "waver_screen",
+    "instantaneous",
+    "none",
+]
+SystemStretch = Literal["stretch", "tiled", "easyrpg_none"]
+SystemFont = Literal["gothic", "mincho"]
+SystemBattleFormation = Literal["terrain", "loose", "tight"]
+SystemBattleCondition = Literal["none", "initiative", "back", "surround", "pincers"]
+SystemEquipmentSetting = Literal["actor", "class"]
 TreeMapMapType = Literal["root", "map", "area"]
 MapInfoMusicType = Literal["parent", "event", "specific"]
 MapInfoBGMType = Literal["parent", "terrain", "specific"]
@@ -156,6 +222,28 @@ class TerrainFlags(DbModel):
     back_enemies: bool = Field(default=False, description="Back enemies. RPG Maker 2003 only.")
     lateral_party: bool = Field(default=False, description="Lateral party. RPG Maker 2003 only.")
     lateral_enemies: bool = Field(default=False, description="Lateral enemies. RPG Maker 2003 only.")
+
+
+class ManiacTitleSceneHookFlags(DbModel):
+    """Bit flags ManiacTitleSceneHook."""
+    initialize: bool = Field(default=False, description="Initialize.")
+    create_picture: bool = Field(default=False, description="Create picture.")
+    begin_scene: bool = Field(default=False, description="Begin scene.")
+    end_scene: bool = Field(default=False, description="End scene.")
+    every_frame: bool = Field(default=False, description="Every frame.")
+    selection_changed: bool = Field(default=False, description="Selection changed.")
+    new_game: bool = Field(default=False, description="New game.")
+
+
+class ManiacSaveSceneHookFlags(DbModel):
+    """Bit flags ManiacSaveSceneHook."""
+    initialize: bool = Field(default=False, description="Initialize.")
+    create_picture: bool = Field(default=False, description="Create picture.")
+    begin_scene: bool = Field(default=False, description="Begin scene.")
+    end_scene: bool = Field(default=False, description="End scene.")
+    every_frame: bool = Field(default=False, description="Every frame.")
+    selection_changed: bool = Field(default=False, description="Selection changed.")
+    new_game: bool = Field(default=False, description="New game.")
 
 
 class Parameters(DbModel):
@@ -462,7 +550,10 @@ class Skill(DbModel):
     )
     failure_message: int = Field(
         default=0,
-        description="Message shown when the skill fails. RPG Maker 2000 only.",
+        description=(
+            "Message shown when the skill fails (0-3); the Maniac Patch's Hit Rate Calc box "
+            "stores 3: the skill hits like a physical attack. RPG Maker 2000 only."
+        ),
     )
     type: SkillType | int = Field(
         default="normal",
@@ -1260,6 +1351,287 @@ class Variable(DbModel):
     name: str = Field(default="", description="Name shown in the editor.")
 
 
+class StringVariable(DbModel):
+    """A string variable name (Maniac Patch)."""
+
+    id: int | None = Field(
+        default=None,
+        description=(
+            "Database id: entry N is the N-th slot of the table (RPG_RT looks entries up by "
+            "position)."
+        ),
+    )
+    name: str = Field(default="", description="Name shown in the editor.")
+
+
+class Terms(DbModel):
+    """The texts of the game: battle messages, menus, stats... (Database > Vocabulary).
+
+    A field left out keeps its default (an empty text: the engine's own)."""
+
+    encounter: str = Field(default="", description="Encounter.")
+    special_combat: str = Field(default="", description="Special combat.")
+    escape_success: str = Field(default="", description="Escape success.")
+    escape_failure: str = Field(default="", description="Escape failure.")
+    victory: str = Field(default="", description="Victory.")
+    defeat: str = Field(default="", description="Defeat.")
+    exp_received: str = Field(default="", description="Exp received.")
+    gold_recieved_a: str = Field(default="", description="Gold recieved a.")
+    gold_recieved_b: str = Field(default="", description="Gold recieved b.")
+    item_recieved: str = Field(default="", description="Item recieved.")
+    attacking: str = Field(default="", description="Attacking.")
+    enemy_critical: str = Field(default="", description="Enemy critical.")
+    actor_critical: str = Field(default="", description="Actor critical.")
+    defending: str = Field(default="", description="Defending.")
+    observing: str = Field(default="", description="Observing.")
+    focus: str = Field(default="", description="Focus.")
+    autodestruction: str = Field(default="", description="Autodestruction.")
+    enemy_escape: str = Field(default="", description="Enemy escape.")
+    enemy_transform: str = Field(default="", description="Enemy transform.")
+    enemy_damaged: str = Field(default="", description="Enemy damaged.")
+    enemy_undamaged: str = Field(default="", description="Enemy undamaged.")
+    actor_damaged: str = Field(default="", description="Actor damaged.")
+    actor_undamaged: str = Field(default="", description="Actor undamaged.")
+    skill_failure_a: str = Field(default="", description="Skill failure a.")
+    skill_failure_b: str = Field(default="", description="Skill failure b.")
+    skill_failure_c: str = Field(default="", description="Skill failure c.")
+    dodge: str = Field(default="", description="Dodge.")
+    use_item: str = Field(default="", description="Use item.")
+    hp_recovery: str = Field(default="", description="Hp recovery.")
+    parameter_increase: str = Field(default="", description="Parameter increase.")
+    parameter_decrease: str = Field(default="", description="Parameter decrease.")
+    enemy_hp_absorbed: str = Field(default="", description="Enemy hp absorbed.")
+    actor_hp_absorbed: str = Field(default="", description="Actor hp absorbed.")
+    resistance_increase: str = Field(default="", description="Resistance increase.")
+    resistance_decrease: str = Field(default="", description="Resistance decrease.")
+    level_up: str = Field(default="", description="Level up.")
+    skill_learned: str = Field(default="", description="Skill learned.")
+    battle_start: str = Field(default="", description="Battle start. RPG Maker 2003 only.")
+    miss: str = Field(default="", description="Miss. RPG Maker 2003 only.")
+    shop_greeting1: str = Field(default="", description="Shop greeting1.")
+    shop_regreeting1: str = Field(default="", description="Shop regreeting1.")
+    shop_buy1: str = Field(default="", description="Shop buy1.")
+    shop_sell1: str = Field(default="", description="Shop sell1.")
+    shop_leave1: str = Field(default="", description="Shop leave1.")
+    shop_buy_select1: str = Field(default="", description="Shop buy select1.")
+    shop_buy_number1: str = Field(default="", description="Shop buy number1.")
+    shop_purchased1: str = Field(default="", description="Shop purchased1.")
+    shop_sell_select1: str = Field(default="", description="Shop sell select1.")
+    shop_sell_number1: str = Field(default="", description="Shop sell number1.")
+    shop_sold1: str = Field(default="", description="Shop sold1.")
+    shop_greeting2: str = Field(default="", description="Shop greeting2.")
+    shop_regreeting2: str = Field(default="", description="Shop regreeting2.")
+    shop_buy2: str = Field(default="", description="Shop buy2.")
+    shop_sell2: str = Field(default="", description="Shop sell2.")
+    shop_leave2: str = Field(default="", description="Shop leave2.")
+    shop_buy_select2: str = Field(default="", description="Shop buy select2.")
+    shop_buy_number2: str = Field(default="", description="Shop buy number2.")
+    shop_purchased2: str = Field(default="", description="Shop purchased2.")
+    shop_sell_select2: str = Field(default="", description="Shop sell select2.")
+    shop_sell_number2: str = Field(default="", description="Shop sell number2.")
+    shop_sold2: str = Field(default="", description="Shop sold2.")
+    shop_greeting3: str = Field(default="", description="Shop greeting3.")
+    shop_regreeting3: str = Field(default="", description="Shop regreeting3.")
+    shop_buy3: str = Field(default="", description="Shop buy3.")
+    shop_sell3: str = Field(default="", description="Shop sell3.")
+    shop_leave3: str = Field(default="", description="Shop leave3.")
+    shop_buy_select3: str = Field(default="", description="Shop buy select3.")
+    shop_buy_number3: str = Field(default="", description="Shop buy number3.")
+    shop_purchased3: str = Field(default="", description="Shop purchased3.")
+    shop_sell_select3: str = Field(default="", description="Shop sell select3.")
+    shop_sell_number3: str = Field(default="", description="Shop sell number3.")
+    shop_sold3: str = Field(default="", description="Shop sold3.")
+    inn_a_greeting_1: str = Field(default="", description="Inn a greeting 1.")
+    inn_a_greeting_2: str = Field(default="", description="Inn a greeting 2.")
+    inn_a_greeting_3: str = Field(default="", description="Inn a greeting 3.")
+    inn_a_accept: str = Field(default="", description="Inn a accept.")
+    inn_a_cancel: str = Field(default="", description="Inn a cancel.")
+    inn_b_greeting_1: str = Field(default="", description="Inn b greeting 1.")
+    inn_b_greeting_2: str = Field(default="", description="Inn b greeting 2.")
+    inn_b_greeting_3: str = Field(default="", description="Inn b greeting 3.")
+    inn_b_accept: str = Field(default="", description="Inn b accept.")
+    inn_b_cancel: str = Field(default="", description="Inn b cancel.")
+    possessed_items: str = Field(default="", description="Possessed items.")
+    equipped_items: str = Field(default="", description="Equipped items.")
+    gold: str = Field(default="", description="Gold.")
+    battle_fight: str = Field(default="", description="Battle fight.")
+    battle_auto: str = Field(default="", description="Battle auto.")
+    battle_escape: str = Field(default="", description="Battle escape.")
+    command_attack: str = Field(default="", description="Command attack.")
+    command_defend: str = Field(default="", description="Command defend.")
+    command_item: str = Field(default="", description="Command item.")
+    command_skill: str = Field(default="", description="Command skill.")
+    menu_equipment: str = Field(default="", description="Menu equipment.")
+    menu_save: str = Field(default="", description="Menu save.")
+    menu_quit: str = Field(default="", description="Menu quit.")
+    new_game: str = Field(default="", description="New game.")
+    load_game: str = Field(default="", description="Load game.")
+    exit_game: str = Field(default="", description="Exit game.")
+    status: str = Field(default="", description="Status. RPG Maker 2003 only.")
+    row: str = Field(default="", description="Row. RPG Maker 2003 only.")
+    order: str = Field(default="", description="Order. RPG Maker 2003 only.")
+    wait_on: str = Field(default="", description="Wait on. RPG Maker 2003 only.")
+    wait_off: str = Field(default="", description="Wait off. RPG Maker 2003 only.")
+    level: str = Field(default="", description="Level.")
+    health_points: str = Field(default="", description="Health points.")
+    spirit_points: str = Field(default="", description="Spirit points.")
+    normal_status: str = Field(default="", description="Normal status.")
+    exp_short: str = Field(default="", description="char x 2?.")
+    lvl_short: str = Field(default="", description="char x 2?.")
+    hp_short: str = Field(default="", description="char x 2?.")
+    sp_short: str = Field(default="", description="char x 2?.")
+    sp_cost: str = Field(default="", description="Sp cost.")
+    attack: str = Field(default="", description="Attack.")
+    defense: str = Field(default="", description="Defense.")
+    spirit: str = Field(default="", description="Spirit.")
+    agility: str = Field(default="", description="Agility.")
+    weapon: str = Field(default="", description="Weapon.")
+    shield: str = Field(default="", description="Shield.")
+    armor: str = Field(default="", description="Armor.")
+    helmet: str = Field(default="", description="Helmet.")
+    accessory: str = Field(default="", description="Accessory.")
+    save_game_message: str = Field(default="", description="Save game message.")
+    load_game_message: str = Field(default="", description="Load game message.")
+    file: str = Field(default="", description="File.")
+    exit_game_message: str = Field(default="", description="Exit game message.")
+    yes: str = Field(default="", description="Yes.")
+    no: str = Field(default="", description="No.")
+    maniac_item_received_a: str = Field(
+        default="",
+        description=(
+            "Part 1 of item received message (item_received is part 2). Maniac Patch extension."
+        ),
+    )
+    maniac_level_up_a: str = Field(
+        default="",
+        description="Part 1 of level up message. Maniac Patch extension.",
+    )
+    maniac_level_up_b: str = Field(
+        default="",
+        description="Part 3 of level up message (level_up is part 2). Maniac Patch extension.",
+    )
+    maniac_level_up_c: str = Field(
+        default="",
+        description="Part 4 of level up message. Maniac Patch extension.",
+    )
+    maniac_exp_received_a: str = Field(
+        default="",
+        description="Part 1 of exp message (exp_received is part 2). Maniac Patch extension.",
+    )
+    maniac_skill_learned_a: str = Field(
+        default="",
+        description=(
+            "Part 1 of skill learning message (skill_learned is part 2). Maniac Patch extension."
+        ),
+    )
+    easyrpg_item_number_separator: str = Field(
+        default="default_term",
+        description="Item number separator. EasyRPG Player extension.",
+    )
+    easyrpg_skill_cost_separator: str = Field(
+        default="default_term",
+        description="Skill cost separator. EasyRPG Player extension.",
+    )
+    easyrpg_equipment_arrow: str = Field(
+        default="default_term",
+        description="Equipment window arrow. EasyRPG Player extension.",
+    )
+    easyrpg_status_scene_name: str = Field(
+        default="default_term",
+        description="Status scene Name. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_status_scene_class: str = Field(
+        default="default_term",
+        description="Status scene Class. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_status_scene_title: str = Field(
+        default="default_term",
+        description="Status scene Title. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_status_scene_condition: str = Field(
+        default="default_term",
+        description="Status scene Condition. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_status_scene_front: str = Field(
+        default="default_term",
+        description="Status scene Front. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_status_scene_back: str = Field(
+        default="default_term",
+        description="Status scene Back. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_order_scene_confirm: str = Field(
+        default="default_term",
+        description="Order scene Confirm. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_order_scene_redo: str = Field(
+        default="default_term",
+        description="Order scene Redo. RPG Maker 2003 only. EasyRPG Player extension.",
+    )
+    easyrpg_battle2k3_double_attack: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle monster Double attack notification. RPG Maker 2003 only. "
+            "EasyRPG Player extension."
+        ),
+    )
+    easyrpg_battle2k3_defend: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle monster Defend notification. RPG Maker 2003 only. EasyRPG "
+            "Player extension."
+        ),
+    )
+    easyrpg_battle2k3_observe: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle monster Observe notification. RPG Maker 2003 only. EasyRPG "
+            "Player extension."
+        ),
+    )
+    easyrpg_battle2k3_charge: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle monster Charge notification. RPG Maker 2003 only. EasyRPG "
+            "Player extension."
+        ),
+    )
+    easyrpg_battle2k3_selfdestruct: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle monster Self-Destruct notification. RPG Maker 2003 only. "
+            "EasyRPG Player extension."
+        ),
+    )
+    easyrpg_battle2k3_escape: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle monster Escape notification. RPG Maker 2003 only. EasyRPG "
+            "Player extension."
+        ),
+    )
+    easyrpg_battle2k3_special_combat_back: str = Field(
+        default="",
+        description=(
+            "Message for back and pincer attack. RPG Maker 2003 only. EasyRPG Player extension."
+        ),
+    )
+    easyrpg_battle2k3_skill: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle general skill start notification. RPG Maker 2003 only. EasyRPG "
+            "Player extension."
+        ),
+    )
+    easyrpg_battle2k3_item: str = Field(
+        default="default_term",
+        description=(
+            "RPG Maker 2003 battle general item start notification. RPG Maker 2003 only. EasyRPG "
+            "Player extension."
+        ),
+    )
+
+
 class Music(DbModel):
     """A music track."""
 
@@ -1268,6 +1640,401 @@ class Music(DbModel):
     volume: int = Field(default=100, description="Volume in percent.")
     tempo: int = Field(default=100, description="Tempo in percent.")
     balance: int = Field(default=50, description="Balance (0 = left, 50 = center, 100 = right).")
+
+
+class TestBattler(DbModel):
+    """An actor of the editor's test battle."""
+
+    id: int | None = Field(
+        default=None,
+        description="Element id; leave it out to use the position in the list (1-based).",
+    )
+    actor_id: int = Field(default=1, description="Actor (actor id).")
+    level: int = Field(default=1, description="Level.")
+    weapon_id: int = Field(default=0, description="Weapon (item id).")
+    shield_id: int = Field(default=0, description="Shield (item id).")
+    armor_id: int = Field(default=0, description="Armor (item id).")
+    helmet_id: int = Field(default=0, description="Helmet (item id).")
+    accessory_id: int = Field(default=0, description="Accessory (item id).")
+
+
+class System(DbModel):
+    """Game settings: title and system graphics, music and sounds, starting party, transitions, test battle
+    (Database > System)."""
+
+    ldb_id: int = Field(default=0, description="Ldb id.")
+    boat_name: str = Field(default="", description="CharSet of the boat.")
+    ship_name: str = Field(default="", description="CharSet of the ship.")
+    airship_name: str = Field(default="", description="CharSet of the airship.")
+    boat_index: int = Field(default=0, description="Sprite index (0-7) of the boat.")
+    ship_index: int = Field(default=0, description="Sprite index (0-7) of the ship.")
+    airship_index: int = Field(default=0, description="Sprite index (0-7) of the airship.")
+    title_name: str = Field(default="", description="Title screen picture (Title/).")
+    gameover_name: str = Field(default="", description="Game over picture (GameOver/).")
+    system_name: str = Field(default="", description="System graphic (System/).")
+    system2_name: str = Field(
+        default="",
+        description="Battle system graphic (System2/). RPG Maker 2003 only.",
+    )
+    party: list[int] = Field(default_factory=lambda: [1], description="Starting party: actor ids.")
+    menu_commands: list[int] = Field(
+        default_factory=lambda: [1],
+        description=(
+            "Main menu commands, in order (Maniac Patch: -9 hides Game End). RPG Maker 2003 only."
+        ),
+    )
+    title_music: Music = Field(default_factory=Music, description="Title music.")
+    battle_music: Music = Field(default_factory=Music, description="Battle music.")
+    battle_end_music: Music = Field(default_factory=Music, description="Battle end music.")
+    inn_music: Music = Field(default_factory=Music, description="Inn music.")
+    boat_music: Music = Field(default_factory=Music, description="Boat music.")
+    ship_music: Music = Field(default_factory=Music, description="Ship music.")
+    airship_music: Music = Field(default_factory=Music, description="Airship music.")
+    gameover_music: Music = Field(default_factory=Music, description="Gameover music.")
+    cursor_se: Sound = Field(default_factory=Sound, description="Cursor se.")
+    decision_se: Sound = Field(default_factory=Sound, description="Decision se.")
+    cancel_se: Sound = Field(default_factory=Sound, description="Cancel se.")
+    buzzer_se: Sound = Field(default_factory=Sound, description="Buzzer se.")
+    battle_se: Sound = Field(default_factory=Sound, description="Battle se.")
+    escape_se: Sound = Field(default_factory=Sound, description="Escape se.")
+    enemy_attack_se: Sound = Field(default_factory=Sound, description="Enemy attack se.")
+    enemy_damaged_se: Sound = Field(default_factory=Sound, description="Enemy damaged se.")
+    actor_damaged_se: Sound = Field(default_factory=Sound, description="Actor damaged se.")
+    dodge_se: Sound = Field(default_factory=Sound, description="Dodge se.")
+    enemy_death_se: Sound = Field(default_factory=Sound, description="Enemy death se.")
+    item_se: Sound = Field(default_factory=Sound, description="Item se.")
+    transition_out: SystemFadeOut | int = Field(
+        default="default",
+        description=(
+            "Transition out (one of 'default', 'fade_out', 'remove_blocks', 'wipe_downward', "
+            "'wipe_upward', 'venetian_blinds', 'vertical_blinds', 'horizontal_blinds', "
+            "'receding_square', 'expanding_square', 'screen_moves_up', 'screen_moves_down', "
+            "'screen_moves_left', 'screen_moves_right', 'vertical_div', 'horizontal_div', "
+            "'quadrasection', 'zoom_in', 'mosaic', 'waver_screen', 'instantaneous', 'none' or a "
+            "number)."
+        ),
+    )
+    transition_in: SystemFadeIn | int = Field(
+        default="default",
+        description=(
+            "Transition in (one of 'default', 'fade_in', 'reconstitute_blocks', "
+            "'unwipe_downward', 'unwipe_upward', 'venetian_blinds', 'vertical_blinds', "
+            "'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_down', "
+            "'screen_moves_up', 'screen_moves_right', 'screen_moves_left', 'vertical_unify', "
+            "'horizontal_unify', 'unify_quadrants', 'zoom_out', 'mosaic', 'waver_screen', "
+            "'instantaneous', 'none' or a number)."
+        ),
+    )
+    battle_start_fadeout: SystemFadeOut | int = Field(
+        default="default",
+        description=(
+            "Battle start fadeout (one of 'default', 'fade_out', 'remove_blocks', "
+            "'wipe_downward', 'wipe_upward', 'venetian_blinds', 'vertical_blinds', "
+            "'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_up', "
+            "'screen_moves_down', 'screen_moves_left', 'screen_moves_right', 'vertical_div', "
+            "'horizontal_div', 'quadrasection', 'zoom_in', 'mosaic', 'waver_screen', "
+            "'instantaneous', 'none' or a number)."
+        ),
+    )
+    battle_start_fadein: SystemFadeIn | int = Field(
+        default="default",
+        description=(
+            "Battle start fadein (one of 'default', 'fade_in', 'reconstitute_blocks', "
+            "'unwipe_downward', 'unwipe_upward', 'venetian_blinds', 'vertical_blinds', "
+            "'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_down', "
+            "'screen_moves_up', 'screen_moves_right', 'screen_moves_left', 'vertical_unify', "
+            "'horizontal_unify', 'unify_quadrants', 'zoom_out', 'mosaic', 'waver_screen', "
+            "'instantaneous', 'none' or a number)."
+        ),
+    )
+    battle_end_fadeout: SystemFadeOut | int = Field(
+        default="default",
+        description=(
+            "Battle end fadeout (one of 'default', 'fade_out', 'remove_blocks', 'wipe_downward', "
+            "'wipe_upward', 'venetian_blinds', 'vertical_blinds', 'horizontal_blinds', "
+            "'receding_square', 'expanding_square', 'screen_moves_up', 'screen_moves_down', "
+            "'screen_moves_left', 'screen_moves_right', 'vertical_div', 'horizontal_div', "
+            "'quadrasection', 'zoom_in', 'mosaic', 'waver_screen', 'instantaneous', 'none' or a "
+            "number)."
+        ),
+    )
+    battle_end_fadein: SystemFadeIn | int = Field(
+        default="default",
+        description=(
+            "Battle end fadein (one of 'default', 'fade_in', 'reconstitute_blocks', "
+            "'unwipe_downward', 'unwipe_upward', 'venetian_blinds', 'vertical_blinds', "
+            "'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_down', "
+            "'screen_moves_up', 'screen_moves_right', 'screen_moves_left', 'vertical_unify', "
+            "'horizontal_unify', 'unify_quadrants', 'zoom_out', 'mosaic', 'waver_screen', "
+            "'instantaneous', 'none' or a number)."
+        ),
+    )
+    message_stretch: SystemStretch | int = Field(
+        default="stretch",
+        description=(
+            "Window background: stretched or tiled (one of 'stretch', 'tiled', 'easyrpg_none' or "
+            "a number)."
+        ),
+    )
+    font_id: SystemFont | int = Field(
+        default="gothic",
+        description="Font (one of 'gothic', 'mincho' or a number).",
+    )
+    selected_condition: int = Field(default=0, description="Selected condition.")
+    selected_hero: int = Field(default=0, description="Selected hero (actor id).")
+    battletest_background: str = Field(default="", description="Test battle background.")
+    battletest_data: list[TestBattler] = Field(
+        default_factory=list,
+        description="Actors of the test battle.",
+    )
+    battletest_terrain: int = Field(default=0, description="Test battle terrain (terrain id).")
+    battletest_formation: SystemBattleFormation | int = Field(
+        default="terrain",
+        description="Test battle formation (one of 'terrain', 'loose', 'tight' or a number).",
+    )
+    battletest_condition: SystemBattleCondition | int = Field(
+        default="none",
+        description=(
+            "Test battle condition (one of 'none', 'initiative', 'back', 'surround', 'pincers' or "
+            "a number)."
+        ),
+    )
+    equipment_setting: SystemEquipmentSetting | int = Field(
+        default="actor",
+        description=(
+            "Integer RPG2003 - Whether equipment usage is by Actor or by Class. This is a global "
+            "setting in RM2k3! (one of 'actor', 'class' or a number). RPG Maker 2003 only."
+        ),
+    )
+    battletest_alt_terrain: int = Field(
+        default=-1,
+        description=(
+            "Integer RPG2003 (EDITOR ONLY) - Double click on Terrain in Troops changes this "
+            "setting and 0x54. Affects only the RM2k3 editor (terrain id). RPG Maker 2003 only."
+        ),
+    )
+    show_frame: bool = Field(
+        default=False,
+        description="Draw the frame picture. RPG Maker 2003 only.",
+    )
+    frame_name: str = Field(
+        default="",
+        description="Frame picture (Frame/) drawn over the screen. RPG Maker 2003 only.",
+    )
+    invert_animations: bool = Field(
+        default=False,
+        description="Invert animations. RPG Maker 2003 only.",
+    )
+    show_title: bool = Field(
+        default=True,
+        description=(
+            "When false the title is skipped and the game starts directly. In TestPlay mode skips "
+            "directly to the Load scene. Added in RPG Maker 2003 v1.11. RPG Maker 2003 only."
+        ),
+    )
+    maniac_title_scene_common_event_id: int = Field(
+        default=0,
+        description=(
+            "Common event called by the title scene (0: none; common event id). Maniac Patch "
+            "extension."
+        ),
+    )
+    maniac_title_scene_variable_id: int = Field(
+        default=0,
+        description=(
+            "Variable (start of range) the title scene writes its state to before calling the "
+            "common event (variable id). Maniac Patch extension."
+        ),
+    )
+    maniac_title_scene_hook_flags: ManiacTitleSceneHookFlags = Field(
+        default_factory=ManiacTitleSceneHookFlags,
+        description="When the title scene calls the common event. Maniac Patch extension.",
+    )
+    maniac_save_scene_common_event_id: int = Field(
+        default=0,
+        description=(
+            "Common event called by the save/load scene (0: none; common event id). Maniac Patch "
+            "extension."
+        ),
+    )
+    maniac_save_scene_variable_id: int = Field(
+        default=0,
+        description=(
+            "Variable (start of range) the save/load scene writes its state to before calling the "
+            "common event (variable id). Maniac Patch extension."
+        ),
+    )
+    maniac_save_scene_hook_flags: ManiacSaveSceneHookFlags = Field(
+        default_factory=ManiacSaveSceneHookFlags,
+        description="When the save/load scene calls the common event. Maniac Patch extension.",
+    )
+    maniac_message_font_name: str = Field(
+        default="",
+        description="Font of the message window (empty: the system font). Maniac Patch extension.",
+    )
+    maniac_message_font_size: int = Field(
+        default=12,
+        description="Font size of the message window. Maniac Patch extension.",
+    )
+    maniac_message_window_width: int = Field(
+        default=320,
+        description="Width of the message window in pixels (<= 0: 320). Maniac Patch extension.",
+    )
+    maniac_message_window_height: int = Field(
+        default=80,
+        description=(
+            "Height of the message window in pixels (<= 0: computed from the text position and "
+            "the line height). Maniac Patch extension."
+        ),
+    )
+    maniac_message_spacing_char: int = Field(
+        default=0,
+        description=(
+            "Additional spacing between characters in the message window. Maniac Patch extension."
+        ),
+    )
+    maniac_message_spacing_line: int = Field(
+        default=4,
+        description=(
+            "Additional spacing between lines in the message window (line height: font size + "
+            "this). Maniac Patch extension."
+        ),
+    )
+    maniac_message_face_x: int = Field(
+        default=16,
+        description="X position of the face graphic in the message window. Maniac Patch extension.",
+    )
+    maniac_message_face_y: int = Field(
+        default=16,
+        description="Y position of the face graphic in the message window. Maniac Patch extension.",
+    )
+    maniac_message_text_x: int = Field(
+        default=8,
+        description="X position of the text without a face graphic. Maniac Patch extension.",
+    )
+    maniac_message_text_y: int = Field(
+        default=10,
+        description="Y position of the text without a face graphic. Maniac Patch extension.",
+    )
+    maniac_message_text_face_x: int = Field(
+        default=80,
+        description=(
+            "X position of the text with a face graphic (< 0: face width + 2 * face x). Maniac "
+            "Patch extension."
+        ),
+    )
+    maniac_message_text_face_y: int = Field(
+        default=10,
+        description="Y position of the text with a face graphic. Maniac Patch extension.",
+    )
+    maniac_message_face_width: int = Field(
+        default=48,
+        description="Width of the face graphic in pixels. Maniac Patch extension.",
+    )
+    maniac_message_face_height: int = Field(
+        default=48,
+        description="Height of the face graphic in pixels. Maniac Patch extension.",
+    )
+    easyrpg_alternative_exp: int = Field(
+        default=0,
+        description="Which EXP formula to use: 0=Default 1=2k 2=2k3. EasyRPG Player extension.",
+    )
+    easyrpg_battle_options: list[int] = Field(
+        default_factory=lambda: [0, 1, 2],
+        description=(
+            "Available battle options where 0=Battle 1=AutoBattle 2=Escape 3=Win 4=Lose. EasyRPG "
+            "Player extension."
+        ),
+    )
+    easyrpg_max_actor_hp: int = Field(
+        default=-1,
+        description="Absolute maximum HP value actors can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_enemy_hp: int = Field(
+        default=-1,
+        description="Absolute maximum HP value enemies can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_damage: int = Field(
+        default=-1,
+        description="How much damage can an attack inflict at most. EasyRPG Player extension.",
+    )
+    easyrpg_max_exp: int = Field(
+        default=-1,
+        description="Absolute maximum EXP value actors can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_level: int = Field(
+        default=-1,
+        description="Absolute maximum level actors can reach. EasyRPG Player extension.",
+    )
+    easyrpg_max_savefiles: int = Field(
+        default=15,
+        description=(
+            "How many savegame slots should be shown in the savegame scene. EasyRPG Player "
+            "extension."
+        ),
+    )
+    easyrpg_max_item_count: int = Field(
+        default=-1,
+        description=(
+            "How many items of a kind the player can carry. Can be overridden per item with the "
+            "easyrpg_max_count setting of an item. EasyRPG Player extension."
+        ),
+    )
+    easyrpg_variable_min_value: int = Field(
+        default=0,
+        description="Minimum value a variable can have. EasyRPG Player extension.",
+    )
+    easyrpg_variable_max_value: int = Field(
+        default=0,
+        description="Maximum value a variable can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_actor_sp: int = Field(
+        default=-1,
+        description="Absolute maximum SP value actors can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_enemy_sp: int = Field(
+        default=-1,
+        description="Absolute maximum SP value enemies can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_stat_base_value: int = Field(
+        default=-1,
+        description="Absolute maximum value a base stat can have. EasyRPG Player extension.",
+    )
+    easyrpg_max_stat_battle_value: int = Field(
+        default=-1,
+        description="Absolute maximum value a battle stat can have. EasyRPG Player extension.",
+    )
+    easyrpg_use_rpg2k_battle_system: bool = Field(
+        default=False,
+        description=(
+            "If the RPG Maker 2000 battle system should be used in RPG Maker 2003 games. RPG "
+            "Maker 2003 only. EasyRPG Player extension."
+        ),
+    )
+    easyrpg_battle_use_rpg2ke_strings: bool = Field(
+        default=False,
+        description=(
+            "If RPG Maker 2000 battles in RPG Maker 2003 games should use the RPG2kE strings. RPG "
+            "Maker 2003 only. EasyRPG Player extension."
+        ),
+    )
+    easyrpg_use_rpg2k_battle_commands: bool = Field(
+        default=False,
+        description=(
+            "If the RPG Maker 2000 battle commands should be used in RPG Maker 2003 games. RPG "
+            "Maker 2003 only. EasyRPG Player extension."
+        ),
+    )
+    easyrpg_default_actorai: int = Field(
+        default=-1,
+        description=(
+            "System default actor AI with 0=RPG_RT 1=RPG_RT+ 2=ATTACK. EasyRPG Player extension."
+        ),
+    )
+    easyrpg_default_enemyai: int = Field(
+        default=-1,
+        description="System default enemy AI with 0=RPG_RT 1=RPG_RT+. EasyRPG Player extension.",
+    )
 
 
 class Encounter(DbModel):

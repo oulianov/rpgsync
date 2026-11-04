@@ -214,7 +214,7 @@ def test_game_edit_regenerates_only_that_troop(exported2003):
     assert r.action == "export" and not calls  # only troop 89 was regenerated
     text = open(unit.py_path, encoding="utf-8").read()
     assert text == whole(read_bytes(unit.bin_path))
-    assert 'def page_1():\n            cmd("Wait", 7)\n' in text
+    assert "def page_1():\n            wait(0.7, key=None)\n" in text
 
 
 def test_conflict_keeps_the_game_version(exported2003):

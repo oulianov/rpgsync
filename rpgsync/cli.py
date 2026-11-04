@@ -429,7 +429,14 @@ def _run(syncer: CliSyncer, units, prefer: str | None, initial: bool = False, fo
 
 Part = tuple[str, str]  # (text, rich style)
 
-PLURAL = {"event": "events", "common event": "common events", "troop": "troops", "map": "maps", "entry": "entries"}
+PLURAL = {
+    "event": "events",
+    "common event": "common events",
+    "troop": "troops",
+    "map": "maps",
+    "entry": "entries",
+    "field": "fields",
+}
 
 
 def _ids(ids: list[int], limit: int = 8) -> str:
@@ -460,7 +467,9 @@ def _entry_diff(old: list, new: list, what: str) -> list[Part]:
         ("removed", sorted(i for i in a.keys() - b.keys() if i > 0), "red"),
     ):
         if ids:
-            parts.append(("%s %s %s" % (PLURAL[what] if len(ids) > 1 else what, _ids(ids), label), style))
+            named = [getattr(b.get(i) or a.get(i), "name", None) for i in ids] if what == "field" else []
+            shown = ", ".join(named) if named and all(named) else _ids(ids)  # terms/system: the field names
+            parts.append(("%s %s %s" % (PLURAL[what] if len(ids) > 1 else what, shown, label), style))
     if isinstance(pa, TreeOrder) and isinstance(pb, TreeOrder):
         both = set(pa.order) & set(pb.order)  # maps added or removed are listed above
         if [m for m in pa.order if m in both] != [m for m in pb.order if m in both]:
@@ -536,7 +545,9 @@ def _status(syncer: Syncer, units: list[Unit]) -> dict[str, list[StatusLine]]:
         data = data_of[u.bin_path]
         if data is None:
             continue
-        what = {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(u.kind, "entry")
+        what = u.what or {"map": "event", "common": "common event", "troop": "troop", "maptree": "map"}.get(
+            u.kind, "entry"
+        )
         py_name = u.script_label(project.script_dir)
         bin_name = os.path.relpath(u.bin_path, project.game_dir)
         if u.kind == "database":

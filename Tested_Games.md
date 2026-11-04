@@ -41,8 +41,8 @@ never dropped.
 |---|---|---|---|---|---|---|---|
 | [TestGame-2000](https://github.com/EasyRPG/TestGame) | 2000 | none | 80 | identical | 154 problems (deliberately invalid values) | 174 passed, 7 failed | 126 / 169k |
 | [TestGame-2003](https://github.com/EasyRPG/TestGame) | 2003 | DynRPG | 20 | identical | ✅ | 67 passed | 34 / 18k |
-| [TestGame-EasyRPG](https://github.com/EasyRPG/TestGame) | 2003 | Maniac, EasyRPG | 10 | identical | 4 problems (DynRPG used without the patch) | 46 passed, 1 failed | 866 / 21k |
-| [TestGame-Maniac](https://github.com/EasyRPG/TestGame) | 2003 | Maniac | 46 | identical | 2 problems (Maniac values out of range) | 118 passed, 1 failed | 1,723 / 35k |
+| [TestGame-EasyRPG](https://github.com/EasyRPG/TestGame) | 2003 | Maniac, EasyRPG | 10 | identical | ✅ (3 warnings: DynRPG used without the patch) | 80 passed | 320 / 17k |
+| [TestGame-Maniac](https://github.com/EasyRPG/TestGame) | 2003 | Maniac | 46 | identical | ✅ | 224 passed | 334 / 34k |
 | [TestGame-PowerMode2003](https://github.com/EasyRPG/TestGame) | 2003 | Power Mode 2003 | 1 | identical | ✅ | 29 passed | 213 / 12k |
 | [AA City](https://e-magination.jeun.fr/t4629-aa-city?highlight=aa+city) (alpha 0.3.3) | 2003 | Power Mode 2003 | 4 | identical | ✅ | 35 passed | 0 / 88k |
 | [Les Secrets de Hertepay](https://e-magination.jeun.fr/t5002-concours-automne-2019-les-secrets-de-hertepay-qui-a-supprime-frq) | 2003 | DynRPG | 24 | identical | ✅ | 75 passed | 0 / 27k |
@@ -58,12 +58,13 @@ Raw lines are counted against all the script lines of the game.
 - **The TestGame suites** ([EasyRPG/TestGame](https://github.com/EasyRPG/TestGame))
   test the engine, edge cases included: TestGame-2000 uses out-of-range values
   and RPG Maker 2003 parameters on purpose, which `check` reports.
-- **Raw lines** in the TestGames are mostly commands stored with an unusual
-  parameter layout (a missing trailing parameter, an unused field set) and
-  EasyRPG's own commands: rpgsync only writes Python that compiles back to the
-  very same bytes. Maniac Patch commands are written `maniac.name(...)` (about
-  1,500 of them in the two Maniac TestGames), with named arguments where their
-  layout is known.
+- **Raw lines** (`cmd(...)`, and Maniac commands with positional parameters) in
+  the TestGames are mostly commands stored with an unusual parameter layout (a
+  missing trailing parameter, an unused field set), EasyRPG's own commands, and
+  Maniac commands whose layout is only guessed (`control_self_variable`, 176 of
+  TestGame-Maniac's 334): rpgsync only writes Python that compiles back to the
+  very same bytes. The other Maniac commands and options are typed Python
+  (before: 1,723 raw lines in TestGame-Maniac, 866 in TestGame-EasyRPG).
 - **The official English RPG Maker 2003** (Steam, `ultimate_rt_eb.dll`):
   A Tale of Yu and Final Chronicle.
 - **Patches** are detected from the game: `DynPlugins/`, and the `[Patch]`

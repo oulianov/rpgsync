@@ -42,7 +42,7 @@ Conventions:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Literal, Never, Protocol, TypeVar, overload
 
@@ -106,9 +106,11 @@ pose inside it."""
 FaceIndex = Literal[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 """Which of the 16 faces (48x48) of a FaceSet image, counted left to right,
 top to bottom: 0-3 on the first row ... 12-15 on the last."""
-CommonEventTrigger = Literal["call", "autorun", "parallel"]
+CommonEventTrigger = Literal["call", "autorun", "parallel", "battle_start", "battle_parallel"]
 """When a common event runs: only when called, automatically (blocking), or
-in parallel; autorun/parallel common events need their condition switch ON."""
+in parallel; autorun/parallel common events need their condition switch ON.
+Maniac Patch: ``"battle_start"`` runs once when a battle starts (before the
+turn 0 battle events), ``"battle_parallel"`` in parallel during battles."""
 MessagePosition = Literal["top", "middle", "bottom"]
 Vehicle = Literal["boat", "ship", "airship"]
 CancelOption = Literal[1, 2, 3, 4]
@@ -342,6 +344,27 @@ class Value:
     def __ge__(self, other: int | Value) -> Condition: ...
     def __neg__(self) -> Value: ...
     def __pos__(self) -> Value: ...
+    # Maniac Patch: Control Variables computes with values (``variables.x = variables.a * 2 + 1``)
+    def __add__(self, other: int | Value) -> Value: ...
+    def __radd__(self, other: int) -> Value: ...
+    def __sub__(self, other: int | Value) -> Value: ...
+    def __rsub__(self, other: int) -> Value: ...
+    def __mul__(self, other: int | Value) -> Value: ...
+    def __rmul__(self, other: int) -> Value: ...
+    def __floordiv__(self, other: int | Value) -> Value: ...
+    def __rfloordiv__(self, other: int) -> Value: ...
+    def __mod__(self, other: int | Value) -> Value: ...
+    def __rmod__(self, other: int) -> Value: ...
+    def __pow__(self, other: int | Value) -> Value: ...
+    def __or__(self, other: int | Value) -> Value: ...
+    def __and__(self, other: int | Value) -> Value: ...
+    def __xor__(self, other: int | Value) -> Value: ...
+    def __lshift__(self, other: int | Value) -> Value: ...
+    def __rshift__(self, other: int | Value) -> Value: ...
+    def __abs__(self) -> Value: ...
+    def __index__(self) -> int:
+        """Maniac Patch loops: ``for _ in range(variables.n):``."""
+        return 0
 
 
 Number = int | Value
@@ -349,10 +372,10 @@ Number = int | Value
 
 if TYPE_CHECKING:
     # written by rpgsync into each game's Scripts/database: Variable when the game
-    # runs the DynParams plugin, else Never
-    from database.game_types import Dynamic  # type: ignore
+    # runs the DynParams plugin, else Never; Value when it uses the Maniac Patch
+    from database.game_types import Dynamic, Maniac  # type: ignore
 else:
-    Dynamic = Never
+    Dynamic = Maniac = Never
 
 Fixed = int | Dynamic
 """A number that RPG Maker keeps as such in the command.  In a game that runs the
@@ -372,7 +395,8 @@ class Variable(Value):
 
     Assign with ``=``, change with ``+= -= *= //= %=`` (``%`` is the
     remainder: 1953 % 100 = 53).  Values range from -9999999 to 9999999 in
-    RPG Maker 2003 (-999999 to 999999 in 2000)."""
+    RPG Maker 2003 (-999999 to 999999 in 2000), any 32-bit number
+    (-2147483648 to 2147483647) with the Maniac Patch."""
 
     def __iadd__(self, value: Number) -> Variable: ...
     def __isub__(self, value: Number) -> Variable: ...
@@ -441,6 +465,57 @@ class Switches:
     def __setitem__(self, key: int | Variable | slice, value: bool) -> None: ...
 
 
+class StringVar(str):
+    """One string variable of the Maniac Patch, ``strings[id]`` (``T[id]`` in
+    Maniac's own syntax).  Assign a text with ``=``, append with ``+=``."""
+
+    def __iadd__(self, text: Text) -> StringVar: ...
+    def rjust(self, width: Number, fillchar: str = " ") -> StringVar:  # type: ignore[override]
+        """Padded on the left to ``width`` characters (``strings[1] = strings[2].rjust(8)``)."""
+        return self
+
+    def replace(self, old: Text, new: Text) -> StringVar:  # type: ignore[override]
+        """``strings[2] = strings[1].replace("a", "b")``."""
+        return self
+
+    def find(self, text: Text, start: Number = 0) -> Value:  # type: ignore[override]
+        """``variables.at = strings[1].find("sit")``: position of a text, -1 if absent."""
+        return Value()
+
+    def split(self, separator: Text, into: StringVar = ...) -> Value:  # type: ignore[override]
+        """``variables.n = strings[1].split(", ", into=strings[10])``: the parts go into
+        strings[10], strings[11]...; the variable gets how many."""
+        return Value()
+
+    def pop_line(self) -> StringVar:
+        """``strings[2] = strings[1].pop_line()``: the first line, removed from strings[1]."""
+        return self
+
+    def to_file(self, name: Text, encoding: Literal["ansi", "utf8"] = "ansi") -> None:
+        """Write the text into a file of the game folder."""
+
+
+class StringRange:
+    """``strings[first:last+1]``: several string variables at once."""
+
+
+class StringVars:
+    """The string variables of the Maniac Patch: ``strings[5]``, ``strings[1:11]``
+    (1 to 10), ``strings[variables[3]]`` (the string whose id is in variable 3).
+    They are named in database/strings.py: ``strings.player_name``."""
+
+    @overload
+    def __getitem__(self, key: int | Variable) -> StringVar: ...
+    @overload
+    def __getitem__(self, key: slice) -> StringRange: ...
+    def __getitem__(self, key): ...
+    def __setitem__(self, key: int | Variable | slice, value: Text) -> None: ...
+
+
+Text = str | StringVar
+"""A text: a literal ``"..."`` or a string variable ``strings[id]`` (Maniac Patch)."""
+
+
 class Item:
     """``items[id]``: an item of the database.  ``items[3].count += 2`` gives
     two, ``if items[3] in party:`` tests possession.  The inventory is sorted
@@ -480,6 +555,12 @@ class Actor:
     armor: Value
     helmet: Value
     accessory: Value
+    id: Value
+    """Maniac Patch: the hero's database id (``party[0].id``)."""
+    atb: Value
+    """Maniac Patch: the ATB gauge (0-300000)."""
+    next_exp: Value
+    """Maniac Patch: experience needed for the next level."""
     can_act: Condition
     """In ``battle_condition(...)``: the hero can act this turn."""
 
@@ -644,6 +725,8 @@ def move(code: int) -> MoveStep:
 class Character:
     """A character on the map: ``this``, ``player``, ``events[id]``, vehicles."""
 
+    id: Value
+    """Maniac Patch: the event's id."""
     map_id: Value
     x: Value
     y: Value
@@ -685,6 +768,13 @@ class Character:
     def call(self, page: Number) -> None:
         """Call Event: run one page of this map event and wait for it."""
 
+    def erase(self) -> None:
+        """Maniac Patch: Erase Event of another map event (``events[3].erase()``,
+        ``events[variables.id].erase()``)."""
+
+    def restore(self) -> None:
+        """Maniac Patch: bring an erased map event back."""
+
     def flash(
         self,
         red: Fixed | None = None,
@@ -706,8 +796,12 @@ class Character:
 
 
 class ThisEvent(Character):
-    def erase(self) -> None:
-        """Erase Event: remove this event until the player re-enters the map."""
+    def erase(self, this_id: bool = False) -> None:
+        """Erase Event: remove this event until the player re-enters the map.
+        ``this_id=True``: the Maniac Patch's form naming the event 10005 (this event)."""
+
+    def restore(self, this_id: bool = False) -> None:
+        """Maniac Patch: bring this erased event back."""
 
 
 class PlayerCharacter(Character):
@@ -727,12 +821,14 @@ class Events:
 
 
 class CommonEvent:
-    def __call__(self) -> None:
-        """Call this common event and wait for it to end."""
+    def __call__(self, page: int = 0) -> None:
+        """Call this common event and wait for it to end.  ``common_events[variables.n]()``
+        (Maniac Patch) calls the one whose id is in a variable; ``page`` keeps the unused
+        page number the Maniac editor may store with it."""
 
 
 class CommonEvents:
-    def __getitem__(self, key: Fixed) -> CommonEvent: ...
+    def __getitem__(self, key: Fixed | Maniac) -> CommonEvent: ...
 
 
 class CommonEventTable(CommonEvents):
@@ -773,6 +869,10 @@ class Enemy:
     defense: Value
     spirit: Value
     agility: Value
+    id: Value
+    """Maniac Patch: the enemy's database id."""
+    atb: Value
+    """Maniac Patch: the ATB gauge (0-300000)."""
     can_act: Condition
     """In ``battle_condition(...)``: the enemy can act."""
     targeted: Condition
@@ -899,6 +999,10 @@ class Party:
     def __contains__(self, member: Item | Actor) -> bool:
         """``items[3] in party`` (holds the item) / ``actors[2] in party``."""
 
+    def __getitem__(self, index: int | Variable) -> Actor:
+        """Maniac Patch: ``party[0]``, the first member (``variables.hp = party[0].hp``)."""
+        return Actor()
+
 
 class Timer:
     """``timer1`` / ``timer2`` (2003): a countdown shown on screen."""
@@ -940,6 +1044,14 @@ class GameState:
     """Assign to allow/forbid saving from the menu."""
     allow_menu: bool
     """Assign to allow/forbid opening the main menu."""
+    date: Value
+    """Maniac Patch: today's date, YYMMDD."""
+    time: Value
+    """Maniac Patch: the time of day, HHMMSS."""
+    frames: Value
+    """Maniac Patch: frames since the game started."""
+    maniac_version: Value
+    """Maniac Patch: the patch's version."""
 
 
 class DynToken:
@@ -1133,6 +1245,18 @@ class DynRPG:
 ManiacValue = int | Value | Switch
 """A Maniac value: a number, ``variables[n]``, ``variables[variables[n]]`` or
 ``switches[n]`` (1 when ON)."""
+MediaOption = Literal[
+    "screen_mode",
+    "window_zoom",
+    "window_interpolation",
+    "keep_size",
+    "fullscreen_interpolation",
+    "uneven_pixels",
+    "ignore_aspect_ratio",
+    "show_fps",
+    "save_as_default",
+    "volume",
+]
 
 
 class ManiacPatch:
@@ -1198,8 +1322,54 @@ class ManiacPatch:
     ) -> None:
         """Move the mouse (x and y share how they are given). (3006)"""
 
-    def show_string_picture(self, *params: int, extra: Extra = (), text: str = "") -> None:
-        """Show a picture made of text (raw parameters; text is \\x01TEXT\\x01SYSTEM\\x01FONT). (3007)"""
+    def show_string_picture(
+        self,
+        *params: int,
+        picture: ManiacValue = 0,
+        x: ManiacValue = 0,
+        y: ManiacValue = 0,
+        text: str = "",
+        system: str = "",
+        font: str = "",
+        origin: int = 0,
+        magnify: ManiacValue = 100,
+        transparency: ManiacValue = 0,
+        red: int = 100,
+        green: int = 100,
+        blue: int = 100,
+        saturation: int = 100,
+        effect: Literal["none", "rotation", "wave", "fixed_angle"] = "none",
+        effect_power: int = 0,
+        blend: Literal["normal", "multiply", "additive", "overlay"] = "normal",
+        flip_x: bool = False,
+        flip_y: bool = False,
+        scroll_with_map: bool = False,
+        stretch: Literal["none", "stretch", "tile"] = "stretch",
+        no_frame: bool = False,
+        no_gradient: bool = False,
+        no_shadow: bool = False,
+        bold: bool = False,
+        no_margin: bool = False,
+        transparent_color: bool = True,
+        letter_spacing: int = 0,
+        line_spacing: int = 4,
+        map_layer: int = 7,
+        battle_layer: int = 0,
+        erase_on_map_change: bool = True,
+        erase_on_battle_end: bool = False,
+        affected_by_tint: bool = False,
+        affected_by_flash: bool = True,
+        affected_by_shake: bool = True,
+        width: ManiacValue = 0,
+        height: ManiacValue = 0,
+        font_size: ManiacValue = 12,
+        angle_divisor: int = 0,
+        extra: Extra = (),
+    ) -> None:
+        """Show a picture made of a text in a window: the system graphic and font
+        ("": the game's), the window size (0: fits the text), its look and the picture's
+        settings.  x and y share how they are given, so do width and height.  A text
+        or name read from a string variable keeps the raw form. (3007)"""
 
     def get_picture_info(
         self,
@@ -1374,8 +1544,23 @@ class ManiacPatch:
     def control_strings(self, *params: int, extra: Extra = (), text: str = "") -> None:
         """String variables: assign, append, convert, search, split... (raw parameters). (3020)"""
 
-    def get_game_info(self, *params: int, extra: Extra = (), text: str = "") -> None:
-        """Map, screen, tile, interpreter, face, BGM information into variables (raw parameters). (3021)"""
+    def get_game_info(
+        self,
+        *params: int | Literal["map_size", "window_size", "tileset", "camera", "screen_shake", "bgm", "tiles"],
+        into: Variable = ...,
+        name: StringVar = ...,
+        layer: Literal["lower", "upper"] = "lower",
+        x: int | Value = 0,
+        y: int | Value = 0,
+        width: int | Value = 0,
+        height: int | Value = 0,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Game information into variables from ``into``: "map_size" (width, height),
+        "window_size", "tileset" (its id), "camera" (x, y), "screen_shake", "bgm" (its name
+        into strings ``name``), "tiles" (the tile ids of an area of a layer).  The screen
+        pixels, interpreter state, faces and sprites keep the raw parameters. (3021)"""
 
     def edit_picture(
         self,
@@ -1397,16 +1582,17 @@ class ManiacPatch:
         self,
         *params: int,
         name_from: Literal["text", "string", "string_ref"] = "text",
-        target: Literal["screen", "picture"] = "screen",
-        picture: ManiacValue = 0,
-        name_string: Fixed = 0,
+        target: Literal["screen", "picture"] | None = "screen",
+        picture: ManiacValue | None = 0,
+        name_string: Fixed | None = 0,
         dynamic: bool = False,
         opaque: bool = False,
         filename: str = "",
         extra: Extra = (),
         text: str = "",
     ) -> None:
-        """Save the screen or a picture as an image file. (3026)"""
+        """Save the screen or a picture as an image file (None: a parameter the command
+        doesn't store). (3026)"""
 
     def add_move_route(self, *params: int, extra: Extra = (), text: str = "") -> None:
         """Maniac command (3027)"""
@@ -1450,8 +1636,17 @@ class ManiacPatch:
     ) -> None:
         """Call a common event on message events: on_marker (the \\e text marker), on_open, on_close, on_char. (3029)"""
 
-    def script(self, *params: int, extra: Extra = (), text: str = "") -> None:
-        """Run a Maniac script (raw parameters; text is the first line). (3030)"""
+    def script(
+        self,
+        *lines: str | StringVar | int,
+        results: Sequence[Switch | Variable | StringVar] = (),
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:  # noqa: B006
+        """Run a Maniac script (JavaScript-like): its code, one string per line, or
+        strings[id]; results: the switches, variables and string variables it writes
+        back.  ``maniac.script("v[1] = 123;", results=[variables[1]])`` (3030, a 3031
+        command per further line)."""
 
     def script_line(self, *params: int, extra: Extra = (), text: str = "") -> None:
         """A following script line. (3031)"""
@@ -1471,13 +1666,38 @@ class ManiacPatch:
         """Zoom the screen around x, y. (3032)"""
 
     def console(self, *params: int, extra: Extra = (), text: str = "") -> None:
-        """Text console (raw parameters). (3033)"""
+        """Text console (raw parameters; see console_open, console_print...). (3033)"""
+
+    def console_open(self) -> None:
+        """Open the text console window (3033)."""
+
+    def console_close(self) -> None:
+        """Close the text console window (3033)."""
+
+    def console_print(self, text: Text, /, expand: bool = False, hex: bool = False, no_newline: bool = False) -> None:
+        """Print a text, strings[id] or strings[variables[id]] in the console; expand
+        replaces \\v[n] & co, hex prints numbers in hexadecimal. (3033)"""
+
+    def console_input(
+        self, into: StringVar, /, max_length: int | Value = 0, expand: bool = False, hex: bool = False
+    ) -> None:
+        """Read a line typed in the console into strings[id] (or strings[variables[id]]). (3033)"""
+
+    def console_color(self, foreground: int | Value = ..., background: int | Value = ...) -> None:
+        """Console text colors (1 blue, 2 green, 4 red, 8 intense, added up); the
+        color not given is unchanged. (3033)"""
 
     def control_self_variable(self, *params: int, extra: Extra = (), text: str = "") -> None:
         """Control self variables, switches and strings (raw parameters). (3036)"""
 
     def control_media_option(self, *params: int, extra: Extra = (), text: str = "") -> None:
-        """Media options (raw parameters). (3038)"""
+        """Media options (raw parameters; see get_media_option, set_media_option). (3038)"""
+
+    def get_media_option(self, option: MediaOption, /, into: Variable = ...) -> None:
+        """Read a screen / sound option into a variable (or variables[variables[id]]). (3038)"""
+
+    def set_media_option(self, option: MediaOption, value: int | Value, /) -> None:
+        """Change a screen / sound option. (3038)"""
 
     def __getattr__(self, command: str) -> Callable[..., None]:
         """Other Maniac commands, by name (control_strings, show_string_picture,
@@ -1516,9 +1736,100 @@ bgm_looped = Condition()
 true right after loading a save)."""
 
 
-def randint(a: Fixed, b: Fixed) -> Value:
+def randint(a: Fixed | Maniac, b: Fixed | Maniac) -> Value:
     """A random number from a to b (inclusive), like random.randint."""
     return Value()
+
+
+# Maniac Patch: functions of Control Variables
+def sqrt(value: Number, scale: int = 1) -> Value:
+    """Maniac Patch: square root of value, times scale (integer result)."""
+    return Value()
+
+
+def sin(angle: Number, divisor: Number, scale: int = 1) -> Value:
+    """Maniac Patch: sine of angle / divisor degrees, times scale."""
+    return Value()
+
+
+def cos(angle: Number, divisor: Number, scale: int = 1) -> Value:
+    """Maniac Patch: cosine of angle / divisor degrees, times scale."""
+    return Value()
+
+
+def atan2(y: Number, x: Number, scale: int = 1) -> Value:
+    """Maniac Patch: angle of (x, y) in degrees, times scale."""
+    return Value()
+
+
+def lerp(a: Number, b: Number, num: Number, den: Number) -> Value:
+    """Maniac Patch: a + (b - a) * num / den."""
+    return Value()
+
+
+def array_sum(first: Number, count: Number) -> Value:
+    """Maniac Patch: sum of count variables from variables[first]."""
+    return Value()
+
+
+def array_min(first: Number, count: Number) -> Value:
+    """Maniac Patch: smallest of count variables from variables[first]."""
+    return Value()
+
+
+def array_max(first: Number, count: Number) -> Value:
+    """Maniac Patch: largest of count variables from variables[first]."""
+    return Value()
+
+
+def min(a: Number, b: Number) -> Value:  # noqa: A001
+    """Maniac Patch: the smaller of two values."""
+    return Value()
+
+
+def max(a: Number, b: Number) -> Value:  # noqa: A001
+    """Maniac Patch: the larger of two values."""
+    return Value()
+
+
+# Maniac Patch: texts for string variables (Control Strings)
+DbTable = Literal[
+    "actor",
+    "skill",
+    "item",
+    "enemy",
+    "troop",
+    "terrain",
+    "attribute",
+    "state",
+    "animation",
+    "tileset",
+    "switch",
+    "variable",
+    "string",
+    "common_event",
+    "class",
+    "battler_animation",
+    "map",
+    "event",
+    "member",
+]
+
+
+def db_name(table: DbTable, id: Number, current: bool = False) -> StringVar:
+    """Maniac Patch: the name of a database entry (``strings[1] = db_name("item", 3)``);
+    current: the hero's current name, not the database's."""
+    return StringVar()
+
+
+def db_description(table: DbTable, id: Number, current: bool = False) -> StringVar:
+    """Maniac Patch: the description of a database entry."""
+    return StringVar()
+
+
+def read_file(name: Text, encoding: Literal["ansi", "utf8"] = "ansi") -> StringVar:
+    """Maniac Patch: the content of a file of the game folder."""
+    return StringVar()
 
 
 def percent(value: Fixed) -> Percent:
@@ -1761,7 +2072,8 @@ def common_event(
     """A common event of the database.  Leave out the id for a new one.
 
     Args:
-        trigger: call (run with common_events[id]()), autorun or parallel.
+        trigger: call (run with common_events[id]()), autorun or parallel; Maniac
+            Patch: battle_start, battle_parallel.
         switch: condition switch of an autorun/parallel common event.
         raw: the body is raw cmd(...) lines (set by rpgsync).
     """
@@ -1806,11 +2118,14 @@ def comment(*lines: str, split: bool = True) -> None:
     script does the same; DynRPG plugin calls are written ``dyn.function(...)``."""
 
 
-def face(faceset: str | None, index: Fixed | None = None, right: bool | None = None, flip: bool | None = None) -> None:
+def face(
+    faceset: Text | None, index: Fixed | Maniac | None = None, right: bool | None = None, flip: bool | None = None
+) -> None:
     """Set the face shown in messages (it narrows the text area).
 
     Args:
-        faceset: FaceSet image name, or None to remove the face.
+        faceset: FaceSet image name, or None to remove the face (Maniac Patch: also
+            strings[id] or strings[variables[id]], and index from variables[id]).
         index: face in the image (0-15).
         right: show the face on the right side.
         flip: mirror the face.
@@ -1822,6 +2137,12 @@ def message_options(
     position: MessagePosition = "bottom",
     avoid_hero: bool = False,
     continue_events: bool = False,
+    width: Fixed | Maniac = 0,
+    height: Fixed | Maniac = 0,
+    font: Text = "",
+    font_size: Fixed | Maniac = 0,
+    char_spacing: Fixed | Maniac = 0,
+    line_spacing: Fixed | Maniac = 0,
 ) -> None:
     """Message window settings.
 
@@ -1830,6 +2151,9 @@ def message_options(
         position: top, middle or bottom of the screen.
         avoid_hero: move the window so it never hides the hero (overrides position).
         continue_events: let other events run while a message is shown.
+        width, height, font, font_size, char_spacing, line_spacing: Maniac Patch: the
+            window's size and text (0 or "": unchanged; -1: the default; spacings are
+            stored plus one); numbers or variables[id], the font a name or strings[id].
     """
 
 
@@ -2168,6 +2492,30 @@ def pan_screen(direction: Direction, distance: Fixed, speed: Fixed = 3, wait: bo
     """Scroll the view by `distance` tiles away from the hero."""
 
 
+def pan_screen_by(
+    x: Fixed | Maniac,
+    y: Fixed | Maniac,
+    speed: Fixed | Maniac = ...,
+    frames: Fixed | Maniac = ...,
+    wait: bool = False,
+) -> None:
+    """Maniac Patch: scroll the map by x, y pixels from where it is, at a speed or
+    smoothly in a number of frames (give one of them)."""
+
+
+def pan_screen_to(
+    x: Fixed | Maniac,
+    y: Fixed | Maniac,
+    speed: Fixed | Maniac = ...,
+    frames: Fixed | Maniac = ...,
+    centered: bool = False,
+    relative: bool = False,
+    wait: bool = False,
+) -> None:
+    """Maniac Patch: scroll the map to x, y pixels (centered: from the hero-centred view;
+    relative: from the current view), at a speed or in a number of frames."""
+
+
 def reset_screen_pan(speed: Fixed = 3, wait: bool = False, direction: Direction = "up", distance: Fixed = 0) -> None:
     """Scroll the view back to the hero."""
 
@@ -2189,8 +2537,15 @@ def weather(kind: WeatherKind, strength: Strength = "weak") -> None:
 # ==========================================================================
 
 
-def play_bgm(name: str, fade: Fixed = 0, volume: Fixed = 100, tempo: Fixed = 100, balance: Fixed = 50) -> None:
-    """Play a music of the Music folder (MIDI, WAV, MP3, OGG).
+def play_bgm(
+    name: Text,
+    fade: Fixed | Maniac = 0,
+    volume: Fixed | Maniac = 100,
+    tempo: Fixed | Maniac = 100,
+    balance: Fixed | Maniac = 50,
+) -> None:
+    """Play a music of the Music folder (MIDI, WAV, MP3, OGG).  Maniac Patch: the name
+    may be strings[id], the values variables[id].
 
     Args:
         fade: fade-in in milliseconds.
@@ -2200,9 +2555,12 @@ def play_bgm(name: str, fade: Fixed = 0, volume: Fixed = 100, tempo: Fixed = 100
     """
 
 
-def play_se(name: str, volume: Fixed = 100, tempo: Fixed = 100, balance: Fixed = 50) -> MoveStep:
+def play_se(
+    name: Text, volume: Fixed | Maniac = 100, tempo: Fixed | Maniac = 100, balance: Fixed | Maniac = 50
+) -> MoveStep:
     """Play a sound effect of the Sound folder ("(OFF)" stops all sounds).
-    RPG_RT plays at most 4 sounds at once.  Also usable as a move step."""
+    RPG_RT plays at most 4 sounds at once.  Also usable as a move step.  Maniac
+    Patch: the name may be strings[id], the values variables[id]."""
     return MoveStep()
 
 
@@ -2235,9 +2593,13 @@ def play_movie(
 # ==========================================================================
 
 
-def wait(seconds: float = 0, key: bool = False) -> None:
+def wait(
+    seconds: float = 0, key: bool | None = False, frames: int | Maniac | None = None, tenths: Maniac | None = None
+) -> None:
     """Wait in steps of 0.1 s.  ``wait(0.0)`` still pauses for a moment;
-    ``wait(key=True)`` waits for a key press (2003)."""
+    ``wait(key=True)`` waits for a key press (2003); ``key=None``: stored without the
+    key parameter (RPG Maker 2000's form).  Maniac Patch: ``wait(frames=30)``,
+    ``wait(frames=variables.n)``, ``wait(tenths=variables.n)``."""
 
 
 def label(id: Fixed) -> None:
@@ -2248,8 +2610,34 @@ def goto(id: Fixed) -> None:
     """Jump to label(id)."""
 
 
-def break_loop() -> None:
-    """Break Loop outside a while loop (inside one, write ``break``)."""
+def break_loop(levels: int = 1) -> None:
+    """Break Loop outside a while loop (inside one, write ``break``).  Maniac Patch:
+    ``levels=2`` leaves two nested loops."""
+
+
+def continue_loop(levels: int = 1) -> None:
+    """Maniac Patch: go on with the next turn of the loop (inside one, write ``continue``)."""
+
+
+SystemFunction = Literal["save", "load", "party", "screen_mode", "options", "debug", "license", "reset"]
+
+
+def call_system_function(function: SystemFunction, option: int | Literal["toggle", "window", "fullscreen"] = 0) -> None:
+    """Maniac Patch: open the save / load / party menu, change the screen mode
+    (``call_system_function("screen_mode", "fullscreen")``), open the options, debug or
+    license window, or reset the game.  ``open_save_menu()`` is the plain save menu."""
+
+
+def disable_system_functions(
+    save: bool = False,
+    party: bool = False,
+    screen_toggle: bool = False,
+    options: bool = False,
+    debug: bool = False,
+    reset: bool = False,
+) -> None:
+    """Maniac Patch: forbid the given functions (save menu, party menu, F4, F5, F9, F12),
+    allow the others."""
 
 
 def game_over() -> None:
@@ -2419,6 +2807,7 @@ __all__ = [
     "CommonEventTrigger",
     "Condition",
     "Counter",
+    "DbTable",
     "Digits",
     "Direction",
     "DynArg",
@@ -2441,6 +2830,7 @@ __all__ = [
     "Layer",
     "ManiacPatch",
     "ManiacValue",
+    "MediaOption",
     "MessagePosition",
     "MoveStep",
     "MoveType",
@@ -2463,10 +2853,15 @@ __all__ = [
     "Stat",
     "StatMode",
     "Strength",
+    "StringRange",
+    "StringVar",
+    "StringVars",
     "Switch",
     "SwitchRange",
     "Switches",
+    "SystemFunction",
     "TeleportDirection",
+    "Text",
     "ThisEvent",
     "Timer",
     "Transition",
@@ -2489,11 +2884,16 @@ __all__ = [
     "add_state",
     "add_teleport_target",
     "airship",
+    "array_max",
+    "array_min",
+    "array_sum",
+    "atan2",
     "battle_call_common_event",
     "battle_condition",
     "bgm_looped",
     "boat",
     "break_loop",
+    "call_system_function",
     "change_class",
     "change_exp",
     "change_graphic",
@@ -2505,6 +2905,11 @@ __all__ = [
     "comment",
     "common_event",
     "cond",
+    "continue_loop",
+    "cos",
+    "db_description",
+    "db_name",
+    "disable_system_functions",
     "dyn",
     "enable_combo",
     "end_battle",
@@ -2544,12 +2949,15 @@ __all__ = [
     "key_input",
     "label",
     "learn_skill",
+    "lerp",
     "lock_facing",
     "lock_screen",
     "maniac",
+    "max",
     "memorize_bgm",
     "memorize_location",
     "message_options",
+    "min",
     "move",
     "move_away_from_player",
     "move_down",
@@ -2573,6 +2981,8 @@ __all__ = [
     "open_video_options",
     "page",
     "pan_screen",
+    "pan_screen_by",
+    "pan_screen_to",
     "party",
     "pause",
     "percent",
@@ -2585,6 +2995,7 @@ __all__ = [
     "play_se",
     "player",
     "randint",
+    "read_file",
     "recall_location",
     "remove_battle_command",
     "remove_state",
@@ -2609,8 +3020,10 @@ __all__ = [
     "show_choices",
     "show_screen",
     "simulate_attack",
+    "sin",
     "speed_down",
     "speed_up",
+    "sqrt",
     "start_animation",
     "start_battle",
     "started_by_action_key",

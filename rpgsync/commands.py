@@ -221,6 +221,10 @@ class Ctx(BaseModel):
     handles: dict[str, dict[int, str]] = Field(default_factory=dict)  # variables/switches id -> Python name
     choice_sep: str | None = None  # how the editor joined show_choices options (None: engine default)
     dynparams: bool = False  # DynPlugins/DynParams.dll: variables wherever RPG Maker takes a number
+    # most commands of the game are stored the way the Maniac Patch editor writes them
+    # (Control Variables of one variable with 0 as last id...): a statement without a
+    # `# layout:` comment is compiled that way (see rpgsync.layout)
+    maniac_layout: bool = False
 
     def enc(self, s: str, node=None) -> bytes:
         try:
@@ -561,9 +565,19 @@ def C(code, params=(), string=b"") -> Command:
 TEXT_CODES = {10110: ("text", 20110), 12410: ("comment", 22410)}
 
 
+# Maniac Patch: p4 selectors (4 bits each) of width, height, font (0 the command's text,
+# 1 strings[p7], 2 strings[variables[p7]]), font size, character and line spacing;
+# p5-p10 their values (0: unchanged)
+MSG_MANIAC = ["width", "height", "font", "font_size", "char_spacing", "line_spacing"]
+
+
 def _msg_options():
     def dec(c, ctx):
-        if len(c.params) != 4 or c.string:
+        from .maniac_ext import text_src
+        from .pyexpr import _fits, mval_src
+
+        n = len(c.params)
+        if n not in (4, 11) or (c.string and n == 4):
             return None
         kw = []
         if c.params[0]:
@@ -573,19 +587,46 @@ def _msg_options():
             kw.append(("avoid_hero", bool(c.params[2]) if c.params[2] == 1 else c.params[2]))
         if c.params[3]:
             kw.append(("continue_events", bool(c.params[3]) if c.params[3] == 1 else c.params[3]))
+        if n == 11:
+            m = c.params[4]
+            if not _fits(m, 6):
+                return None
+            for slot, name in enumerate(MSG_MANIAC):
+                mode, v = (m >> 4 * slot) & 0xF, c.params[5 + slot]
+                if name == "font":
+                    src = text_src(mode, v, ctx.dec(c.string))
+                    if src is None:
+                        return None
+                    if src != '""':
+                        kw.append((name, Raw(src=src)))
+                elif mode or v:
+                    if mode > 2:
+                        return None
+                    kw.append((name, Raw(src=mval_src(mode, v))))
         return render_call("message_options", [], kw)
 
     def enc(call, ctx):
-        a = Args(call, ["transparent", "position", "avoid_hero", "continue_events"])
-        return C(
-            10120,
-            [
-                a.int("transparent", 0),
-                a.enum("position", ["top", "middle", "bottom"], "bottom"),
-                a.int("avoid_hero", 0),
-                a.int("continue_events", 0),
-            ],
-        )
+        from .maniac_ext import text_val
+        from .pyexpr import mval_val
+
+        a = Args(call, ["transparent", "position", "avoid_hero", "continue_events"] + MSG_MANIAC)
+        p = [
+            a.int("transparent", 0),
+            a.enum("position", ["top", "middle", "bottom"], "bottom"),
+            a.int("avoid_hero", 0),
+            a.int("continue_events", 0),
+        ]
+        if not set(MSG_MANIAC) & set(a.values):
+            return C(10120, p)
+        modes, values, font = 0, [], ""
+        for slot, name in enumerate(MSG_MANIAC):
+            if name == "font":
+                mode, v, font = text_val(a.get(name, ""), "message_options(): font", call.node)
+            else:
+                mode, v = mval_val(a.get(name, 0), name, modes=3)
+            modes |= mode << 4 * slot
+            values.append(v)
+        return C(10120, p + [modes] + values, ctx.enc(font, call.node))
 
     return dec, enc
 
@@ -594,7 +635,22 @@ rich(10120, "message_options")(_msg_options())
 
 
 def _face():
+    # Maniac Patch: p3 selectors of the faceset (0 the command's text, 1 strings[p4],
+    # 2 strings[variables[p4]]) and of the index (1 variables[n], 2 variables[variables[n]]);
+    # the Maniac editor drops trailing zero parameters (rpgsync.layout)
     def dec(c, ctx):
+        from .maniac_ext import text_src
+        from .pyexpr import _fits, mval_src
+
+        if len(c.params) in (4, 5):
+            p = c.params + [0] * (5 - len(c.params))
+            if not _fits(p[3], 2) or (p[3] >> 4) > 2 or p[1] not in (0, 1) or p[2] not in (0, 1):
+                return None
+            face = text_src(p[3] & 0xF, p[4], ctx.dec(c.string))
+            if face is None:
+                return None
+            kw = [(k, True) for k, v in (("right", p[1]), ("flip", p[2])) if v]
+            return render_call("face", [Raw(src=face), Raw(src=mval_src(p[3] >> 4, p[0]))], kw)
         if not c.string:
             if not c.params:
                 return "face(None)"
@@ -612,9 +668,19 @@ def _face():
         return render_call("face", [ctx.dec(c.string), c.params[0]], kw)
 
     def enc(call, ctx):
+        from .maniac_ext import text_val
+        from .pyexpr import is_int, mval_val
+
         a = Args(call, ["faceset", "index", "right", "flip"])
         if a.get("faceset") is None and len(a.values) <= 1:
             return C(10130)
+        face, index = a.get("faceset"), a.get("index", 0)
+        if face is not None and not isinstance(face, str) or not is_int(index):
+            fmode, fvar, text = text_val(face, "face(): the faceset", call.node)
+            imode, i = mval_val(index, "face(): the index", modes=3)
+            return C(
+                10130, [i, a.int("right", 0), a.int("flip", 0), fmode | imode << 4, fvar], ctx.enc(text, call.node)
+            )
         return C(10130, [a.int("index", 0), a.int("right", 0), a.int("flip", 0)], ctx.enc(a.str("faceset"), call.node))
 
     return dec, enc
@@ -657,20 +723,42 @@ rich(10810, "teleport")(_teleport())
 
 
 def _wait():
+    # Maniac Patch: p1 256 = in frames (else tenths of seconds; 1 = until a key is
+    # pressed), p2 the selector of the value (1 variables[n], 2 variables[variables[n]])
     def dec(c, ctx):
-        n = len(c.params)
-        if n not in (1, 2) or (n == 1) != (ctx.engine == "2k"):
+        from .pyexpr import mval_src
+
+        p = c.params
+        n = len(p)
+        if n == 3 and p[2] in (1, 2) and p[1] in (0, 256):
+            unit = "frames" if p[1] == 256 else "tenths"
+            return render_call("wait", [], [(unit, Raw(src=mval_src(p[2], p[0])))])
+        if n == 2 and p[1] == 256:
+            return render_call("wait", [], [("frames", p[0])])
+        if n not in (1, 2):
             return None
         kw = []
         if n == 2 and c.params[1]:
             if c.params[1] != 1:
                 return None
             kw.append(("key", True))
+        if n == 1 and ctx.engine != "2k":
+            kw.append(("key", None))  # stored without it (RPG Maker 2000's form)
         t = c.params[0] / 10
         return render_call("wait", [Raw(src=repr(t))], kw)
 
     def enc(call, ctx):
-        a = Args(call, ["seconds", "key"])
+        from .pyexpr import mval_val
+
+        a = Args(call, ["seconds", "key", "frames", "tenths"])
+        for unit, opt in (("frames", 256), ("tenths", 0)):
+            if unit in a.values:
+                if set(a.values) != {unit}:
+                    raise CompileError("wait(%s=...) takes no other argument" % unit, call.node)
+                mode, v = mval_val(a.get(unit), unit, modes=3)
+                if mode == 0 and unit == "tenths":
+                    raise CompileError("wait(): a number of seconds is wait(seconds)", call.node)
+                return C(11410, [v, opt] + ([mode] if mode else []))
         s = a.get("seconds", 0)
         if not isinstance(s, (int, float)) or isinstance(s, bool):
             raise CompileError("wait(): seconds must be a number", call.node)
@@ -678,6 +766,8 @@ def _wait():
         if abs(tenths - s * 10) > 1e-6:
             raise CompileError("wait(): RPG Maker waits in steps of 0.1 seconds", call.node)
         p = [int(tenths)]
+        if "key" in a.values and a.get("key") is None:
+            return C(11410, p)
         if ctx.engine != "2k" or a.bool("key"):
             p.append(int(a.bool("key")))
         return C(11410, p)
@@ -717,18 +807,52 @@ for _code, _name, _args in [
 
 
 def _sound(code, name, has_fade):
+    # Maniac Patch: one more parameter with the selectors (4 bits each) of the name (0 the
+    # command's text, 1 strings[n], 2 strings[variables[n]]) and of each value (1
+    # variables[n], 2 variables[variables[n]]), then the name's string variable
     keys = (["fade"] if has_fade else []) + ["volume", "tempo", "balance"]
     defaults = ([0] if has_fade else []) + [100, 100, 50]
 
     def dec(c, ctx):
-        if len(c.params) != len(keys):
+        from .maniac_ext import text_src
+        from .pyexpr import _fits, mval_src
+
+        n = len(keys)
+        if len(c.params) == n:
+            kw = [(k, v) for k, v, d in zip(keys, c.params, defaults) if v != d]
+            return render_call(name, [ctx.dec(c.string)], kw)
+        if len(c.params) not in (n + 1, n + 2):
             return None
-        kw = [(k, v) for k, v, d in zip(keys, c.params, defaults) if v != d]
-        return render_call(name, [ctx.dec(c.string)], kw)
+        m, var = c.params[n], c.params[n + 1] if len(c.params) == n + 2 else 0
+        if m == 0 or not _fits(m, n + 1) or (len(c.params) == n + 2) != (m & 0xF != 0):
+            return None
+        sound = text_src(m & 0xF, var, ctx.dec(c.string))
+        if sound is None:
+            return None
+        kw = []
+        for slot, (k, v, d) in enumerate(zip(keys, c.params, defaults), 1):
+            mode = (m >> 4 * slot) & 0xF
+            if mode > 2:
+                return None
+            if mode or v != d:
+                kw.append((k, Raw(src=mval_src(mode, v))))
+        return render_call(name, [Raw(src=sound)], kw)
 
     def enc(call, ctx):
+        from .maniac_ext import text_val
+        from .pyexpr import mval_val
+
         a = Args(call, ["name"] + keys)
-        return C(code, [a.int(k, d) for k, d in zip(keys, defaults)], ctx.enc(a.str("name", ""), call.node))
+        sound = a.get("name", "")
+        if isinstance(sound, str) and all(isinstance(a.get(k, 0), int) for k in keys):
+            return C(code, [a.int(k, d) for k, d in zip(keys, defaults)], ctx.enc(a.str("name", ""), call.node))
+        mode, var, text = text_val(sound, "%s(): the name" % name, call.node)
+        params, modes = [], mode
+        for slot, (k, d) in enumerate(zip(keys, defaults), 1):
+            kmode, v = mval_val(a.get(k, d), k, modes=3)
+            params.append(v)
+            modes |= kmode << 4 * slot
+        return C(code, params + [modes] + ([var] if mode else []), ctx.enc(text, call.node))
 
     return dec, enc
 

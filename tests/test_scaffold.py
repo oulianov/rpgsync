@@ -95,7 +95,13 @@ def test_game_types(game2003):
     (game2003 / "DynPlugins" / "DynParams.dll").write_bytes(b"")
     assert update_scripts_project(project) == [str(types)]
     assert "Dynamic = Variable" in types.read_text()
+    assert "Maniac = Never" in types.read_text()
     assert update_scripts_project(project) == []
+    pyproject = scripts / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text().replace('patches = ["dynrpg"]', 'patches = ["dynrpg", "maniac"]'))
+    assert update_scripts_project(project) == [str(types)]
+    assert "from rpgsync.dsl import Variable, Value" in types.read_text()
+    assert "Maniac = Value" in types.read_text()
 
 
 def test_gitattributes(game2003):

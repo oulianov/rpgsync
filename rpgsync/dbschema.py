@@ -25,14 +25,15 @@ class FieldDef(BaseModel):
     is2k3: bool = False      # RPG Maker 2003 only
     size_id: int | None = None  # chunk holding this field's byte size
     size_of: int | None = None  # this chunk is the byte size of chunk size_of
+    size_unit: int = 1          # size_of counts elements of this many bytes (liblcf Count<...>)
     doc: str = ""
 
 
 def _f(id, name, type, kind, model, default=None, default_2k3=None, persist=False, is2k3=False,
-       size_id=None, size_of=None, doc=""):
+       size_id=None, size_of=None, size_unit=1, doc=""):
     return FieldDef(id=id, name=name, type=type, kind=kind, model=model, default=default,
                     default_2k3=default_2k3, persist=persist, is2k3=is2k3, size_id=size_id,
-                    size_of=size_of, doc=doc)
+                    size_of=size_of, size_unit=size_unit, doc=doc)
 
 
 # Database table name -> (Database chunk id, structure, title)
@@ -49,9 +50,16 @@ TABLES: dict[str, tuple[int, str, str]] = {
     "battleranimations": (0x20, "BattlerAnimation", "Battler animations (RPG Maker 2003)"),
     "switches": (0x17, "Switch", "Switches"),
     "variables": (0x18, "Variable", "Variables"),
+    "strings": (0x21, "StringVariable", "String variables (Maniac Patch)"),
 }
 
-# Structures used by the exported tables (dependencies first)
+# Single structures exported as one model each: name -> (Database chunk id, structure, title)
+SINGLES: dict[str, tuple[int, str, str]] = {
+    "terms": (0x15, "Terms", "Terms"),
+    "system": (0x16, "System", "System"),
+}
+
+# Structures used by the exported tables and single structures (dependencies first)
 MODEL_STRUCTS: list[str] = [
     "Parameters",
     "Equipment",
@@ -74,7 +82,11 @@ MODEL_STRUCTS: list[str] = [
     "BattlerAnimation",
     "Switch",
     "Variable",
+    "StringVariable",
+    "Terms",
     "Music",
+    "TestBattler",
+    "System",
     "Encounter",
     "MapInfo",
     "Start",
@@ -100,7 +112,7 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(None, "accessory_id", "Ref<Item:Int16>", "int", "int", default=0, default_2k3=0, doc="Accessory id (item id)."),
     ),
     "EventCommand": (
-        _f(None, "code", "Enum<EventCommand_Code>", "int", "enum:EventCommand_Code", default=0, default_2k3=0, doc="Code (one of 'END', 'CallCommonEvent', 'ForceFlee', 'EnableCombo', 'ChangeClass', 'ChangeBattleCommands', 'OpenLoadMenu', 'ExitGame', 'ToggleAtbMode', 'ToggleFullscreen', 'OpenVideoOptions', 'ShowMessage', 'MessageOptions', 'ChangeFaceGraphic', 'ShowChoice', 'InputNumber', 'ControlSwitches', 'ControlVars', 'TimerOperation', 'ChangeGold', 'ChangeItems', 'ChangePartyMembers', 'ChangeExp', 'ChangeLevel', 'ChangeParameters', 'ChangeSkills', 'ChangeEquipment', 'ChangeHP', 'ChangeSP', 'ChangeCondition', 'FullHeal', 'SimulatedAttack', 'ChangeHeroName', 'ChangeHeroTitle', 'ChangeSpriteAssociation', 'ChangeActorFace', 'ChangeVehicleGraphic', 'ChangeSystemBGM', 'ChangeSystemSFX', 'ChangeSystemGraphics', 'ChangeScreenTransitions', 'EnemyEncounter', 'OpenShop', 'ShowInn', 'EnterHeroName', 'Teleport', 'MemorizeLocation', 'RecallToLocation', 'EnterExitVehicle', 'SetVehicleLocation', 'ChangeEventLocation', 'TradeEventLocations', 'StoreTerrainID', 'StoreEventID', 'EraseScreen', 'ShowScreen', 'TintScreen', 'FlashScreen', 'ShakeScreen', 'PanScreen', 'WeatherEffects', 'ShowPicture', 'MovePicture', 'ErasePicture', 'ShowBattleAnimation', 'PlayerVisibility', 'FlashSprite', 'MoveEvent', 'ProceedWithMovement', 'HaltAllMovement', 'Wait', 'PlayBGM', 'FadeOutBGM', 'MemorizeBGM', 'PlayMemorizedBGM', 'PlaySound', 'PlayMovie', 'KeyInputProc', 'ChangeMapTileset', 'ChangePBG', 'ChangeEncounterSteps', 'TileSubstitution', 'TeleportTargets', 'ChangeTeleportAccess', 'EscapeTarget', 'ChangeEscapeAccess', 'OpenSaveMenu', 'ChangeSaveAccess', 'OpenMainMenu', 'ChangeMainMenuAccess', 'ConditionalBranch', 'Label', 'JumpToLabel', 'Loop', 'BreakLoop', 'EndEventProcessing', 'EraseEvent', 'CallEvent', 'Comment', 'GameOver', 'ReturntoTitleScreen', 'ChangeMonsterHP', 'ChangeMonsterMP', 'ChangeMonsterCondition', 'ShowHiddenMonster', 'ChangeBattleBG', 'ShowBattleAnimation_B', 'ConditionalBranch_B', 'TerminateBattle', 'ShowMessage_2', 'ShowChoiceOption', 'ShowChoiceEnd', 'VictoryHandler', 'EscapeHandler', 'DefeatHandler', 'EndBattle', 'Transaction', 'NoTransaction', 'EndShop', 'Stay', 'NoStay', 'EndInn', 'ElseBranch', 'EndBranch', 'EndLoop', 'Comment_2', 'ElseBranch_B', 'EndBranch_B', 'EasyRpg_TriggerEventAt', 'EasyRpg_Pathfinder', 'EasyRpg_CallMovementAction', 'EasyRpg_WaitForSingleMovement', 'EasyRpg_AnimateVariable', 'EasyRpg_SetInterpreterFlag', 'EasyRpg_ProcessJson', 'EasyRpg_CloneMapEvent', 'EasyRpg_DestroyMapEvent', 'EasyRpg_StringPictureMenu', 'Maniac_GetSaveInfo', 'Maniac_Save', 'Maniac_Load', 'Maniac_EndLoadProcess', 'Maniac_GetMousePosition', 'Maniac_SetMousePosition', 'Maniac_ShowStringPicture', 'Maniac_GetPictureInfo', 'Maniac_ControlBattle', 'Maniac_ControlAtbGauge', 'Maniac_ChangeBattleCommandEx', 'Maniac_GetBattleInfo', 'Maniac_ControlVarArray', 'Maniac_KeyInputProcEx', 'Maniac_RewriteMap', 'Maniac_ControlGlobalSave', 'Maniac_ChangePictureId', 'Maniac_SetGameOption', 'Maniac_CallCommand', 'Maniac_ControlStrings', 'Maniac_GetGameInfo', 'Maniac_EditPicture', 'Maniac_WritePicture', 'Maniac_AddMoveRoute', 'Maniac_EditTile', 'Maniac_ControlTextProcessing', 'Maniac_Zoom' or a number)."),
+        _f(None, "code", "Enum<EventCommand_Code>", "int", "enum:EventCommand_Code", default=0, default_2k3=0, doc="Code (one of 'END', 'CallCommonEvent', 'ForceFlee', 'EnableCombo', 'ChangeClass', 'ChangeBattleCommands', 'OpenLoadMenu', 'ExitGame', 'ToggleAtbMode', 'ToggleFullscreen', 'OpenVideoOptions', 'ShowMessage', 'MessageOptions', 'ChangeFaceGraphic', 'ShowChoice', 'InputNumber', 'ControlSwitches', 'ControlVars', 'TimerOperation', 'ChangeGold', 'ChangeItems', 'ChangePartyMembers', 'ChangeExp', 'ChangeLevel', 'ChangeParameters', 'ChangeSkills', 'ChangeEquipment', 'ChangeHP', 'ChangeSP', 'ChangeCondition', 'FullHeal', 'SimulatedAttack', 'ChangeHeroName', 'ChangeHeroTitle', 'ChangeSpriteAssociation', 'ChangeActorFace', 'ChangeVehicleGraphic', 'ChangeSystemBGM', 'ChangeSystemSFX', 'ChangeSystemGraphics', 'ChangeScreenTransitions', 'EnemyEncounter', 'OpenShop', 'ShowInn', 'EnterHeroName', 'Teleport', 'MemorizeLocation', 'RecallToLocation', 'EnterExitVehicle', 'SetVehicleLocation', 'ChangeEventLocation', 'TradeEventLocations', 'StoreTerrainID', 'StoreEventID', 'EraseScreen', 'ShowScreen', 'TintScreen', 'FlashScreen', 'ShakeScreen', 'PanScreen', 'WeatherEffects', 'ShowPicture', 'MovePicture', 'ErasePicture', 'ShowBattleAnimation', 'PlayerVisibility', 'FlashSprite', 'MoveEvent', 'ProceedWithMovement', 'HaltAllMovement', 'Wait', 'PlayBGM', 'FadeOutBGM', 'MemorizeBGM', 'PlayMemorizedBGM', 'PlaySound', 'PlayMovie', 'KeyInputProc', 'ChangeMapTileset', 'ChangePBG', 'ChangeEncounterSteps', 'TileSubstitution', 'TeleportTargets', 'ChangeTeleportAccess', 'EscapeTarget', 'ChangeEscapeAccess', 'OpenSaveMenu', 'ChangeSaveAccess', 'OpenMainMenu', 'ChangeMainMenuAccess', 'ConditionalBranch', 'Label', 'JumpToLabel', 'Loop', 'BreakLoop', 'EndEventProcessing', 'EraseEvent', 'CallEvent', 'Comment', 'GameOver', 'ReturntoTitleScreen', 'ChangeMonsterHP', 'ChangeMonsterMP', 'ChangeMonsterCondition', 'ShowHiddenMonster', 'ChangeBattleBG', 'ShowBattleAnimation_B', 'ConditionalBranch_B', 'TerminateBattle', 'ShowMessage_2', 'ShowChoiceOption', 'ShowChoiceEnd', 'VictoryHandler', 'EscapeHandler', 'DefeatHandler', 'EndBattle', 'Transaction', 'NoTransaction', 'EndShop', 'Stay', 'NoStay', 'EndInn', 'ElseBranch', 'EndBranch', 'EndLoop', 'Comment_2', 'ElseBranch_B', 'EndBranch_B', 'EasyRpg_TriggerEventAt', 'EasyRpg_Pathfinder', 'EasyRpg_CallMovementAction', 'EasyRpg_WaitForSingleMovement', 'EasyRpg_AnimateVariable', 'EasyRpg_SetInterpreterFlag', 'EasyRpg_ProcessJson', 'EasyRpg_CloneMapEvent', 'EasyRpg_DestroyMapEvent', 'EasyRpg_StringPictureMenu', 'Maniac_GetSaveInfo', 'Maniac_Save', 'Maniac_Load', 'Maniac_EndLoadProcess', 'Maniac_GetMousePosition', 'Maniac_SetMousePosition', 'Maniac_ShowStringPicture', 'Maniac_GetPictureInfo', 'Maniac_ControlBattle', 'Maniac_ControlAtbGauge', 'Maniac_ChangeBattleCommandEx', 'Maniac_GetBattleInfo', 'Maniac_ControlVarArray', 'Maniac_KeyInputProcEx', 'Maniac_RewriteMap', 'Maniac_ControlGlobalSave', 'Maniac_ChangePictureId', 'Maniac_SetGameOption', 'Maniac_CallCommand', 'Maniac_ControlStrings', 'Maniac_GetGameInfo', 'Maniac_EditPicture', 'Maniac_WritePicture', 'Maniac_AddMoveRoute', 'Maniac_EditTile', 'Maniac_ControlTextProcessing', 'Maniac_Script', 'Maniac_Script_2', 'Maniac_Zoom', 'Maniac_Console', 'Maniac_ControlSelfVariable', 'Maniac_ControlMediaOption' or a number)."),
         _f(None, "indent", "Int32", "int", "int", default=0, default_2k3=0, doc="Indent."),
         _f(None, "string", "DBString", "str", "str", default="", default_2k3="", doc="String."),
         _f(None, "parameters", "DBArray<Int32>", "raw", "raw", doc="Parameters."),
@@ -311,7 +323,7 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(0x02, "description", "DBString", "str", "str", default="", default_2k3="", doc="Help text."),
         _f(0x03, "using_message1", "DBString", "str", "str", default="", default_2k3="", doc="Battle message when used (first line). RPG Maker 2000 only."),
         _f(0x04, "using_message2", "DBString", "str", "str", default="", default_2k3="", doc="Battle message when used (second line). RPG Maker 2000 only."),
-        _f(0x07, "failure_message", "Int32", "int", "int", default=0, default_2k3=0, doc="Message shown when the skill fails. RPG Maker 2000 only."),
+        _f(0x07, "failure_message", "Int32", "int", "int", default=0, default_2k3=0, doc="Message shown when the skill fails (0-3); the Maniac Patch's Hit Rate Calc box stores 3: the skill hits like a physical attack. RPG Maker 2000 only."),
         _f(0x08, "type", "Enum<Skill_Type>", "int", "enum:Skill_Type", default="normal", default_2k3="normal", persist=True, doc="Type (one of 'normal', 'teleport', 'escape', 'switch', 'subskill' or a number)."),
         _f(0x09, "sp_type", "Enum<Skill_SpType>", "int", "enum:Skill_SpType", default="cost", default_2k3="cost", is2k3=True, doc="SP cost unit (one of 'cost', 'percent' or a number). RPG Maker 2003 only."),
         _f(0x0A, "sp_percent", "Int32", "int", "int", default=0, default_2k3=0, is2k3=True, doc="SP cost in percent of max SP. RPG Maker 2003 only."),
@@ -761,30 +773,30 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(0x05, "balance", "Int32", "int", "int", default=50, default_2k3=50, doc="Balance (0 = left, 50 = center, 100 = right)."),
     ),
     "TestBattler": (
-        _f(0x01, "actor_id", "Ref<Actor>", "int", "int", default=1, default_2k3=1, doc="Actor id (actor id)."),
+        _f(0x01, "actor_id", "Ref<Actor>", "int", "int", default=1, default_2k3=1, doc="Actor (actor id)."),
         _f(0x02, "level", "Int32", "int", "int", default=1, default_2k3=1, doc="Level."),
-        _f(0x0B, "weapon_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Weapon id (item id)."),
-        _f(0x0C, "shield_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Shield id (item id)."),
-        _f(0x0D, "armor_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Armor id (item id)."),
-        _f(0x0E, "helmet_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Helmet id (item id)."),
-        _f(0x0F, "accessory_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Accessory id (item id)."),
+        _f(0x0B, "weapon_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Weapon (item id)."),
+        _f(0x0C, "shield_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Shield (item id)."),
+        _f(0x0D, "armor_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Armor (item id)."),
+        _f(0x0E, "helmet_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Helmet (item id)."),
+        _f(0x0F, "accessory_id", "Ref<Item>", "int", "int", default=0, default_2k3=0, doc="Accessory (item id)."),
     ),
     "System": (
         _f(0x0A, "ldb_id", "Int32", "int", "int", default=0, default_2k3=0, doc="Ldb id."),
-        _f(0x0B, "boat_name", "DBString", "str", "str", default="", default_2k3="", doc="Boat name."),
-        _f(0x0C, "ship_name", "DBString", "str", "str", default="", default_2k3="", doc="Ship name."),
-        _f(0x0D, "airship_name", "DBString", "str", "str", default="", default_2k3="", doc="Airship name."),
-        _f(0x0E, "boat_index", "Int32", "int", "int", default=0, default_2k3=0, doc="Boat index."),
-        _f(0x0F, "ship_index", "Int32", "int", "int", default=0, default_2k3=0, doc="Ship index."),
-        _f(0x10, "airship_index", "Int32", "int", "int", default=0, default_2k3=0, doc="Airship index."),
-        _f(0x11, "title_name", "DBString", "str", "str", default="", default_2k3="", doc="Title name."),
-        _f(0x12, "gameover_name", "DBString", "str", "str", default="", default_2k3="", doc="Gameover name."),
-        _f(0x13, "system_name", "DBString", "str", "str", default="", default_2k3="", doc="System name."),
-        _f(0x14, "system2_name", "DBString", "str", "str", default="", default_2k3="", is2k3=True, doc="System2 name. RPG Maker 2003 only."),
-        _f(0x15, "party", "Count<Vector<Int16>>", "int", "int", size_of=0x16),
-        _f(0x16, "party", "Vector<Int16>", "i16vec", "i16", default=[1], default_2k3=[1], persist=True, size_id=0x15, doc="Party."),
-        _f(0x1A, "menu_commands", "Count<Vector<Int16>>", "int", "int", is2k3=True, size_of=0x1B),
-        _f(0x1B, "menu_commands", "Vector<Int16>", "i16vec", "i16", default=[1], default_2k3=[1], persist=True, is2k3=True, size_id=0x1A, doc="Menu commands. RPG Maker 2003 only."),
+        _f(0x0B, "boat_name", "DBString", "str", "str", default="", default_2k3="", doc="CharSet of the boat."),
+        _f(0x0C, "ship_name", "DBString", "str", "str", default="", default_2k3="", doc="CharSet of the ship."),
+        _f(0x0D, "airship_name", "DBString", "str", "str", default="", default_2k3="", doc="CharSet of the airship."),
+        _f(0x0E, "boat_index", "Int32", "int", "int", default=0, default_2k3=0, doc="Sprite index (0-7) of the boat."),
+        _f(0x0F, "ship_index", "Int32", "int", "int", default=0, default_2k3=0, doc="Sprite index (0-7) of the ship."),
+        _f(0x10, "airship_index", "Int32", "int", "int", default=0, default_2k3=0, doc="Sprite index (0-7) of the airship."),
+        _f(0x11, "title_name", "DBString", "str", "str", default="", default_2k3="", doc="Title screen picture (Title/)."),
+        _f(0x12, "gameover_name", "DBString", "str", "str", default="", default_2k3="", doc="Game over picture (GameOver/)."),
+        _f(0x13, "system_name", "DBString", "str", "str", default="", default_2k3="", doc="System graphic (System/)."),
+        _f(0x14, "system2_name", "DBString", "str", "str", default="", default_2k3="", is2k3=True, doc="Battle system graphic (System2/). RPG Maker 2003 only."),
+        _f(0x15, "party", "Count<Vector<Int16>>", "int", "int", size_of=0x16, size_unit=2),
+        _f(0x16, "party", "Vector<Int16>", "i16vec", "i16", default=[1], default_2k3=[1], persist=True, size_id=0x15, doc="Starting party: actor ids."),
+        _f(0x1A, "menu_commands", "Count<Vector<Int16>>", "int", "int", is2k3=True, size_of=0x1B, size_unit=2),
+        _f(0x1B, "menu_commands", "Vector<Int16>", "i16vec", "i16", default=[1], default_2k3=[1], persist=True, is2k3=True, size_id=0x1A, doc="Main menu commands, in order (Maniac Patch: -9 hides Game End). RPG Maker 2003 only."),
         _f(0x1F, "title_music", "Music", "S:Music", "struct:Music", persist=True, doc="Title music."),
         _f(0x20, "battle_music", "Music", "S:Music", "struct:Music", persist=True, doc="Battle music."),
         _f(0x21, "battle_end_music", "Music", "S:Music", "struct:Music", persist=True, doc="Battle end music."),
@@ -811,22 +823,42 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(0x40, "battle_start_fadein", "Enum<System_FadeIn>", "int", "enum:System_FadeIn", default="default", default_2k3="default", persist=True, doc="Battle start fadein (one of 'default', 'fade_in', 'reconstitute_blocks', 'unwipe_downward', 'unwipe_upward', 'venetian_blinds', 'vertical_blinds', 'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_down', 'screen_moves_up', 'screen_moves_right', 'screen_moves_left', 'vertical_unify', 'horizontal_unify', 'unify_quadrants', 'zoom_out', 'mosaic', 'waver_screen', 'instantaneous', 'none' or a number)."),
         _f(0x41, "battle_end_fadeout", "Enum<System_FadeOut>", "int", "enum:System_FadeOut", default="default", default_2k3="default", persist=True, doc="Battle end fadeout (one of 'default', 'fade_out', 'remove_blocks', 'wipe_downward', 'wipe_upward', 'venetian_blinds', 'vertical_blinds', 'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_up', 'screen_moves_down', 'screen_moves_left', 'screen_moves_right', 'vertical_div', 'horizontal_div', 'quadrasection', 'zoom_in', 'mosaic', 'waver_screen', 'instantaneous', 'none' or a number)."),
         _f(0x42, "battle_end_fadein", "Enum<System_FadeIn>", "int", "enum:System_FadeIn", default="default", default_2k3="default", persist=True, doc="Battle end fadein (one of 'default', 'fade_in', 'reconstitute_blocks', 'unwipe_downward', 'unwipe_upward', 'venetian_blinds', 'vertical_blinds', 'horizontal_blinds', 'receding_square', 'expanding_square', 'screen_moves_down', 'screen_moves_up', 'screen_moves_right', 'screen_moves_left', 'vertical_unify', 'horizontal_unify', 'unify_quadrants', 'zoom_out', 'mosaic', 'waver_screen', 'instantaneous', 'none' or a number)."),
-        _f(0x47, "message_stretch", "Enum<System_Stretch>", "int", "enum:System_Stretch", default="stretch", default_2k3="stretch", doc="Message stretch (one of 'stretch', 'tiled', 'easyrpg_none' or a number)."),
-        _f(0x48, "font_id", "Enum<System_Font>", "int", "enum:System_Font", default="gothic", default_2k3="gothic", doc="Font id (one of 'gothic', 'mincho' or a number)."),
+        _f(0x47, "message_stretch", "Enum<System_Stretch>", "int", "enum:System_Stretch", default="stretch", default_2k3="stretch", doc="Window background: stretched or tiled (one of 'stretch', 'tiled', 'easyrpg_none' or a number)."),
+        _f(0x48, "font_id", "Enum<System_Font>", "int", "enum:System_Font", default="gothic", default_2k3="gothic", doc="Font (one of 'gothic', 'mincho' or a number)."),
         _f(0x51, "selected_condition", "Int32", "int", "int", default=0, default_2k3=0, doc="Selected condition."),
         _f(0x52, "selected_hero", "Ref<Actor>", "int", "int", default=0, default_2k3=0, persist=True, doc="Selected hero (actor id)."),
-        _f(0x54, "battletest_background", "DBString", "str", "str", default="", default_2k3="", doc="Battletest background."),
-        _f(0x55, "battletest_data", "Array<TestBattler>", "raw", "raw", persist=True, doc="Battletest data."),
-        _f(0x5B, "save_count", "Int32", "int", "int", default=0, default_2k3=0, doc="Save count."),
-        _f(0x5E, "battletest_terrain", "Ref<Terrain>", "int", "int", default=0, default_2k3=0, doc="Battletest terrain (terrain id)."),
-        _f(0x5F, "battletest_formation", "Enum<System_BattleFormation>", "int", "enum:System_BattleFormation", default="terrain", default_2k3="terrain", doc="Battletest formation (one of 'terrain', 'loose', 'tight' or a number)."),
-        _f(0x60, "battletest_condition", "Enum<System_BattleCondition>", "int", "enum:System_BattleCondition", default="none", default_2k3="none", doc="Battletest condition (one of 'none', 'initiative', 'back', 'surround', 'pincers' or a number)."),
+        _f(0x54, "battletest_background", "DBString", "str", "str", default="", default_2k3="", doc="Test battle background."),
+        _f(0x55, "battletest_data", "Array<TestBattler>", "A:TestBattler", "array:TestBattler", default=[], default_2k3=[], persist=True, doc="Actors of the test battle."),
+        _f(0x5B, "save_count", "Int32", "raw", "raw", doc="Save count."),
+        _f(0x5E, "battletest_terrain", "Ref<Terrain>", "int", "int", default=0, default_2k3=0, doc="Test battle terrain (terrain id)."),
+        _f(0x5F, "battletest_formation", "Enum<System_BattleFormation>", "int", "enum:System_BattleFormation", default="terrain", default_2k3="terrain", doc="Test battle formation (one of 'terrain', 'loose', 'tight' or a number)."),
+        _f(0x60, "battletest_condition", "Enum<System_BattleCondition>", "int", "enum:System_BattleCondition", default="none", default_2k3="none", doc="Test battle condition (one of 'none', 'initiative', 'back', 'surround', 'pincers' or a number)."),
         _f(0x61, "equipment_setting", "Enum<System_EquipmentSetting>", "int", "enum:System_EquipmentSetting", default="actor", default_2k3="actor", is2k3=True, doc="Integer RPG2003 - Whether equipment usage is by Actor or by Class. This is a global setting in RM2k3! (one of 'actor', 'class' or a number). RPG Maker 2003 only."),
         _f(0x62, "battletest_alt_terrain", "Ref<Terrain>", "int", "int", default=-1, default_2k3=-1, is2k3=True, doc="Integer RPG2003 (EDITOR ONLY) - Double click on Terrain in Troops changes this setting and 0x54. Affects only the RM2k3 editor (terrain id). RPG Maker 2003 only."),
-        _f(0x63, "show_frame", "Boolean", "bool", "bool", default=False, default_2k3=False, is2k3=True, doc="Show frame. RPG Maker 2003 only."),
-        _f(0x64, "frame_name", "DBString", "str", "str", default="", default_2k3="", is2k3=True, doc="Frame name. RPG Maker 2003 only."),
+        _f(0x63, "show_frame", "Boolean", "bool", "bool", default=False, default_2k3=False, is2k3=True, doc="Draw the frame picture. RPG Maker 2003 only."),
+        _f(0x64, "frame_name", "DBString", "str", "str", default="", default_2k3="", is2k3=True, doc="Frame picture (Frame/) drawn over the screen. RPG Maker 2003 only."),
         _f(0x65, "invert_animations", "Boolean", "bool", "bool", default=False, default_2k3=False, is2k3=True, doc="Invert animations. RPG Maker 2003 only."),
         _f(0x6F, "show_title", "Boolean", "bool", "bool", default=True, default_2k3=True, is2k3=True, doc="When false the title is skipped and the game starts directly. In TestPlay mode skips directly to the Load scene. Added in RPG Maker 2003 v1.11. RPG Maker 2003 only."),
+        _f(0x79, "maniac_title_scene_common_event_id", "Ref<CommonEvent>", "int", "int", default=0, default_2k3=0, doc="Common event called by the title scene (0: none; common event id). Maniac Patch extension."),
+        _f(0x7A, "maniac_title_scene_variable_id", "Ref<Variable>", "int", "int", default=0, default_2k3=0, doc="Variable (start of range) the title scene writes its state to before calling the common event (variable id). Maniac Patch extension."),
+        _f(0x7B, "maniac_title_scene_hook_flags", "ManiacTitleSceneHook_Flags", "u8vec", "flags:ManiacTitleSceneHook_Flags", doc="When the title scene calls the common event. Maniac Patch extension."),
+        _f(0x7C, "maniac_save_scene_common_event_id", "Ref<CommonEvent>", "int", "int", default=0, default_2k3=0, doc="Common event called by the save/load scene (0: none; common event id). Maniac Patch extension."),
+        _f(0x7D, "maniac_save_scene_variable_id", "Ref<Variable>", "int", "int", default=0, default_2k3=0, doc="Variable (start of range) the save/load scene writes its state to before calling the common event (variable id). Maniac Patch extension."),
+        _f(0x7E, "maniac_save_scene_hook_flags", "ManiacSaveSceneHook_Flags", "u8vec", "flags:ManiacSaveSceneHook_Flags", doc="When the save/load scene calls the common event. Maniac Patch extension."),
+        _f(0x80, "maniac_message_font_name", "DBString", "str", "str", default="", default_2k3="", doc="Font of the message window (empty: the system font). Maniac Patch extension."),
+        _f(0x81, "maniac_message_font_size", "Int32", "int", "int", default=12, default_2k3=12, doc="Font size of the message window. Maniac Patch extension."),
+        _f(0x82, "maniac_message_window_width", "Int32", "int", "int", default=320, default_2k3=320, doc="Width of the message window in pixels (<= 0: 320). Maniac Patch extension."),
+        _f(0x83, "maniac_message_window_height", "Int32", "int", "int", default=80, default_2k3=80, doc="Height of the message window in pixels (<= 0: computed from the text position and the line height). Maniac Patch extension."),
+        _f(0x84, "maniac_message_spacing_char", "Int32", "int", "int", default=0, default_2k3=0, doc="Additional spacing between characters in the message window. Maniac Patch extension."),
+        _f(0x85, "maniac_message_spacing_line", "Int32", "int", "int", default=4, default_2k3=4, doc="Additional spacing between lines in the message window (line height: font size + this). Maniac Patch extension."),
+        _f(0x86, "maniac_message_face_x", "Int32", "int", "int", default=16, default_2k3=16, doc="X position of the face graphic in the message window. Maniac Patch extension."),
+        _f(0x87, "maniac_message_face_y", "Int32", "int", "int", default=16, default_2k3=16, doc="Y position of the face graphic in the message window. Maniac Patch extension."),
+        _f(0x88, "maniac_message_text_x", "Int32", "int", "int", default=8, default_2k3=8, doc="X position of the text without a face graphic. Maniac Patch extension."),
+        _f(0x89, "maniac_message_text_y", "Int32", "int", "int", default=10, default_2k3=10, doc="Y position of the text without a face graphic. Maniac Patch extension."),
+        _f(0x8A, "maniac_message_text_face_x", "Int32", "int", "int", default=80, default_2k3=80, doc="X position of the text with a face graphic (< 0: face width + 2 * face x). Maniac Patch extension."),
+        _f(0x8B, "maniac_message_text_face_y", "Int32", "int", "int", default=10, default_2k3=10, doc="Y position of the text with a face graphic. Maniac Patch extension."),
+        _f(0x8C, "maniac_message_face_width", "Int32", "int", "int", default=48, default_2k3=48, doc="Width of the face graphic in pixels. Maniac Patch extension."),
+        _f(0x8D, "maniac_message_face_height", "Int32", "int", "int", default=48, default_2k3=48, doc="Height of the face graphic in pixels. Maniac Patch extension."),
         _f(0xC8, "easyrpg_alternative_exp", "Int32", "int", "int", default=0, default_2k3=0, doc="Which EXP formula to use: 0=Default 1=2k 2=2k3. EasyRPG Player extension."),
         _f(0xC9, "easyrpg_battle_options", "Vector<Int16>", "i16vec", "i16", default=[0, 1, 2], default_2k3=[0, 1, 2], doc="Available battle options where 0=Battle 1=AutoBattle 2=Escape 3=Win 4=Lose. EasyRPG Player extension."),
         _f(0xCA, "easyrpg_max_actor_hp", "Int32", "int", "int", default=-1, default_2k3=-1, doc="Absolute maximum HP value actors can have. EasyRPG Player extension."),
@@ -865,8 +897,8 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(0x12, "states", "Array<State>", "A:State", "array:State", default=[], default_2k3=[], persist=True, doc="States."),
         _f(0x13, "animations", "Array<Animation>", "raw", "raw", persist=True, doc="Animations."),
         _f(0x14, "chipsets", "Array<Chipset>", "raw", "raw", persist=True, doc="Chipsets."),
-        _f(0x15, "terms", "Terms", "raw", "raw", persist=True, doc="Terms."),
-        _f(0x16, "system", "System", "raw", "raw", persist=True, doc="System."),
+        _f(0x15, "terms", "Terms", "S:Terms", "struct:Terms", persist=True, doc="Terms."),
+        _f(0x16, "system", "System", "S:System", "struct:System", persist=True, doc="System."),
         _f(0x17, "switches", "Array<Switch>", "A:Switch", "array:Switch", default=[], default_2k3=[], persist=True, doc="Switches."),
         _f(0x18, "variables", "Array<Variable>", "A:Variable", "array:Variable", default=[], default_2k3=[], persist=True, doc="Variables."),
         _f(0x19, "commonevents", "Array<CommonEvent>", "raw", "raw", persist=True, doc="Commonevents."),
@@ -877,7 +909,7 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(0x1E, "classes", "Array<Class>", "A:Class", "array:Class", default=[], default_2k3=[], persist=True, is2k3=True, doc="Classes. RPG Maker 2003 only."),
         _f(0x1F, "classD1", "EmptyBlock", "raw", "raw", persist=True, is2k3=True, doc="Duplicated? - Not used. RPG Maker 2003 only."),
         _f(0x20, "battleranimations", "Array<BattlerAnimation>", "A:BattlerAnimation", "array:BattlerAnimation", default=[], default_2k3=[], persist=True, is2k3=True, doc="Battleranimations. RPG Maker 2003 only."),
-        _f(0x21, "maniac_string_variables", "Array<StringVariable>", "raw", "raw", doc="Maniac string variables. Maniac Patch extension."),
+        _f(0x21, "maniac_string_variables", "Array<StringVariable>", "A:StringVariable", "array:StringVariable", default=[], default_2k3=[], doc="Maniac string variables. Maniac Patch extension."),
     ),
     "Encounter": (
         _f(0x01, "troop_id", "Ref<Troop>", "int", "int", default=0, default_2k3=0, doc="Troop."),
@@ -916,7 +948,7 @@ STRUCTS: dict[str, tuple[FieldDef, ...]] = {
         _f(0x21, "airship_y", "Int32", "int", "int", default=0, default_2k3=0, doc="Airship Y."),
     ),
     "StringVariable": (
-        _f(0x01, "name", "DBString", "str", "str", default="", default_2k3="", doc="Name."),
+        _f(0x01, "name", "DBString", "str", "str", default="", default_2k3="", doc="Name shown in the editor."),
     ),
 }
 
@@ -989,7 +1021,7 @@ ENUMS: dict[str, dict[str, int]] = {
     "Map_GeneratorTiles": {"one": 0, "two": 1},
     "TreeMap_MapType": {"root": 0, "map": 1, "area": 2},
     "MoveCommand_Code": {"move_up": 0, "move_right": 1, "move_down": 2, "move_left": 3, "move_upright": 4, "move_downright": 5, "move_downleft": 6, "move_upleft": 7, "move_random": 8, "move_towards_hero": 9, "move_away_from_hero": 10, "move_forward": 11, "face_up": 12, "face_right": 13, "face_down": 14, "face_left": 15, "turn_90_degree_right": 16, "turn_90_degree_left": 17, "turn_180_degree": 18, "turn_90_degree_random": 19, "face_random_direction": 20, "face_hero": 21, "face_away_from_hero": 22, "wait": 23, "begin_jump": 24, "end_jump": 25, "lock_facing": 26, "unlock_facing": 27, "increase_movement_speed": 28, "decrease_movement_speed": 29, "increase_movement_frequence": 30, "decrease_movement_frequence": 31, "switch_on": 32, "switch_off": 33, "change_graphic": 34, "play_sound_effect": 35, "walk_everywhere_on": 36, "walk_everywhere_off": 37, "stop_animation": 38, "start_animation": 39, "increase_transp": 40, "decrease_transp": 41},
-    "EventCommand_Code": {"END": 10, "CallCommonEvent": 1005, "ForceFlee": 1006, "EnableCombo": 1007, "ChangeClass": 1008, "ChangeBattleCommands": 1009, "OpenLoadMenu": 5001, "ExitGame": 5002, "ToggleAtbMode": 5003, "ToggleFullscreen": 5004, "OpenVideoOptions": 5005, "ShowMessage": 10110, "MessageOptions": 10120, "ChangeFaceGraphic": 10130, "ShowChoice": 10140, "InputNumber": 10150, "ControlSwitches": 10210, "ControlVars": 10220, "TimerOperation": 10230, "ChangeGold": 10310, "ChangeItems": 10320, "ChangePartyMembers": 10330, "ChangeExp": 10410, "ChangeLevel": 10420, "ChangeParameters": 10430, "ChangeSkills": 10440, "ChangeEquipment": 10450, "ChangeHP": 10460, "ChangeSP": 10470, "ChangeCondition": 10480, "FullHeal": 10490, "SimulatedAttack": 10500, "ChangeHeroName": 10610, "ChangeHeroTitle": 10620, "ChangeSpriteAssociation": 10630, "ChangeActorFace": 10640, "ChangeVehicleGraphic": 10650, "ChangeSystemBGM": 10660, "ChangeSystemSFX": 10670, "ChangeSystemGraphics": 10680, "ChangeScreenTransitions": 10690, "EnemyEncounter": 10710, "OpenShop": 10720, "ShowInn": 10730, "EnterHeroName": 10740, "Teleport": 10810, "MemorizeLocation": 10820, "RecallToLocation": 10830, "EnterExitVehicle": 10840, "SetVehicleLocation": 10850, "ChangeEventLocation": 10860, "TradeEventLocations": 10870, "StoreTerrainID": 10910, "StoreEventID": 10920, "EraseScreen": 11010, "ShowScreen": 11020, "TintScreen": 11030, "FlashScreen": 11040, "ShakeScreen": 11050, "PanScreen": 11060, "WeatherEffects": 11070, "ShowPicture": 11110, "MovePicture": 11120, "ErasePicture": 11130, "ShowBattleAnimation": 11210, "PlayerVisibility": 11310, "FlashSprite": 11320, "MoveEvent": 11330, "ProceedWithMovement": 11340, "HaltAllMovement": 11350, "Wait": 11410, "PlayBGM": 11510, "FadeOutBGM": 11520, "MemorizeBGM": 11530, "PlayMemorizedBGM": 11540, "PlaySound": 11550, "PlayMovie": 11560, "KeyInputProc": 11610, "ChangeMapTileset": 11710, "ChangePBG": 11720, "ChangeEncounterSteps": 11740, "TileSubstitution": 11750, "TeleportTargets": 11810, "ChangeTeleportAccess": 11820, "EscapeTarget": 11830, "ChangeEscapeAccess": 11840, "OpenSaveMenu": 11910, "ChangeSaveAccess": 11930, "OpenMainMenu": 11950, "ChangeMainMenuAccess": 11960, "ConditionalBranch": 12010, "Label": 12110, "JumpToLabel": 12120, "Loop": 12210, "BreakLoop": 12220, "EndEventProcessing": 12310, "EraseEvent": 12320, "CallEvent": 12330, "Comment": 12410, "GameOver": 12420, "ReturntoTitleScreen": 12510, "ChangeMonsterHP": 13110, "ChangeMonsterMP": 13120, "ChangeMonsterCondition": 13130, "ShowHiddenMonster": 13150, "ChangeBattleBG": 13210, "ShowBattleAnimation_B": 13260, "ConditionalBranch_B": 13310, "TerminateBattle": 13410, "ShowMessage_2": 20110, "ShowChoiceOption": 20140, "ShowChoiceEnd": 20141, "VictoryHandler": 20710, "EscapeHandler": 20711, "DefeatHandler": 20712, "EndBattle": 20713, "Transaction": 20720, "NoTransaction": 20721, "EndShop": 20722, "Stay": 20730, "NoStay": 20731, "EndInn": 20732, "ElseBranch": 22010, "EndBranch": 22011, "EndLoop": 22210, "Comment_2": 22410, "ElseBranch_B": 23310, "EndBranch_B": 23311, "EasyRpg_TriggerEventAt": 2002, "EasyRpg_Pathfinder": 2003, "EasyRpg_CallMovementAction": 2050, "EasyRpg_WaitForSingleMovement": 2051, "EasyRpg_AnimateVariable": 2052, "EasyRpg_SetInterpreterFlag": 2053, "EasyRpg_ProcessJson": 2055, "EasyRpg_CloneMapEvent": 2056, "EasyRpg_DestroyMapEvent": 2057, "EasyRpg_StringPictureMenu": 2058, "Maniac_GetSaveInfo": 3001, "Maniac_Save": 3002, "Maniac_Load": 3003, "Maniac_EndLoadProcess": 3004, "Maniac_GetMousePosition": 3005, "Maniac_SetMousePosition": 3006, "Maniac_ShowStringPicture": 3007, "Maniac_GetPictureInfo": 3008, "Maniac_ControlBattle": 3009, "Maniac_ControlAtbGauge": 3010, "Maniac_ChangeBattleCommandEx": 3011, "Maniac_GetBattleInfo": 3012, "Maniac_ControlVarArray": 3013, "Maniac_KeyInputProcEx": 3014, "Maniac_RewriteMap": 3015, "Maniac_ControlGlobalSave": 3016, "Maniac_ChangePictureId": 3017, "Maniac_SetGameOption": 3018, "Maniac_CallCommand": 3019, "Maniac_ControlStrings": 3020, "Maniac_GetGameInfo": 3021, "Maniac_EditPicture": 3025, "Maniac_WritePicture": 3026, "Maniac_AddMoveRoute": 3027, "Maniac_EditTile": 3028, "Maniac_ControlTextProcessing": 3029, "Maniac_Zoom": 3032},
+    "EventCommand_Code": {"END": 10, "CallCommonEvent": 1005, "ForceFlee": 1006, "EnableCombo": 1007, "ChangeClass": 1008, "ChangeBattleCommands": 1009, "OpenLoadMenu": 5001, "ExitGame": 5002, "ToggleAtbMode": 5003, "ToggleFullscreen": 5004, "OpenVideoOptions": 5005, "ShowMessage": 10110, "MessageOptions": 10120, "ChangeFaceGraphic": 10130, "ShowChoice": 10140, "InputNumber": 10150, "ControlSwitches": 10210, "ControlVars": 10220, "TimerOperation": 10230, "ChangeGold": 10310, "ChangeItems": 10320, "ChangePartyMembers": 10330, "ChangeExp": 10410, "ChangeLevel": 10420, "ChangeParameters": 10430, "ChangeSkills": 10440, "ChangeEquipment": 10450, "ChangeHP": 10460, "ChangeSP": 10470, "ChangeCondition": 10480, "FullHeal": 10490, "SimulatedAttack": 10500, "ChangeHeroName": 10610, "ChangeHeroTitle": 10620, "ChangeSpriteAssociation": 10630, "ChangeActorFace": 10640, "ChangeVehicleGraphic": 10650, "ChangeSystemBGM": 10660, "ChangeSystemSFX": 10670, "ChangeSystemGraphics": 10680, "ChangeScreenTransitions": 10690, "EnemyEncounter": 10710, "OpenShop": 10720, "ShowInn": 10730, "EnterHeroName": 10740, "Teleport": 10810, "MemorizeLocation": 10820, "RecallToLocation": 10830, "EnterExitVehicle": 10840, "SetVehicleLocation": 10850, "ChangeEventLocation": 10860, "TradeEventLocations": 10870, "StoreTerrainID": 10910, "StoreEventID": 10920, "EraseScreen": 11010, "ShowScreen": 11020, "TintScreen": 11030, "FlashScreen": 11040, "ShakeScreen": 11050, "PanScreen": 11060, "WeatherEffects": 11070, "ShowPicture": 11110, "MovePicture": 11120, "ErasePicture": 11130, "ShowBattleAnimation": 11210, "PlayerVisibility": 11310, "FlashSprite": 11320, "MoveEvent": 11330, "ProceedWithMovement": 11340, "HaltAllMovement": 11350, "Wait": 11410, "PlayBGM": 11510, "FadeOutBGM": 11520, "MemorizeBGM": 11530, "PlayMemorizedBGM": 11540, "PlaySound": 11550, "PlayMovie": 11560, "KeyInputProc": 11610, "ChangeMapTileset": 11710, "ChangePBG": 11720, "ChangeEncounterSteps": 11740, "TileSubstitution": 11750, "TeleportTargets": 11810, "ChangeTeleportAccess": 11820, "EscapeTarget": 11830, "ChangeEscapeAccess": 11840, "OpenSaveMenu": 11910, "ChangeSaveAccess": 11930, "OpenMainMenu": 11950, "ChangeMainMenuAccess": 11960, "ConditionalBranch": 12010, "Label": 12110, "JumpToLabel": 12120, "Loop": 12210, "BreakLoop": 12220, "EndEventProcessing": 12310, "EraseEvent": 12320, "CallEvent": 12330, "Comment": 12410, "GameOver": 12420, "ReturntoTitleScreen": 12510, "ChangeMonsterHP": 13110, "ChangeMonsterMP": 13120, "ChangeMonsterCondition": 13130, "ShowHiddenMonster": 13150, "ChangeBattleBG": 13210, "ShowBattleAnimation_B": 13260, "ConditionalBranch_B": 13310, "TerminateBattle": 13410, "ShowMessage_2": 20110, "ShowChoiceOption": 20140, "ShowChoiceEnd": 20141, "VictoryHandler": 20710, "EscapeHandler": 20711, "DefeatHandler": 20712, "EndBattle": 20713, "Transaction": 20720, "NoTransaction": 20721, "EndShop": 20722, "Stay": 20730, "NoStay": 20731, "EndInn": 20732, "ElseBranch": 22010, "EndBranch": 22011, "EndLoop": 22210, "Comment_2": 22410, "ElseBranch_B": 23310, "EndBranch_B": 23311, "EasyRpg_TriggerEventAt": 2002, "EasyRpg_Pathfinder": 2003, "EasyRpg_CallMovementAction": 2050, "EasyRpg_WaitForSingleMovement": 2051, "EasyRpg_AnimateVariable": 2052, "EasyRpg_SetInterpreterFlag": 2053, "EasyRpg_ProcessJson": 2055, "EasyRpg_CloneMapEvent": 2056, "EasyRpg_DestroyMapEvent": 2057, "EasyRpg_StringPictureMenu": 2058, "Maniac_GetSaveInfo": 3001, "Maniac_Save": 3002, "Maniac_Load": 3003, "Maniac_EndLoadProcess": 3004, "Maniac_GetMousePosition": 3005, "Maniac_SetMousePosition": 3006, "Maniac_ShowStringPicture": 3007, "Maniac_GetPictureInfo": 3008, "Maniac_ControlBattle": 3009, "Maniac_ControlAtbGauge": 3010, "Maniac_ChangeBattleCommandEx": 3011, "Maniac_GetBattleInfo": 3012, "Maniac_ControlVarArray": 3013, "Maniac_KeyInputProcEx": 3014, "Maniac_RewriteMap": 3015, "Maniac_ControlGlobalSave": 3016, "Maniac_ChangePictureId": 3017, "Maniac_SetGameOption": 3018, "Maniac_CallCommand": 3019, "Maniac_ControlStrings": 3020, "Maniac_GetGameInfo": 3021, "Maniac_EditPicture": 3025, "Maniac_WritePicture": 3026, "Maniac_AddMoveRoute": 3027, "Maniac_EditTile": 3028, "Maniac_ControlTextProcessing": 3029, "Maniac_Script": 3030, "Maniac_Script_2": 3031, "Maniac_Zoom": 3032, "Maniac_Console": 3033, "Maniac_ControlSelfVariable": 3036, "Maniac_ControlMediaOption": 3038},
     "EventPage_ManiacEventInfo": {"action": 0, "touched": 1, "collision": 2, "auto_start": 3, "parallel": 4, "called": 5, "battle_start": 6, "battle_parallel": 7, "map_event": 16, "common_event": 32, "battle_event": 64},
     "SavePicture_EasyRpgFlip": {"none": 0, "x": 1, "y": 2, "both": 3},
     "SavePicture_EasyRpgType": {"default": 0, "window": 1, "canvas": 2},
@@ -1008,4 +1040,6 @@ FLAGS: dict[str, list[tuple[str, bool]]] = {
     "EasyRpgEventRuntime_Flags": [("reserved_1", False)],
     "EasyRpgStateRuntime_Flags": [("conf_override_active", False), ("reserved_1", False), ("reserved_2", False), ("reserved_3", False), ("patch_destiny_on", False), ("patch_destiny_off", False), ("patch_dynrpg_on", False), ("patch_dynrpg_off", False), ("patch_maniac_on", False), ("patch_maniac_off", False), ("patch_common_this_event_on", False), ("patch_common_this_event_off", False), ("patch_unlock_pics_on", False), ("patch_unlock_pics_off", False), ("patch_keypatch_on", False), ("patch_keypatch_off", False), ("patch_rpg2k3_cmds_on", False), ("patch_rpg2k3_cmds_off", False), ("use_rpg2k_battle_system_on", False), ("use_rpg2k_battle_system_off", False)],
     "ManiacMessageHook_Flags": [("user_event", False), ("create_window", False), ("destroy_window", False), ("text_rendering", False)],
+    "ManiacTitleSceneHook_Flags": [("initialize", False), ("create_picture", False), ("begin_scene", False), ("end_scene", False), ("every_frame", False), ("selection_changed", False), ("new_game", False)],
+    "ManiacSaveSceneHook_Flags": [("initialize", False), ("create_picture", False), ("begin_scene", False), ("end_scene", False), ("every_frame", False), ("selection_changed", False), ("new_game", False)],
 }

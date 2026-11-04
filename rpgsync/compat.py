@@ -25,7 +25,7 @@ import os
 import tomllib
 from collections.abc import Iterable, Sequence
 
-from . import dynparams, dynrpg, maniac
+from . import dynparams, dynrpg, maniac, maniac_ext
 from .commands import CODE_NAMES
 from .lcf import Command
 
@@ -118,6 +118,14 @@ def command_problems(
                 hint = ' (a %s command: add "%s" to [tool.rpgsync] patches)' % (patch, patch) if patch else ""
                 add(True, "unknown command %d%s" % (code, hint))
             continue
+        if "maniac" not in patches:
+            option = maniac_ext.maniac_option(c)
+            if option is not None:
+                add(
+                    False,
+                    '%s uses a Maniac Patch option (%s): add "maniac" to [tool.rpgsync] patches'
+                    % (describe(code), option),
+                )
         if engine == "2k":
             if code in ONLY_2K3:
                 add(True, "%s only exists in RPG Maker 2003" % describe(code))

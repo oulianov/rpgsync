@@ -4,16 +4,20 @@
 
 liblcf (https://github.com/EasyRPG/liblcf) describes every LCF structure in
 ``generator/csv``: ``fields.csv`` (+ ``fields_easyrpg.csv``), ``structs.csv``,
-``enums.csv``, ``flags.csv`` and ``constants.csv``.  This script turns the
-database (``ldb``) part of it into
+``enums.csv``, ``flags.csv`` and ``constants.csv``.  The CSVs read by default are
+the EasyRPG Editor's liblcf (``../Editor/lib/liblcf``, a fork that names more of
+the Maniac Patch's chunks).  This script turns the database (``ldb``) part of it into
 
 * ``rpgsync/dbschema.py``: the raw schema as data (chunk id, name, liblcf type,
   codec, default, PersistIfDefault, Is2k3, size chunk, description) plus the
-  enums, flags and the list of exported database tables;
+  enums, flags, the exported database tables and the single structures (Terms,
+  System) exported as one model each;
 * ``rpgsync/db.py``: one pydantic model per structure used by the exported
   tables, with liblcf defaults and a description per field.
 
-The CSVs are not shipped with rpgsync; the generated files are committed.
+The CSVs are not shipped with rpgsync; the generated files are committed.  A field
+added to the CSVs (a newly named Maniac chunk...) appears in the database files
+once they are generated again: nothing else lists the fields.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ import typer
 from pydantic import BaseModel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CSV = os.path.join(HERE, "..", "..", "Player", "lib", "liblcf", "generator", "csv")
+DEFAULT_CSV = os.path.join(HERE, "..", "..", "Editor", "lib", "liblcf", "generator", "csv")
 DEFAULT_OUT = os.path.join(HERE, "..", "rpgsync")
 
 # Exported database tables: name -> (Database chunk id, structure, title).
@@ -44,6 +48,14 @@ TABLES: list[tuple[str, int, str, str]] = [
     ("battleranimations", 0x20, "BattlerAnimation", "Battler animations (RPG Maker 2003)"),
     ("switches", 0x17, "Switch", "Switches"),
     ("variables", 0x18, "Variable", "Variables"),
+    ("strings", 0x21, "StringVariable", "String variables (Maniac Patch)"),
+]
+
+# Single structures of the database exported as one model each (database/terms.py,
+# database/system.py): name -> (Database chunk id, structure, title).
+SINGLES: list[tuple[str, int, str, str]] = [
+    ("terms", 0x15, "Terms", "Terms"),
+    ("system", 0x16, "System", "System"),
 ]
 
 # Map tree (RPG_RT.lmt) structures exported too (database/map_tree.py).
@@ -57,6 +69,9 @@ OPAQUE = {
     ("MapInfo", "scrollbar_x"),
     ("MapInfo", "scrollbar_y"),
     ("MapInfo", "expanded_node"),
+    # counted up by the editor at each save of the database: not the game's, and kept
+    # out of database/system.py so that a save in the editor changes nothing there
+    ("System", "save_count"),
 }
 
 CLASS_DOCS = {
@@ -86,6 +101,12 @@ CLASS_DOCS = {
     "MapInfo": "A map or an area of the map tree (RPG_RT.lmt) and its map properties.",
     "Encounter": "A troop met at random on a map.",
     "Start": "Where the party and the vehicles start a new game.",
+    "StringVariable": "A string variable name (Maniac Patch).",
+    "Terms": "The texts of the game: battle messages, menus, stats... (Database > Vocabulary).\n\n"
+    "    A field left out keeps its default (an empty text: the engine's own).",
+    "System": "Game settings: title and system graphics, music and sounds, starting party, transitions, "
+    "test battle\n    (Database > System).",
+    "TestBattler": "An actor of the editor's test battle.",
 }
 
 # Better descriptions for fields whose liblcf comment only states the type.
@@ -127,7 +148,10 @@ FIELD_DOCS = {
     ("Skill", "description"): "Help text",
     ("Skill", "using_message1"): "Battle message when used (first line)",
     ("Skill", "using_message2"): "Battle message when used (second line)",
-    ("Skill", "failure_message"): "Message shown when the skill fails",
+    ("Skill", "failure_message"): (
+        "Message shown when the skill fails (0-3); the Maniac Patch's Hit Rate Calc box stores 3: the skill"
+        " hits like a physical attack"
+    ),
     ("Skill", "sp_type"): "SP cost unit",
     ("Skill", "sp_percent"): "SP cost in percent of max SP",
     ("Skill", "sp_cost"): "SP cost",
@@ -347,9 +371,46 @@ FIELD_DOCS = {
     ("Start", "airship_map_id"): "Map of the airship (0 = not placed)",
     ("Start", "airship_x"): "Airship X",
     ("Start", "airship_y"): "Airship Y",
+    ("StringVariable", "name"): "Name shown in the editor",
+    ("System", "boat_name"): "CharSet of the boat",
+    ("System", "ship_name"): "CharSet of the ship",
+    ("System", "airship_name"): "CharSet of the airship",
+    ("System", "boat_index"): "Sprite index (0-7) of the boat",
+    ("System", "ship_index"): "Sprite index (0-7) of the ship",
+    ("System", "airship_index"): "Sprite index (0-7) of the airship",
+    ("System", "title_name"): "Title screen picture (Title/)",
+    ("System", "gameover_name"): "Game over picture (GameOver/)",
+    ("System", "system_name"): "System graphic (System/)",
+    ("System", "system2_name"): "Battle system graphic (System2/)",
+    ("System", "party"): "Starting party: actor ids",
+    ("System", "menu_commands"): "Main menu commands, in order (Maniac Patch: -9 hides Game End)",
+    ("System", "message_stretch"): "Window background: stretched or tiled",
+    ("System", "font_id"): "Font",
+    ("System", "battletest_background"): "Test battle background",
+    ("System", "battletest_data"): "Actors of the test battle",
+    ("System", "battletest_terrain"): "Test battle terrain",
+    ("System", "battletest_formation"): "Test battle formation",
+    ("System", "battletest_condition"): "Test battle condition",
+    ("System", "frame_name"): "Frame picture (Frame/) drawn over the screen",
+    ("System", "show_frame"): "Draw the frame picture",
+    ("TestBattler", "actor_id"): "Actor",
+    ("TestBattler", "level"): "Level",
+    ("TestBattler", "weapon_id"): "Weapon",
+    ("TestBattler", "shield_id"): "Shield",
+    ("TestBattler", "armor_id"): "Armor",
+    ("TestBattler", "helmet_id"): "Helmet",
+    ("TestBattler", "accessory_id"): "Accessory",
 }
 
 STRUCT_KIND_TYPES = {"Parameters": "params", "Equipment": "equip"}
+
+# Size chunks that count the elements of their vector (liblcf Count<...>): element size
+COUNT_UNITS = {
+    "Count<Vector<Int16>>": 2,
+    "Count<Vector<Int32>>": 4,
+    "Count<Vector<UInt8>>": 1,
+    "Count<Vector<Boolean>>": 1,
+}
 
 
 class Row(BaseModel):
@@ -477,7 +538,7 @@ class Schema:
                     visit(row.type)
             order.append(s)
 
-        for _, _, s, _ in TABLES:
+        for _, _, s, _ in TABLES + SINGLES:
             visit(s)
         for s in TREE_ROOTS:
             visit(s)
@@ -649,14 +710,15 @@ def gen_dbschema(schema: Schema) -> str:
     out.append("    is2k3: bool = False      # RPG Maker 2003 only")
     out.append("    size_id: int | None = None  # chunk holding this field's byte size")
     out.append("    size_of: int | None = None  # this chunk is the byte size of chunk size_of")
+    out.append("    size_unit: int = 1          # size_of counts elements of this many bytes (liblcf Count<...>)")
     out.append('    doc: str = ""')
     out.append("")
     out.append("")
     out.append("def _f(id, name, type, kind, model, default=None, default_2k3=None, persist=False, is2k3=False,")
-    out.append('       size_id=None, size_of=None, doc=""):')
+    out.append('       size_id=None, size_of=None, size_unit=1, doc=""):')
     out.append("    return FieldDef(id=id, name=name, type=type, kind=kind, model=model, default=default,")
     out.append("                    default_2k3=default_2k3, persist=persist, is2k3=is2k3, size_id=size_id,")
-    out.append("                    size_of=size_of, doc=doc)")
+    out.append("                    size_of=size_of, size_unit=size_unit, doc=doc)")
     out.append("")
     out.append("")
     out.append("# Database table name -> (Database chunk id, structure, title)")
@@ -665,7 +727,13 @@ def gen_dbschema(schema: Schema) -> str:
         out.append("    %s: (0x%02X, %s, %s)," % (_pyrepr(name), cid, _pyrepr(s), _pyrepr(title)))
     out.append("}")
     out.append("")
-    out.append("# Structures used by the exported tables (dependencies first)")
+    out.append("# Single structures exported as one model each: name -> (Database chunk id, structure, title)")
+    out.append("SINGLES: dict[str, tuple[int, str, str]] = {")
+    for name, cid, s, title in SINGLES:
+        out.append("    %s: (0x%02X, %s, %s)," % (_pyrepr(name), cid, _pyrepr(s), _pyrepr(title)))
+    out.append("}")
+    out.append("")
+    out.append("# Structures used by the exported tables and single structures (dependencies first)")
     out.append("MODEL_STRUCTS: list[str] = [")
     for s in schema.closure():
         out.append("    %s," % _pyrepr(s))
@@ -706,6 +774,8 @@ def gen_dbschema(schema: Schema) -> str:
                 kw.append("size_id=0x%02X" % sizes[r.name])
             if r.is_size:
                 kw.append("size_of=0x%02X" % data[r.name])
+                if r.type.startswith("Count<"):  # a number of elements, not of bytes
+                    kw.append("size_unit=%d" % COUNT_UNITS[r.type])
             else:
                 kw.append("doc=%s" % _pyrepr(describe(schema, r, model)))
             out.append("        _f(%s)," % ", ".join(args + kw))

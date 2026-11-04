@@ -11,10 +11,11 @@ A database file is one class whose attributes are the entries::
 
     variables = Variables()
 
-Event scripts import ``variables`` / ``switches`` from these files, so
-``variables.code_voulu`` reads and writes like ``variables[32]`` (and
-``variables[32]`` keeps working), and ``maps`` from database/map_tree.py,
-so ``maps.relm`` is the id of that map.  The attribute names belong to the
+Event scripts import ``variables`` / ``switches`` (and, in Maniac Patch games,
+``strings``) from these files, so ``variables.code_voulu`` reads and writes like
+``variables[32]`` (and ``variables[32]`` keeps working), and ``maps`` from
+database/map_tree.py, so ``maps.relm`` is the id of that map.  database/terms.py
+and database/system.py hold one model each: ``terms = Terms(...)``.  The attribute names belong to the
 scripts: renaming a variable in the editor keeps them, and an IDE rename
 changes nothing in the game.
 
@@ -29,7 +30,7 @@ from typing import TYPE_CHECKING, Self, overload
 from . import db, dsl
 from .db import *  # noqa: F403
 
-__all__ = [*db.__all__, "Area", "Map", "MapTree", "SwitchTable", "Table", "VariableTable"]
+__all__ = [*db.__all__, "Area", "Map", "MapTree", "StringTable", "SwitchTable", "Table", "VariableTable"]
 
 
 class Table:
@@ -43,6 +44,10 @@ class VariableTable(dsl.Variables, Table):
 
 class SwitchTable(dsl.Switches, Table):
     """The switches of the database (``switches[12]`` works too)."""
+
+
+class StringTable(dsl.StringVars, Table):
+    """The string variables of the Maniac Patch (``strings[3]`` works too)."""
 
 
 class Variable(db.Variable):
@@ -77,6 +82,23 @@ class Switch(db.Switch):
         def __get__(self, obj: object, owner: type, /) -> dsl.Switch: ...
         def __get__(self, obj: object, owner: type, /) -> Self | dsl.Switch: ...
         def __set__(self, obj: object, value: bool, /) -> None: ...
+
+
+class StringVariable(db.StringVariable):
+    """A named string variable (Maniac Patch): ``player_name = StringVariable(3,
+    "Player name")``.  Event scripts use it as ``strings.player_name``."""
+
+    def __init__(self, id: int | None = None, name: str = "") -> None:
+        super().__init__(id=id, name=name)
+
+    if TYPE_CHECKING:
+
+        @overload
+        def __get__(self, obj: None, owner: type, /) -> Self: ...
+        @overload
+        def __get__(self, obj: object, owner: type, /) -> dsl.StringVar: ...
+        def __get__(self, obj: object, owner: type, /) -> Self | dsl.StringVar: ...
+        def __set__(self, obj: object, value: dsl.Text, /) -> None: ...
 
 
 class MapTree(Table):

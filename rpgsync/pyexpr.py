@@ -24,7 +24,7 @@ import ast
 import keyword
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import MappingProxyType
@@ -40,14 +40,50 @@ from .commands import Call, Command, CompileError, Ctx, Sym, pystr
 # Expression model
 # --------------------------------------------------------------------------
 
-COLLECTIONS = ("variables", "switches", "items", "actors", "events", "common_events", "enemies", "pictures")
+COLLECTIONS = (
+    "variables",
+    "switches",
+    "items",
+    "actors",
+    "events",
+    "common_events",
+    "enemies",
+    "pictures",
+    "strings",
+    "party",  # party[0]: the first member (Maniac Patch)
+)
 CHARACTERS = {10001: "player", 10002: "boat", 10003: "ship", 10004: "airship", 10005: "this"}
 CHARACTER_IDS = {v: k for k, v in CHARACTERS.items()}
 
 COMPARE_OPS = {ast.Eq: "==", ast.NotEq: "!=", ast.Gt: ">", ast.GtE: ">=", ast.Lt: "<", ast.LtE: "<="}
 COMPARE = ["==", ">=", "<=", ">", "<", "!="]  # RPG Maker operator order
-AUG_OPS = {ast.Add: "+=", ast.Sub: "-=", ast.Mult: "*=", ast.FloorDiv: "//=", ast.Mod: "%="}
-VAR_OPS = ["=", "+=", "-=", "*=", "//=", "%="]
+AUG_OPS = {
+    ast.Add: "+=",
+    ast.Sub: "-=",
+    ast.Mult: "*=",
+    ast.FloorDiv: "//=",
+    ast.Mod: "%=",
+    ast.BitOr: "|=",  # |= and the ones after it: Maniac Patch
+    ast.BitAnd: "&=",
+    ast.BitXor: "^=",
+    ast.LShift: "<<=",
+    ast.RShift: ">>=",
+}
+VAR_OPS = ["=", "+=", "-=", "*=", "//=", "%=", "|=", "&=", "^=", "<<=", ">>="]
+# a op b in a value (Maniac Patch Control Variables, operand "a op b"): op 1-10
+BIN_OPS = {
+    ast.Add: "+",
+    ast.Sub: "-",
+    ast.Mult: "*",
+    ast.FloorDiv: "//",
+    ast.Mod: "%",
+    ast.BitOr: "|",
+    ast.BitAnd: "&",
+    ast.BitXor: "^",
+    ast.LShift: "<<",
+    ast.RShift: ">>",
+    ast.Pow: "**",
+}
 
 
 class Ref(BaseModel):
@@ -61,6 +97,7 @@ class Ref(BaseModel):
 class Range(BaseModel):
     start: Any
     stop: Any
+    step: int = 1  # -1: from start down to stop + 1 (the Maniac Patch keeps the order)
 
 
 class Attr(BaseModel):
@@ -98,6 +135,24 @@ class Pos(BaseModel):
 
 class And(BaseModel):
     values: list[Any]
+    node: Any = None
+
+
+class BinOp(BaseModel):
+    """``a + b``, ``a & 255``... (Maniac Patch values)."""
+
+    left: Any
+    op: str
+    right: Any
+    node: Any = None
+
+
+class IfExp(BaseModel):
+    """``a if variables[1] > 0 else b`` (Maniac Patch values)."""
+
+    test: Any
+    body: Any
+    orelse: Any
     node: Any = None
 
 
@@ -157,9 +212,12 @@ def evaluate(node: ast.AST):
             raise CompileError("indexing is only supported on %s" % ", ".join(COLLECTIONS), node)
         s = node.slice
         if isinstance(s, ast.Slice):
-            if s.step is not None or s.lower is None or s.upper is None:
-                raise CompileError("ranges are written [first:last+1], e.g. variables[1:11]", node)
-            index = Range(start=evaluate(s.lower), stop=evaluate(s.upper))
+            step = evaluate(s.step) if s.step is not None else 1
+            if step not in (1, -1) or s.lower is None or s.upper is None:
+                raise CompileError(
+                    "ranges are written [first:last+1], e.g. variables[1:11] (or [first:last-1:-1] backwards)", node
+                )
+            index = Range(start=evaluate(s.lower), stop=evaluate(s.upper), step=step)
         elif isinstance(s, ast.BinOp) and node.value.id in ("variables", "switches"):
             raise CompileError(
                 "RPG Maker can't compute an id inside []: compute it in a variable first, "
@@ -170,7 +228,7 @@ def evaluate(node: ast.AST):
             index = evaluate(s)
         return Ref(coll=node.value.id, index=index, node=node)
     if isinstance(node, ast.Attribute):
-        if isinstance(node.value, ast.Name) and node.value.id in ("variables", "switches", "common_events"):
+        if isinstance(node.value, ast.Name) and node.value.id in ("variables", "switches", "common_events", "strings"):
             return _named_ref(node)
         if isinstance(node.value, ast.Name) and node.value.id == "maps":
             return _map_id(node)
@@ -224,6 +282,13 @@ def evaluate(node: ast.AST):
         a, b = evaluate(node.left), evaluate(node.right)
         if isinstance(a, (Sym, Call)) and is_int(b) and b >= 1:
             return Repeat(value=a, count=b, node=node)
+    if isinstance(node, ast.BinOp) and type(node.op) in BIN_OPS:
+        a, b = evaluate(node.left), evaluate(node.right)
+        if isinstance(a, str) or isinstance(b, str):
+            raise CompileError("unsupported expression: %s" % ast.unparse(node), node)
+        return BinOp(left=a, op=BIN_OPS[type(node.op)], right=b, node=node)
+    if isinstance(node, ast.IfExp):
+        return IfExp(test=evaluate(node.test), body=evaluate(node.body), orelse=evaluate(node.orelse), node=node)
     raise CompileError("unsupported expression: %s" % ast.unparse(node), node)
 
 
@@ -354,10 +419,17 @@ def db_names(ctx: Ctx):
     """Refer to the database's named variables and switches by name
     (``variables.code_voulu``) while converting one file."""
     token = _DB_NAMES.set(ctx.handles)
+    selectors = _MANIAC_SELECTORS.set(not ctx.dynparams)
     try:
         yield
     finally:
         _DB_NAMES.reset(token)
+        _MANIAC_SELECTORS.reset(selectors)
+
+
+# Maniac Patch ids given by a variable (actors[variables.n].hp...); not in a game running
+# DynParams, which writes them its own way
+_MANIAC_SELECTORS: ContextVar[bool] = ContextVar("maniac_selectors", default=True)
 
 
 def var_src(n: int) -> str:
@@ -373,6 +445,12 @@ def ce_src(n: int) -> str:
 def sw_src(n: int) -> str:
     name = _DB_NAMES.get().get("switches", _NONE).get(n)
     return "switches.%s" % name if name else "switches[%d]" % n
+
+
+def str_src(n: int) -> str:
+    """A string variable (Maniac Patch): ``strings.name`` / ``strings[3]``."""
+    name = _DB_NAMES.get().get("strings", _NONE).get(n)
+    return "strings.%s" % name if name else "strings[%d]" % n
 
 
 def map_src(n: int) -> str:
@@ -413,7 +491,7 @@ def _named_ref(node: ast.Attribute) -> Ref:
     n = _ids(coll).get(node.attr)
     if n is not None:
         return Ref(coll=coll, index=n, node=node)
-    what = {"variables": "variable", "switches": "switch", "common_events": "common event"}[coll]
+    what = {"variables": "variable", "switches": "switch", "common_events": "common event", "strings": "string"}[coll]
     raise CompileError("no %s named %r in database/%s.py" % (what, node.attr, coll), node)
 
 
@@ -494,8 +572,12 @@ def target_src(coll: str, mode: int, a: int, b: int) -> str | None:
         )
     if mode == 1 and b >= a:
         return "%s[%d:%d]" % (coll, a, b + 1)
+    if mode == 1:  # backwards (the Maniac Patch keeps the order)
+        return "%s[%d:%d:-1]" % (coll, a, b - 1)
     if mode == 2 and b == 0:
         return "%s[%s]" % (coll, var_src(a))
+    if mode == 3 and coll == "variables":  # Maniac Patch: from the variable a variable names, to another's
+        return "%s[%s:%s + 1]" % (coll, var_src(a), var_src(b))
     return None
 
 
@@ -504,12 +586,25 @@ def target_val(v: Ref) -> tuple[int, int, int]:
     if is_int(idx):
         return 0, idx, idx
     if isinstance(idx, Range) and is_int(idx.start) and is_int(idx.stop):
+        if idx.step == -1:
+            if idx.stop >= idx.start:
+                raise _err("empty range %s (backwards ranges are [first:last-1:-1])" % show(v), v)
+            return 1, idx.start, idx.stop + 1
         if idx.stop <= idx.start:
             raise _err("empty range %s (ranges are [first:last+1])" % show(v), v)
         return 1, idx.start, idx.stop - 1
     n = var_index(idx)
     if n is not None:
         return 2, n, 0
+    if (
+        isinstance(idx, Range)
+        and var_index(idx.start) is not None
+        and isinstance(idx.stop, BinOp)
+        and idx.stop.op == "+"
+        and var_index(idx.stop.left) is not None
+        and idx.stop.right == 1
+    ):
+        return 3, idx.start.index, idx.stop.left.index  # variables[variables.a : variables.b + 1] (Maniac Patch)
     raise _err("%s: index must be a number, a range [a:b] or variables[id]" % show(v), v)
 
 
@@ -610,6 +705,264 @@ def operand_val(v) -> tuple[int, int, int]:
 
 
 # --------------------------------------------------------------------------
+# Maniac Patch values and the Maniac operands of Control Variables
+# --------------------------------------------------------------------------
+#
+# Where the Maniac Patch takes a value, a selector says how it is given (4 bits
+# per value, packed in one parameter): 0 a number, 1 variables[n], 2
+# variables[variables[n]], 3 switches[n] (1 when ON), 4 switches[variables[n]].
+
+VALUE_FORMS = ("a number", "variables[id]", "variables[variables[id]]", "switches[id]", "switches[variables[id]]")
+
+
+def mval_src(mode: int, v: int) -> str | None:
+    """A Maniac value as written in scripts, None for an unknown selector."""
+    if mode == 0:
+        return str(v)
+    if mode == 1:
+        return var_src(v)
+    if mode == 2:
+        return "variables[%s]" % var_src(v)
+    if mode == 3:
+        return sw_src(v)
+    if mode == 4:
+        return "switches[%s]" % var_src(v)
+    return None
+
+
+def mval_val(v, what: str = "value", modes: int = 5) -> tuple[int, int]:
+    """(selector, parameter) of a Maniac value; `modes`: how many of the forms it takes."""
+    if is_int(v):
+        return 0, v
+    n = var_index(v)
+    if n is not None:
+        return 1, n
+    if is_ref(v, "variables") and var_index(v.index) is not None:
+        return 2, v.index.index
+    if int_index(v, "switches") is not None:
+        out = (3, v.index)
+    elif is_ref(v, "switches") and var_index(v.index) is not None:
+        out = (4, v.index.index)
+    else:
+        out = None
+    if out is None or out[0] >= modes:
+        raise _err("%s is %s (got %s)" % (what, " or ".join(VALUE_FORMS[:modes]), show(v)), v)
+    return out
+
+
+def _mv(m: int, slot: int, v: int) -> str | None:
+    """The value of a selector slot of a packed selector parameter."""
+    return mval_src((m >> 4 * slot) & 0xF, v)
+
+
+def _packed(*modes: int) -> int:
+    return sum(mode << 4 * slot for slot, mode in enumerate(modes))
+
+
+def _fits(m: int, slots: int) -> bool:
+    """Every bit of a packed selector parameter belongs to one of its first `slots` slots."""
+    return m >= 0 and m >> 4 * slots == 0
+
+
+MANIAC_ACTOR_PROPS = ACTOR_PROPS + ["id", "atb", "next_exp"]  # 15-17: Maniac Patch
+MANIAC_EVENT_PROPS = EVENT_PROPS + ["id"]  # 6: the event's id (Maniac Patch)
+MANIAC_ENEMY_PROPS = ENEMY_PROPS + ["id", "atb"]  # 8-9: Maniac Patch
+MANIAC_OTHER = {10: ("game", "date"), 11: ("game", "time"), 12: ("game", "frames"), 13: ("game", "maniac_version")}
+CV_BINARY = ["", "+", "-", "*", "//", "%", "|", "&", "^", "<<", ">>"]  # operand 19: op 1-10
+CV_FUNCTIONS = {12: "sqrt", 13: "sin", 14: "cos", 15: "atan2", 16: "min", 17: "max", 18: "abs", 22: "lerp"}
+CV_ARRAYS = {23: "array_sum", 24: "array_min", 25: "array_max"}
+# Control Variables operands with the id of what they read and the property, then (Maniac
+# Patch) how that id is given: collection, properties
+CV_SELECTED = {
+    4: ("items", ITEM_PROPS),
+    5: ("actors", MANIAC_ACTOR_PROPS),
+    6: ("events", MANIAC_EVENT_PROPS),
+    8: ("enemies", MANIAC_ENEMY_PROPS),
+    9: ("party", MANIAC_ACTOR_PROPS),
+}
+
+
+def _selected_src(kind: int, ident: int, prop: int, m: int) -> str | None:
+    coll, props = CV_SELECTED[kind]
+    if not 0 <= prop < len(props):
+        return None
+    if kind == 6 and m == 0:
+        return "%s.%s" % (char_src(ident), props[prop])
+    if m == 0:
+        return "%s[%d].%s" % (coll, ident, props[prop])
+    if kind == 6 and m in (1, 2):
+        idx = mval_src(m, ident)
+        return None if idx is None else "events[%s].%s" % (idx, props[prop])
+    idx = mval_src(m, ident)
+    return None if idx is None else "%s[%s].%s" % (coll, idx, props[prop])
+
+
+def cv_operand_src(kind: int, rest: list[int]) -> str | None:
+    """The value of Control Variables (RPG Maker's form: p5 onwards)."""
+    n = len(rest)
+    if kind in (0, 1, 2) and n == 2 and rest[1] == 0:
+        return operand_src(kind, rest[0], 0)
+    if kind == 7 and n == 2 and rest[1] == 0:
+        if rest[0] in OTHER_SRC:
+            return "%s.%s" % OTHER_SRC[rest[0]]
+        if rest[0] in MANIAC_OTHER:
+            return "%s.%s" % MANIAC_OTHER[rest[0]]
+        return None
+    if kind == 3 and n == 2:
+        return "randint(%d, %d)" % tuple(rest)
+    if kind == 3 and n == 3 and rest[2] != 0 and _fits(rest[2], 2):
+        a, b = _mv(rest[2], 0, rest[0]), _mv(rest[2], 1, rest[1])
+        return None if a is None or b is None else "randint(%s, %s)" % (a, b)
+    if kind in CV_SELECTED and n == 2:
+        if kind == 9:
+            return None  # the party member operand comes from the Maniac Patch: written with its selector
+        return _selected_src(kind, rest[0], rest[1], 0)
+    if kind in CV_SELECTED and n == 3 and (rest[2] != 0 or kind == 9):
+        return _selected_src(kind, rest[0], rest[1], rest[2])
+    if kind == 10 and n == 2 and rest[1] in (0, 1):
+        return sw_src(rest[0]) if rest[1] == 0 else "switches[%s]" % var_src(rest[0])
+    return _maniac_operand_src(kind, rest)
+
+
+def _maniac_operand_src(kind: int, r: list[int]) -> str | None:
+    """Operands 11-25 (Maniac Patch): maths on values."""
+    n = len(r)
+    if kind in (11, 16, 17) and n == 3 and _fits(r[2], 2):
+        a, b = _mv(r[2], 0, r[0]), _mv(r[2], 1, r[1])
+        if a is None or b is None:
+            return None
+        return "%s ** %s" % (_paren(a), _paren(b)) if kind == 11 else "%s(%s, %s)" % (CV_FUNCTIONS[kind], a, b)
+    if kind == 12 and n == 3 and _fits(r[2], 1):
+        a = _mv(r[2], 0, r[0])
+        return None if a is None else "sqrt(%s, %d)" % (a, r[1])
+    if kind in (13, 14) and n == 4 and _fits(r[2], 2):
+        a, b = _mv(r[2], 0, r[0]), _mv(r[2], 1, r[3])
+        return None if a is None or b is None else "%s(%s, %s, %d)" % (CV_FUNCTIONS[kind], a, b, r[1])
+    if kind == 15 and n == 4 and _fits(r[3], 2):
+        a, b = _mv(r[3], 0, r[0]), _mv(r[3], 1, r[1])
+        return None if a is None or b is None else "atan2(%s, %s, %d)" % (a, b, r[2])
+    if kind == 18 and n == 2 and _fits(r[1], 1):
+        a = _mv(r[1], 0, r[0])
+        return None if a is None else "abs(%s)" % a
+    if kind == 19 and n == 4 and 1 <= r[0] <= 10 and _fits(r[3], 2):
+        a, b = _mv(r[3], 0, r[1]), _mv(r[3], 1, r[2])
+        return None if a is None or b is None else "%s %s %s" % (a, CV_BINARY[r[0]], _paren(b))
+    if kind == 20 and n == 6 and 0 <= r[0] < len(COMPARE) and _fits(r[5], 4):
+        a, b, c, d = (_mv(r[5], k, r[k + 1]) for k in range(4))
+        if None in (a, b, c, d):
+            return None
+        return "%s if %s %s %s else %s" % (c, a, COMPARE[r[0]], b, d)
+    if kind == 22 and n == 5 and _fits(r[0], 4):
+        args = [_mv(r[0], k, r[k + 1]) for k in range(4)]
+        return None if None in args else "lerp(%s)" % ", ".join(args)  # type: ignore[arg-type]
+    if kind in CV_ARRAYS and n == 3 and _fits(r[0], 2):
+        a, b = _mv(r[0], 0, r[1]), _mv(r[0], 1, r[2])
+        return None if a is None or b is None else "%s(%s, %s)" % (CV_ARRAYS[kind], a, b)
+    return None
+
+
+def _paren(src: str) -> str:
+    return "(%s)" % src if src.startswith("-") else src
+
+
+def cv_operand_val(v) -> tuple[int, list[int]]:
+    """(operand, its parameters from p5) of a Control Variables value, RPG Maker's form."""
+    if isinstance(v, bool):
+        v = int(v)
+    if is_ref(v, "switches"):
+        if int_index(v, "switches") is not None:
+            return 10, [v.index, 0]
+        if var_index(v.index) is not None:
+            return 10, [v.index.index, 1]
+    if isinstance(v, Call) and v.target is None and v.name == "randint":
+        a = K.Args(v, ["a", "b"])
+        (ma, x), (mb, y) = mval_val(a.req("a"), "randint(): a"), mval_val(a.req("b"), "randint(): b")
+        return 3, [x, y] + ([_packed(ma, mb)] if ma or mb else [])
+    if isinstance(v, Attr):
+        found = _selected_val(v)
+        if found is not None:
+            return found
+        o = v.obj
+        if isinstance(o, Sym) and (o.name, v.name) in {x: k for k, x in MANIAC_OTHER.items()}:
+            return 7, [{x: k for k, x in MANIAC_OTHER.items()}[(o.name, v.name)], 0]
+    if isinstance(v, BinOp):
+        if v.op == "**":
+            (ma, a), (mb, b) = mval_val(v.left, "a ** b: a"), mval_val(v.right, "a ** b: b")
+            return 11, [a, b, _packed(ma, mb)]
+        (ma, a), (mb, b) = mval_val(v.left, "a %s b: a" % v.op), mval_val(v.right, "a %s b: b" % v.op)
+        return 19, [CV_BINARY.index(v.op), a, b, _packed(ma, mb)]
+    if isinstance(v, IfExp) and isinstance(v.test, Cmp):
+        vals = [mval_val(x, "a if b else c") for x in (v.test.left, v.test.right, v.body, v.orelse)]
+        return 20, [COMPARE.index(v.test.op)] + [x for _, x in vals] + [_packed(*(m for m, _ in vals))]
+    if isinstance(v, Call) and v.target is None and v.name in CV_FUNCTIONS.values():
+        return _function_val(v)
+    if isinstance(v, Call) and v.target is None and v.name in CV_ARRAYS.values():
+        a = K.Args(v, ["first", "count"])
+        (ma, x), (mb, y) = mval_val(a.req("first"), "%s(): first" % v.name), mval_val(a.req("count"), "count")
+        return {n: k for k, n in CV_ARRAYS.items()}[v.name], [_packed(ma, mb), x, y]
+    kind, p5, p6 = operand_val(v)
+    return kind, [p5, p6]
+
+
+def _selected_val(v: Attr) -> tuple[int, list[int]] | None:
+    """items[3].count, actors[variables.hero].level, this.x, party[0].hp...: (operand, parameters)."""
+    o, name = v.obj, v.name
+    if name in MANIAC_EVENT_PROPS:
+        cid = char_id(o)
+        if cid is not None:
+            return 6, [cid, MANIAC_EVENT_PROPS.index(name)]
+        if is_ref(o, "events") and not is_int(o.index) and _MANIAC_SELECTORS.get():
+            m, x = mval_val(o.index, "events[...]", 3)
+            return 6, [x, MANIAC_EVENT_PROPS.index(name), m]
+    for kind in (4, 5, 8, 9):
+        coll, props = CV_SELECTED[kind]
+        if name in props and is_ref(o, coll) and (is_int(o.index) or _MANIAC_SELECTORS.get()):
+            m, x = mval_val(o.index, "%s[...]" % coll)
+            return kind, [x, props.index(name)] + ([m] if m or kind == 9 else [])
+    return None
+
+
+def _function_val(v: Call) -> tuple[int, list[int]]:
+    kind = {n: k for k, n in CV_FUNCTIONS.items()}[v.name]
+    if kind in (16, 17):
+        a = K.Args(v, ["a", "b"])
+        (ma, x), (mb, y) = mval_val(a.req("a"), "%s(): a" % v.name), mval_val(a.req("b"), "%s(): b" % v.name)
+        return kind, [x, y, _packed(ma, mb)]
+    if kind == 12:
+        a = K.Args(v, ["value", "scale"])
+        m, x = mval_val(a.req("value"), "sqrt(): value")
+        return kind, [x, a.int("scale"), m]
+    if kind in (13, 14):
+        a = K.Args(v, ["angle", "divisor", "scale"])
+        (ma, x), (mb, y) = mval_val(a.req("angle"), "angle"), mval_val(a.req("divisor"), "divisor")
+        return kind, [x, a.int("scale"), _packed(ma, mb), y]
+    if kind == 15:
+        a = K.Args(v, ["y", "x", "scale"])
+        (ma, x), (mb, y) = mval_val(a.req("y"), "atan2(): y"), mval_val(a.req("x"), "atan2(): x")
+        return kind, [x, y, a.int("scale"), _packed(ma, mb)]
+    if kind == 18:
+        a = K.Args(v, ["value"])
+        m, x = mval_val(a.req("value"), "abs(): value")
+        return kind, [x, m]
+    a = K.Args(v, ["a", "b", "num", "den"])  # lerp
+    vals = [mval_val(a.req(k), "lerp(): " + k) for k in ("a", "b", "num", "den")]
+    return kind, [_packed(*(m for m, _ in vals))] + [x for _, x in vals]
+
+
+def cv_src(p: list[int]) -> str | None:
+    """Control Variables (RPG Maker's form) as a statement."""
+    if len(p) < 7:
+        return None
+    t = target_src("variables", *p[:3])
+    if t is None or not 0 <= p[3] < len(VAR_OPS):
+        return None
+    operand = cv_operand_src(p[4], list(p[5:]))
+    if operand is None:
+        return None
+    return "%s %s %s" % (t, VAR_OPS[p[3]], operand)
+
+
+# --------------------------------------------------------------------------
 # Conditions (Conditional Branch)
 # --------------------------------------------------------------------------
 
@@ -621,6 +974,8 @@ VEHICLES = ["boat", "ship", "airship"]
 def condition_src(p: list[int], string: str) -> str | None:
     """Conditional Branch params[0:5] (+ string) -> Python condition."""
     kind, a, b, c, d = p[:5]
+    if kind == 15:
+        return _string_condition_src(a, b, c, d, string)
     if string and not (kind == 5 and b == 1):
         return None
     if kind == 0 and b in (0, 1) and c == d == 0:
@@ -653,8 +1008,59 @@ def condition_src(p: list[int], string: str) -> str | None:
     return "cond(%d, %d, %d, %d, %d)" % (kind, a, b, c, d)
 
 
+# Maniac Patch: string variables compared (Conditional Branch 15): p1 how the left one
+# (0 strings[p2], 1 strings[variables[p2]]) and the right one are given (bits 4-7: 0 the
+# command's text, 1 strings[p3], 2 strings[variables[p3]]); p4 0 ==, 1 !=, 2 contains,
+# 3 doesn't contain (+256: ignoring case, kept raw)
+
+
+def _string_ref_src(mode: int, n: int) -> str | None:
+    return str_src(n) if mode == 0 else "strings[%s]" % var_src(n) if mode == 1 else None
+
+
+def _string_condition_src(modes: int, left: int, right: int, op: int, text: str) -> str | None:
+    if not _fits(modes, 2) or not 0 <= op <= 3:
+        return None
+    lhs = _string_ref_src(modes & 0xF, left)
+    rmode = modes >> 4
+    if rmode == 0:
+        rhs = pystr(text) if right == 0 else None
+    else:
+        rhs = None if text else _string_ref_src(rmode - 1, right)
+    if lhs is None or rhs is None:
+        return None
+    if op < 2:
+        return "%s %s %s" % (lhs, ("==", "!=")[op], rhs)
+    return "%s %s %s" % (rhs, ("in", "not in")[op - 2], lhs)
+
+
+def _string_ref_val(v) -> tuple[int, int] | None:
+    if is_ref(v, "strings"):
+        if is_int(v.index):
+            return 0, v.index
+        if var_index(v.index) is not None:
+            return 1, v.index.index
+    return None
+
+
+def _string_condition_val(left, op: int, right, ctx: Ctx, node) -> tuple[list[int], bytes]:
+    lhs = _string_ref_val(left)
+    if lhs is None:
+        raise _err("a string comparison tests strings[id] (or strings[variables[id]])", node)
+    if isinstance(right, str):
+        return [15, lhs[0], lhs[1], 0, op], ctx.enc(right, getattr(node, "node", None))
+    rhs = _string_ref_val(right)
+    if rhs is None:
+        raise _err("strings[id] is compared with a text, strings[id] or strings[variables[id]]", node)
+    return [15, lhs[0] | (rhs[0] + 1) << 4, lhs[1], rhs[1], op], b""
+
+
 def condition_val(v, ctx: Ctx) -> tuple[list[int], bytes]:
     """Python condition -> (Conditional Branch params[0:5], string)."""
+    if isinstance(v, Cmp) and v.op in ("==", "!=") and is_ref(v.left, "strings"):
+        return _string_condition_val(v.left, ("==", "!=").index(v.op), v.right, ctx, v)
+    if isinstance(v, In) and is_ref(v.right, "strings"):
+        return _string_condition_val(v.right, 3 if v.negated else 2, v.left, ctx, v)
     if is_ref(v, "switches") and var_index(v) is None and int_index(v, "switches") is not None:
         return [0, v.index, 0, 0, 0], b""
     if isinstance(v, Not) and int_index(v.value, "switches") is not None:
@@ -817,23 +1223,32 @@ def _move_tail(moves) -> list[int]:
     return list(write_move_commands(moves))
 
 
-def decode_stmt(c: Command, ctx: Ctx, in_loop: bool = False) -> str | None:
+def decode_candidates(c: Command, ctx: Ctx, in_loop: bool = False) -> Iterator[str]:
+    """The Pythonic statements one command may be written as, best first (each still to
+    be checked by compiling it back)."""
+    from . import maniac_ext, named
+
+    yield from named.decode_all(c, ctx)
+    src = decode_stmt(c, ctx, in_loop, named_forms=False)
+    if src is not None:
+        yield src
+    yield from maniac_ext.decode(c, ctx, in_loop)
+
+
+def decode_stmt(c: Command, ctx: Ctx, in_loop: bool = False, named_forms: bool = True) -> str | None:
     """Pythonic statement for one command, or None."""
     from . import named
 
-    src = named.decode(c, ctx)
-    if src is not None:
-        return src
+    if named_forms:
+        src = named.decode(c, ctx)
+        if src is not None:
+            return src
     p, code = c.params, c.code
     s = ctx.dec(c.string) if c.string else ""
     if c.string and code not in (10610, 10620):
         return None
-    if code == 10220 and len(p) == 7:
-        t = target_src("variables", *p[:3])
-        operand = operand_src(p[4], p[5], p[6])
-        if t is None or operand is None or not 0 <= p[3] < len(VAR_OPS):
-            return None
-        return "%s %s %s" % (t, VAR_OPS[p[3]], operand)
+    if code == 10220:
+        return cv_src(p)
     if code == 10210 and len(p) == 4:
         t = target_src("switches", *p[:3])
         if t is None or p[3] not in (0, 1, 2):
@@ -975,6 +1390,8 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
         return C(12310, [])
     if isinstance(stmt, ast.Break):
         return C(12220, [])
+    if isinstance(stmt, ast.Continue):
+        return C(12220, [1, 0])  # Maniac Patch: Break Loop, skip to the next turn
 
     if isinstance(stmt, ast.Assign):
         if len(stmt.targets) != 1:
@@ -1012,8 +1429,18 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
                     raise CompileError("input_number() stores into a single variables[id]", stmt)
                 ar = K.Args(value, ["digits"])
                 return C(10150, [ar.int("digits"), a])
-            kind, p5, p6 = operand_val(value)
-            return C(10220, [mode, a, b, 0, kind, p5, p6])
+            if mode == 0:
+                from . import maniac
+
+                cmd = maniac.encode_string_query(a, value, ctx)  # len(strings[1]), int(...), .find()...
+                if cmd is not None:
+                    return cmd
+            kind, rest = cv_operand_val(value)
+            return C(10220, [mode, a, b, 0, kind] + rest)
+        if is_ref(target, "strings"):
+            from . import maniac
+
+            return maniac.encode_string_value(target, 0, value, ctx, stmt)
         if is_ref(target, "switches"):
             mode, a, b = target_val(target)
             if isinstance(value, bool):
@@ -1043,8 +1470,12 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
         op = AUG_OPS[type(stmt.op)]
         if is_ref(target, "variables"):
             mode, a, b = target_val(target)
-            kind, p5, p6 = operand_val(value)
-            return C(10220, [mode, a, b, VAR_OPS.index(op), kind, p5, p6])
+            kind, rest = cv_operand_val(value)
+            return C(10220, [mode, a, b, VAR_OPS.index(op), kind] + rest)
+        if is_ref(target, "strings") and op == "+=":
+            from . import maniac
+
+            return maniac.encode_string_value(target, 1, value, ctx, stmt)
         if op not in ("+=", "-="):
             raise CompileError("only += and -= are supported here", stmt)
         sign = 0 if op == "+=" else 1
@@ -1073,6 +1504,11 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
         cmd = named.encode(call, ctx)
         if cmd is not None:
             return cmd
+        from . import maniac_ext
+
+        cmd = maniac_ext.encode_call(call, ctx)
+        if cmd is not None:
+            return cmd
         t = call.target
         event = _event_of(t)
         if event is not None:
@@ -1085,6 +1521,10 @@ def encode_stmt(stmt: ast.stmt, ctx: Ctx) -> Command | None:
             raise _err("this is whichever event runs the code: this.call(%s) runs its page %s" % (n, n), call)
         if isinstance(t, Sym) and t.name == "dyn":
             return C(12410, [], ctx.enc(dynrpg_text(call), stmt))
+        if is_ref(t, "strings"):
+            from . import maniac
+
+            return maniac.encode_string_call(call, ctx)
         if t is None:
             if call.name in ("change_exp", "change_level"):
                 a = K.Args(call, ["actor", "amount", "message"])

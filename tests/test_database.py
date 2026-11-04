@@ -681,7 +681,7 @@ def test_models_match_schema():
 
 
 def test_generated_files_up_to_date(tmp_path):
-    csv_dir = os.path.join(ROOT, "..", "Player", "lib", "liblcf", "generator", "csv")
+    csv_dir = os.path.join(ROOT, "..", "Editor", "lib", "liblcf", "generator", "csv")  # gen_dbschema's default
     if not os.path.isdir(csv_dir):
         pytest.skip("liblcf CSVs not found")
     subprocess.run(

@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, SkipValidation
 
 from . import commands as K
 from . import dynparams as D
+from . import layout as L
 from . import pyexpr as P
 from .commands import Call, Command, CompileError, Ctx, Raw, TableSize, render_call, size_stmt, split_size, table_length
 from .lcf import ArrayItem, CommandList, IntVector, LcfFile, MoveCommand, Struct, decode_value, write_array
@@ -133,14 +134,36 @@ def _compiles_to(lines: list[str], expected: list[Command], ctx: Ctx) -> bool:
 
 
 def stmt_src(c: Command, ctx: Ctx, in_loop: bool) -> str:
-    """Best single-line form of a leaf command."""
-    src = P.decode_stmt(c, ctx, in_loop)
-    if src is not None and _compiles_to([src], [c], ctx):
-        return src
+    """Best single-line form of a leaf command: the first form that compiles back to it,
+    in the game's usual layout, else the other one with its `# layout:` comment."""
+    for form, suffix in _layout_forms(c, ctx):
+        for src in _candidates(form, ctx, in_loop):
+            if _compiles_to([src + suffix], [c], ctx):
+                return src + suffix
+    return K.generic_src(c, ctx)
+
+
+def _layout_forms(c: Command, ctx: Ctx) -> Iterator[tuple[Command, str]]:
+    """(the command in RPG Maker's form, the comment saying how it is stored), for each
+    layout it can be read in: the game's usual one first."""
+    if c.code not in L.FORMS:
+        yield c, ""
+        return
+    usual = L.MANIAC if ctx.maniac_layout else L.RPG_MAKER
+    for layout in (usual, L.RPG_MAKER if usual == L.MANIAC else L.MANIAC):
+        form = c if layout == L.RPG_MAKER else L.to_standard(c)
+        if form is not None:
+            # no comment when the usual layout stores it the same (a form only Maniac has)
+            same = L.stored(form, usual).params == c.params
+            yield form, ("" if layout == usual or same else L.comment(layout))
+
+
+def _candidates(c: Command, ctx: Ctx, in_loop: bool) -> Iterator[str]:
+    """The script forms of a command, best first (each still to be checked)."""
+    yield from P.decode_candidates(c, ctx, in_loop)
     src = K.decode_command(c, ctx)
-    if not src.startswith("cmd(") and not _compiles_to([src], [c], ctx):
-        src = K.generic_src(c, ctx)
-    return src
+    if not src.startswith("cmd("):
+        yield src
 
 
 def body_lines(cmds: list[Command], ctx: Ctx, depth: int) -> tuple[list[str], bool]:
@@ -242,7 +265,7 @@ def _emit(nodes: list[Node], ctx: Ctx, level: int, in_loop: bool) -> list[str]:
 def _emit_one(nodes, i, ctx, level, in_loop) -> tuple[list[str], int, int | None]:
     """The lines of the construct starting at nodes[i], the nodes it takes, and the
     code of a generic `with cmd(...)` block (its closer is implied)."""
-    for construct in (_emit_text, _emit_if, _emit_while, _emit_match, _emit_handlers):
+    for construct in (_emit_text, _emit_if, _emit_while, _emit_match, _emit_handlers, _emit_script):
         r = construct(nodes, i, ctx, level, in_loop)
         if r is not None:
             return r[0], r[1], None
@@ -505,16 +528,52 @@ def _single_if(body: list[Node], code: int = 12010) -> bool:
 
 
 def _emit_while(nodes, i, ctx, level, in_loop):
+    """`while True:`, and the Maniac Patch's loops (`for variables[3] in range(10):`...)."""
+    from . import maniac_ext
+
     n = nodes[i]
-    if n.body is None or n.cmd.code != 12210 or n.cmd.params or n.cmd.string:
+    if n.body is None or n.cmd.code != 12210 or n.cmd.string:
         return None
-    if not (i + 1 < len(nodes) and _is_closer(nodes[i + 1], 22210)):
+    end = nodes[i + 1] if i + 1 < len(nodes) else None
+    if end is None or end.body is not None or end.cmd.code != 22210 or end.cmd.string or end.cmd.params != n.cmd.params:
         return None
     pad = INDENT * level
-    lines = [pad + "while True:"] + _body(_emit(n.body, ctx, level + 1, True), pad + INDENT)
-    if not _compiles_to(lines, flatten(nodes[i : i + 2]), ctx):
+    body = None
+    for form, suffix in _layout_forms(n.cmd, ctx):
+        header = maniac_ext.loop_src(form.params)
+        if header is None:
+            continue
+        if body is None:
+            body = _body(_emit(n.body, ctx, level + 1, True), pad + INDENT)
+        lines = [pad + header + ":" + suffix] + body
+        if _compiles_to(lines, flatten(nodes[i : i + 2]), ctx):
+            return lines, 2
+    return None
+
+
+def _emit_script(nodes, i, ctx, level, in_loop):
+    """maniac.script(...): a Maniac Script (3030) and its further lines (3031)."""
+    from . import maniac
+
+    n = nodes[i]
+    if n.body is not None or n.cmd.code != 3030:
         return None
-    return lines, 2
+    j = i + 1
+    while j < len(nodes) and nodes[j].body is None and nodes[j].cmd.code == 3031 and not nodes[j].cmd.params:
+        j += 1
+    args = maniac.script_src(n.cmd, [ctx.dec(m.cmd.string) for m in nodes[i + 1 : j]], ctx)
+    if args is None:
+        return None
+    pad = INDENT * level
+    one = pad + "maniac.script(%s)" % ", ".join(args)
+    lines = (
+        [one]
+        if len(args) == 1 or len(one) <= 100
+        else [pad + "maniac.script("] + [pad + INDENT + a + "," for a in args] + [pad + ")"]
+    )
+    if not _compiles_to(lines, flatten(nodes[i:j]), ctx):
+        return None
+    return lines, j - i
 
 
 def _choice_sep(ctx: Ctx) -> str:
@@ -727,7 +786,7 @@ class CommentIndex:
         return out
 
 
-_COMPOUND = (ast.If, ast.While, ast.Match, ast.With)
+_COMPOUND = (ast.If, ast.While, ast.For, ast.Match, ast.With)
 
 
 def _with_call(stmt: ast.stmt) -> Call | None:
@@ -866,10 +925,14 @@ def _compile_stmt(stmt: ast.stmt, nxt: ast.stmt | None, ctx: Ctx, indent: int) -
             out += [C(else_code)] + _block(stmt.orelse, ctx, indent, stmt.body[-1].end_lineno, not _is_elif(stmt, ctx))
         return out + [C(closer)]
 
-    if isinstance(stmt, ast.While):
-        if not (isinstance(stmt.test, ast.Constant) and stmt.test.value is True) or stmt.orelse:
-            raise CompileError("RPG Maker loops are `while True:` (leave them with break)", stmt)
-        return [C(12210)] + _block(stmt.body, ctx, indent, stmt.lineno) + [C(22210)]
+    if isinstance(stmt, (ast.While, ast.For)):
+        from . import maniac_ext
+
+        params = maniac_ext.loop_val(stmt, ctx)
+        loop = _stored(C(12210, params), stmt, ctx, stmt.body[0].lineno - 1)
+        end = _stored(C(22210, params), stmt, ctx, stmt.body[0].lineno - 1)
+        end.indent = indent
+        return [loop] + _block(stmt.body, ctx, indent, stmt.lineno) + [end]
 
     if isinstance(stmt, ast.Match):
         return _compile_match(stmt, ctx, indent)
@@ -908,16 +971,50 @@ def _compile_stmt(stmt: ast.stmt, nxt: ast.stmt | None, ctx: Ctx, indent: int) -
         first, cont = (10110, 20110) if call.name == "text" else (12410, 22410)
         return [C(first, string=ctx.enc(lines[0], stmt))] + [C(cont, string=ctx.enc(l, stmt)) for l in lines[1:]]
 
+    if (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Attribute)
+        and isinstance(stmt.value.func.value, ast.Name)
+        and (stmt.value.func.value.id, stmt.value.func.attr) == ("maniac", "script")
+        and not all(isinstance(a, ast.Constant) and isinstance(a.value, int) for a in stmt.value.args)
+    ):
+        from . import maniac
+
+        out = maniac.encode_script(evaluate(stmt.value), ctx)
+        for cmd in out:
+            cmd.indent = indent
+        return out
+
     cmd = P.encode_stmt(stmt, ctx)
     if cmd is not None:
         cmd.indent = indent
-        return [cmd]
+        return [_stored(cmd, stmt, ctx)]
     if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
         call = evaluate(stmt.value)
         cmd, explicit = K.encode_call(call, ctx)
         cmd.indent = indent if explicit is None else explicit
-        return [cmd]
+        return [cmd if call.name == "cmd" else _stored(cmd, stmt, ctx)]
     raise CompileError("unsupported statement: %s" % ast.unparse(stmt).split("\n")[0], stmt)
+
+
+def _stored(cmd: Command, stmt: ast.stmt, ctx: Ctx, last_line: int | None = None) -> Command:
+    """A command compiled in RPG Maker's form, as the statement stores it: its `# layout:`
+    comment (on its lines up to last_line: a loop's header), else the game's usual layout
+    (see rpgsync.layout)."""
+    if cmd.code not in L.FORMS:
+        return cmd
+    layout = None
+    if ctx.comments is not None and 0 < stmt.lineno <= len(ctx.comments.lines):
+        try:
+            layout = L.statement_layout(ctx.comments.lines[stmt.lineno - 1 : last_line or stmt.end_lineno])
+        except ValueError as e:
+            raise CompileError(str(e), stmt) from None
+    if layout is None:
+        layout = L.MANIAC if ctx.maniac_layout else L.RPG_MAKER
+    out = L.stored(cmd, layout)
+    out.line = cmd.line
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1336,7 +1433,8 @@ ANIMATIONS = [
     "spin",
     "step_frame_fix",
 ]
-CE_TRIGGERS = {3: "autorun", 4: "parallel", 5: "call"}
+# 6 and 7: Maniac Patch (common events that start with each battle, or run in parallel during it)
+CE_TRIGGERS = {3: "autorun", 4: "parallel", 5: "call", 6: "battle_start", 7: "battle_parallel"}
 
 FLAG_BITS = {"switch_a": 1, "switch_b": 2, "variable": 4, "item": 8, "actor": 16, "timer": 32, "timer2": 64}
 
@@ -1959,8 +2057,11 @@ from database.switches import switches
 from database.variables import variables"""
 
 
-def _dsl_import(ctx: Ctx) -> str:
-    return DSL_IMPORT
+STRINGS_IMPORT = "from database.strings import strings"  # Maniac Patch games: their string variables
+
+
+def _dsl_import(ctx: Ctx, base: str = DSL_IMPORT) -> str:
+    return base + "\n" + STRINGS_IMPORT if "strings" in ctx.handles else base
 
 
 @functools.lru_cache(maxsize=4)  # a sync reads the same (large) script more than once
@@ -2861,7 +2962,7 @@ def decompile_common_events(db: Struct, ctx: Ctx, target: str) -> str:
 
 
 def _decompile_common_events(db: Struct, ctx: Ctx, target: str) -> str:
-    out = ['"""Common events"""', "", HEADER_NOTE.format(target=target), CE_IMPORT, "", ""]
+    out = ['"""Common events"""', "", HEADER_NOTE.format(target=target), _dsl_import(ctx, CE_IMPORT), "", ""]
     out += ["class CommonEvents(CommonEventTable):", *K.config_src(len(db.get("commonevents")), INDENT)]
     for lines in _decompile_common_event_entries(db, ctx).values():
         out.append("")
@@ -3315,7 +3416,7 @@ def decompile_troop_events(db: Struct, ctx: Ctx, target: str, keep: dict[int, st
         TROOP_HEADER,
         "",
         HEADER_NOTE.format(target=target),
-        DSL_IMPORT,
+        _dsl_import(ctx),
         "",
         "",
         "class TroopEvents(TroopEventTable):",

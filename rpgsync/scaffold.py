@@ -99,6 +99,8 @@ GAME_TYPES = '''\
 
 Dynamic: what may stand, besides a number, where a command keeps a fixed number
 (rpgsync.dsl.Fixed). {why}
+Maniac: what may stand, besides a number, where the Maniac Patch reads a value from
+a variable (rpgsync.dsl.Fixed | Maniac). {why_maniac}
 """
 
 {body}
@@ -420,13 +422,34 @@ def detect_patches(game_dir: str) -> list[str]:
 
 def game_types(project: Project) -> str:
     """The content of database/game_types.py, which rpgsync.dsl reads when type checking."""
+    from .compat import load_rules
+
+    if os.path.exists(os.path.join(project.script_dir, "pyproject.toml")):
+        patches = load_rules(project.script_dir)[0]
+    else:
+        patches = detect_patches(project.game_dir)
+    imports = []
     if project.has_dynparams():
         why = "This game runs the DynParams plugin (DynPlugins/DynParams.dll):\na variable, read when the command runs."
-        body = "from rpgsync.dsl import Variable\n\nDynamic = Variable"
+        imports.append("Variable")
+        dynamic = "Dynamic = Variable"
     else:
         why = "Nothing: this game does not run the DynParams plugin."
-        body = "from typing import Never\n\nDynamic = Never"
-    return GAME_TYPES.format(why=why, body=body)
+        dynamic = "Dynamic = Never"
+    if "maniac" in patches:
+        why_maniac = "This game uses the Maniac Patch:\nvariables[id] or variables[variables[id]]."
+        imports.append("Value")
+        maniac = "Maniac = Value"
+    else:
+        why_maniac = 'Nothing: "maniac" is not in the patches of pyproject.toml.'
+        maniac = "Maniac = Never"
+    lines = []
+    if len(imports) < 2:
+        lines.append("from typing import Never")
+    if imports:
+        lines.append("from rpgsync.dsl import %s" % ", ".join(imports))
+    body = "\n".join(lines) + "\n\n" + dynamic + "\n" + maniac
+    return GAME_TYPES.format(why=why, why_maniac=why_maniac, body=body)
 
 
 # lines of tests/test_scripts.py as an older rpgsync wrote them -> as written now (a
