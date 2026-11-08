@@ -958,7 +958,8 @@ for _s in SPECS:
 FUNCTIONS: dict[str, Spec] = {s.name: s for s in SPECS if s.target is None and s.namespace is None}
 METHODS: dict[tuple[str, str], Spec] = {(s.target, s.name): s for s in SPECS if s.target}
 
-# patch commands written namespace.name(...) (rpgsync.maniac registers its specs on import)
+# patch commands written namespace.name(...) (rpgsync.maniac registers its specs on import;
+# rpgsync.easyrpg decodes and encodes its own)
 NAMESPACED: dict[tuple[str, str], Spec] = {}
 
 
@@ -972,7 +973,7 @@ MATCH_HEADERS = {10710: "start_battle", 10720: "open_shop", 10730: "inn"}
 
 
 def decode(c: Command, ctx: Ctx) -> str | None:
-    from . import maniac
+    from . import easyrpg, maniac
 
     if c.code == 11060:
         return _decode_pan(c)
@@ -980,12 +981,15 @@ def decode(c: Command, ctx: Ctx) -> str | None:
         src = spec.decode(c, ctx)
         if src is not None:
             return src
+    if c.code in easyrpg.CODES:
+        return easyrpg.decode(c, ctx)  # EasyRPG Player's commands: named, else by name with raw parameters
     return maniac.decode_generic(c, ctx)  # any other Maniac command: by name, raw parameters
 
 
 def decode_all(c: Command, ctx: Ctx):
-    """Every named form of a command (the specs that read it), then its Maniac form by name."""
-    from . import maniac
+    """Every named form of a command (the specs that read it), then its Maniac or EasyRPG
+    form by name."""
+    from . import easyrpg, maniac
 
     if c.code == 11060:
         src = _decode_pan(c)
@@ -999,12 +1003,15 @@ def decode_all(c: Command, ctx: Ctx):
     src = maniac.decode_generic(c, ctx)
     if src is not None:
         yield src
+    yield from easyrpg.decode_all(c, ctx)
 
 
 def encode(call: Call, ctx: Ctx) -> Command | None:
-    from . import maniac
+    from . import easyrpg, maniac
     from . import pyexpr as P
 
+    if isinstance(call.target, P.Sym) and call.target.name == easyrpg.NAMESPACE:
+        return easyrpg.encode(call, ctx)
     if isinstance(call.target, P.Sym) and call.target.name == maniac.NAMESPACE:
         # named specs take keyword arguments only: positional numbers are the raw parameters
         spec = NAMESPACED.get((maniac.NAMESPACE, call.name))

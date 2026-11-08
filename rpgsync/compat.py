@@ -1,8 +1,8 @@
 """Engine compatibility checks: does the game only use what its engine supports?
 
 RPG Maker 2000 lacks several commands and parameters of RPG Maker 2003, and
-patches (Maniac Patch, EasyRPG extensions) add commands that the plain
-engines do not understand.  The generated test suite of a scripts folder
+patches (Maniac Patch, EasyRPG Player's own commands) add commands that the
+plain engines do not understand.  The generated test suite of a scripts folder
 runs these checks on every script, and the sync refuses to write an event
 that fails them into the game.
 
@@ -25,7 +25,7 @@ import os
 import tomllib
 from collections.abc import Iterable, Sequence
 
-from . import dynparams, dynrpg, maniac, maniac_ext
+from . import dynparams, dynrpg, easyrpg, maniac, maniac_ext
 from .commands import CODE_NAMES
 from .lcf import Command
 
@@ -74,6 +74,8 @@ def target_engine(script_dir: str, detected: str) -> str:
 
 
 def describe(code: int) -> str:
+    if code in easyrpg.CODES:
+        return "easyrpg.%s() (%d)" % (easyrpg.name_of(code), code)
     return "%s (%d)" % (CODE_NAMES.get(code, "command"), code)
 
 
@@ -113,10 +115,23 @@ def command_problems(
             if code in maniac.CODES and "maniac" not in patches:
                 add(True, 'Maniac command maniac.%s(): add "maniac" to [tool.rpgsync] patches' % maniac.name_of(code))
                 continue
+            if code in easyrpg.CODES and "easyrpg" not in patches:
+                add(
+                    True,
+                    'EasyRPG command easyrpg.%s(): add "easyrpg" to [tool.rpgsync] patches (EasyRPG Player runs '
+                    "it with EasyRPG=1 in the [Patch] section of EasyRPG.ini)" % easyrpg.name_of(code),
+                )
+                continue
             if not any(code in r for p, r in PATCH_RANGES.items() if p in patches):
                 patch = next((p for p, r in PATCH_RANGES.items() if code in r), None)
                 hint = ' (a %s command: add "%s" to [tool.rpgsync] patches)' % (patch, patch) if patch else ""
                 add(True, "unknown command %d%s" % (code, hint))
+            elif code in easyrpg.CODES and "maniac" not in patches and easyrpg.maniac_option(c) is not None:
+                add(
+                    False,
+                    '%s uses a Maniac Patch option (%s): add "maniac" to [tool.rpgsync] patches'
+                    % (describe(code), easyrpg.maniac_option(c)),
+                )
             continue
         if "maniac" not in patches:
             option = maniac_ext.maniac_option(c)
@@ -124,6 +139,14 @@ def command_problems(
                 add(
                     False,
                     '%s uses a Maniac Patch option (%s): add "maniac" to [tool.rpgsync] patches'
+                    % (describe(code), option),
+                )
+        if "easyrpg" not in patches:
+            option = easyrpg.easyrpg_option(c)
+            if option is not None:
+                add(
+                    False,
+                    '%s uses an EasyRPG Player option (%s): add "easyrpg" to [tool.rpgsync] patches'
                     % (describe(code), option),
                 )
         if engine == "2k":

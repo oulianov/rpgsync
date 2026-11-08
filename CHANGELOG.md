@@ -16,6 +16,26 @@ A game's `Scripts/pyproject.toml` depends on the version that set it up,
 pins the exact one. [Upgrading rpgsync](README.md#upgrading-rpgsync) moves a game to a
 newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
+## Unreleased
+
+The scripts of games using EasyRPG Player's commands change: `rpgsync pull` writes them
+differently.
+
+- EasyRPG Player's commands have typed, named forms instead of `cmd(2055, ...)` lines:
+  `easyrpg.trigger_event_at()`, `easyrpg.pathfinder()`,
+  `easyrpg.wait_for_single_movement()`, `easyrpg.set_interpreter_flag()`,
+  `easyrpg.process_json()`, `easyrpg.clone_map_event()`, `easyrpg.destroy_map_event()`
+  (values as numbers, `variables[n]` or `variables[variables[n]]`; Process JSON's path,
+  then its JSON, in the command's text). The others are written by name with their raw
+  parameters (`easyrpg.animate_variable(...)`, `easyrpg.command_2099(...)`). Older
+  scripts' `cmd(20xx, ...)` lines still sync.
+- `call_system_function("language")` and the other scenes of EasyRPG Player's menu
+  (`"main_menu"`, `"items"`, `"order"`, `"settings"`).
+- `rpgsync check` names EasyRPG commands (`EasyRPG command easyrpg.process_json(): add
+  "easyrpg" ...`), and warns about what EasyRPG Player reads with the Maniac Patch only
+  in a game without `"maniac"`, and about its scenes in Call System Functions in a game
+  without `"easyrpg"`.
+
 ## 0.2.0
 
 The scripts of Maniac Patch games change: `rpgsync pull` writes them differently.

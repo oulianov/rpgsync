@@ -1705,6 +1705,217 @@ class ManiacPatch:
         ...
 
 
+EasyValue = int | Variable
+"""A value of an EasyRPG command: a number, ``variables[n]``, or ``variables[variables[n]]``
+(the variable whose id is in variables[n]; EasyRPG Player reads it with the Maniac
+Patch only)."""
+InterpreterFlag = Literal[
+    "destiny",
+    "dynrpg",
+    "maniac",
+    "common-this",
+    "pic-unlock",
+    "key-patch",
+    "rpg2k3-cmds",
+    "rpg2k3-commands",
+    "rpg2k-battle",
+]
+"""A patch EasyRPG Player turns on or off with set_interpreter_flag(): Destiny Patch,
+DynRPG, Maniac Patch, Common This Event, Unlock Pictures, Ineluki Key Patch, the
+RPG Maker 2003 commands in a 2000 game (``"rpg2k3-cmds"`` or ``"rpg2k3-commands"``),
+the RPG Maker 2000 battle system in a 2003 game."""
+InterpreterFlagNumber = Literal[1, 2, 3, 4, 5, 6, 7, 8]
+"""A patch by number, as a command without a patch name gives it: 1 destiny, 2 dynrpg,
+3 maniac, 4 common-this, 5 pic-unlock, 6 key-patch, 7 rpg2k3-cmds, 8 rpg2k-battle."""
+JsonOperation = Literal["get", "set", "get_length", "get_keys", "get_type", "remove", "push", "pop", "contains"]
+"""What process_json() does at the path of a JSON:
+
+* ``"get"``: its value into the target.
+* ``"set"``: the target's value there (the JSON is a string variable, updated).
+* ``"get_length"``: how many entries the array or object has (a switch: ON when any).
+* ``"get_keys"``: the keys of the object, as a JSON array (``keys_object=True``: as
+  ``{"keys": [...]}``).
+* ``"get_type"``: its type: a string variable gets "object", "array", "string",
+  "number", "boolean" or "null"; a variable 1 to 6 in that order (0: none); a switch
+  ON when it exists and isn't null.
+* ``"remove"``: remove it (the JSON is a string variable, updated).
+* ``"push"``: add the target's value at the end of the array (the JSON is a string
+  variable, updated).
+* ``"pop"``: remove the last entry of the array, into the target.
+* ``"contains"``: 1 into the target when it exists, else 0.
+"""
+WhileMoving = Literal["replace", "wait", "skip"]
+"""What pathfinder() does when the event is moving: ``"replace"`` its route at once,
+``"wait"`` until it stops then find the route, ``"skip"`` the command."""
+
+
+class EasyRPG:
+    """EasyRPG Player's own commands (add "easyrpg" to ``patches`` in pyproject.toml;
+    EasyRPG Player runs them with ``EasyRPG=1`` in the [Patch] section of
+    EasyRPG.ini).
+
+    Every EasyRPG command is written ``easyrpg.name(...)``.  The commands EasyRPG
+    Player runs take named arguments; any command can also be written with its raw
+    parameters as positional numbers: ``easyrpg.process_json(0, 0, 1, 1, ...)``.
+    rpgsync writes the raw form when a command's parameters don't fit its named form.
+    Values are ``EasyValue``: a number, ``variables[n]`` or ``variables[variables[n]]``.
+    """
+
+    def trigger_event_at(
+        self,
+        *params: int,
+        x: EasyValue = ...,
+        y: EasyValue = ...,
+        face_player: bool = ...,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Start the events of a cell as the hero's action key does (those started by
+        the action key, at the hero's level).  face_player: they turn to the hero;
+        left out, the command is stored in its first version, which always turns them.
+        ``easyrpg.trigger_event_at(x=variables.x, y=variables.y)`` (2002)"""
+
+    def pathfinder(
+        self,
+        *params: int,
+        event: Character = ...,
+        x: EasyValue = ...,
+        y: EasyValue = ...,
+        search_limit: EasyValue = 500,
+        max_steps: EasyValue = -1,
+        while_moving: WhileMoving = "replace",
+        diagonal: bool = False,
+        skippable: bool = False,
+        debug: bool = False,
+        ignore: Sequence[Character] | Variable = (),
+        frequency: EasyValue = ...,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Give an event the route to a cell, around what blocks it.
+
+        Args:
+            event: who moves: this, player, a vehicle, events[id], an event of the map
+                by name, or events[variables[id]].
+            x, y: the cell to reach.
+            search_limit: how many cells the search may visit.
+            max_steps: how many steps of the route to take (-1: all of it).
+            while_moving: "replace" the route of an event that is moving, "wait"
+                until it stops, or "skip" the command.
+            diagonal: diagonal moves are allowed.
+            skippable: a step that fails is skipped, as Move Event's skippable.
+            debug: write the search in EasyRPG Player's log.
+            ignore: the events the route may go through: a list, or
+                variables[variables[id]]: the variable whose id is in variables[id]
+                holds how many, the next ones their ids.
+            frequency: the route's move frequency (1-8); left out, the command is
+                stored without it and EasyRPG Player uses 3.
+
+        ``easyrpg.pathfinder(event=player, x=19, y=20, diagonal=True, frequency=8)`` (2003)
+        """
+
+    def call_movement_action(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Not run by EasyRPG Player (raw parameters). (2050)"""
+
+    def wait_for_single_movement(
+        self,
+        *params: int,
+        event: Character = ...,
+        max_failures: EasyValue = 0,
+        result: Variable | None = None,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Wait until the move route of one event ends.  max_failures: after this many
+        failed moves the route is given up (0: wait until it ends); result: the
+        variable that gets 1 when the route ends, 0 when it is given up
+        (variables[variables[id]]: the variable whose id is in variables[id]).
+        ``easyrpg.wait_for_single_movement(event=haru, result=variables.arrived)`` (2051)"""
+
+    def animate_variable(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Not run by EasyRPG Player (raw parameters). (2052)"""
+
+    def set_interpreter_flag(
+        self,
+        *params: int,
+        patch: InterpreterFlag | InterpreterFlagNumber = ...,
+        on: bool | EasyValue = ...,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Turn a patch on or off for the event running the command and the events it
+        calls, until it ends.  on: True / False, or a value (0: off).  A name in
+        another case (EasyRPG Player reads any) keeps the raw form.
+        ``easyrpg.set_interpreter_flag(patch="maniac", on=True)`` (2053)"""
+
+    def process_json(
+        self,
+        *params: int,
+        op: JsonOperation | Variable = ...,
+        json: Text = ...,
+        path: Text = "",
+        target: Switch | Variable | StringVar = ...,
+        expand: bool = False,
+        hex: bool = False,
+        pretty: bool = False,
+        keys_object: bool = False,
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Read or change a JSON value (see JsonOperation).
+
+        Args:
+            op: the operation, or variables[id] holding its number (0 get ... 8 contains).
+            json: the JSON: a text the command holds, strings[id], strings[variables[id]]
+                or strings[variables[variables[id]]]; the operations that change it
+                need a string variable.
+            path: where in the JSON, as a JSON pointer ("/items/0"; "": all of it): a
+                text, strings[id] or strings[variables[id]].
+            target: the switch, variable or string variable the value goes into (or
+                comes from: "set", "push"), by id, variables[id] or
+                variables[variables[id]]: ``strings[variables.slot]``.
+            expand: the path's codes are replaced first (\\V[n], \\T[n]...).
+            hex: the same, numbers in hexadecimal (expand wins).
+            pretty: a string target gets the JSON indented.
+            keys_object: "get_keys" writes ``{"keys": [...]}``.
+
+        ``easyrpg.process_json(op="get", json=strings.save, path="/gold", target=variables.gold)`` (2055)
+        """
+
+    def clone_map_event(
+        self,
+        *params: int,
+        map: EasyValue = 0,
+        event: EasyValue = ...,
+        x: EasyValue = ...,
+        y: EasyValue = ...,
+        new_id: EasyValue = 0,
+        name: Text = "",
+        extra: Extra = (),
+        text: str = "",
+    ) -> None:
+        """Copy an event of this map (map 0) or of another one (``maps.lab``) to a
+        cell of this map, until the map is entered again (save games keep it).
+        event: the id of the event to copy; new_id: the copy's id (0 or less: the next
+        free one; an id in use replaces its event); name: the copy's name ("": the
+        source's), a text, strings[id] or strings[variables[id]].
+        ``easyrpg.clone_map_event(event=3, x=7, y=2, name="Copy")`` (2056)"""
+
+    def destroy_map_event(self, *params: int, event: Character = ..., extra: Extra = (), text: str = "") -> None:
+        """Remove an event from the map until it is entered again (save games keep it
+        removed; erase() only hides it).  Left out: the event running the command
+        (this; ``event=this`` is stored as 10005).
+        ``easyrpg.destroy_map_event(event=events[variables.target])`` (2057)"""
+
+    def string_picture_menu(self, *params: int, extra: Extra = (), text: str = "") -> None:
+        """Not run by EasyRPG Player (raw parameters). (2058)"""
+
+    def __getattr__(self, command: str) -> Callable[..., None]:
+        """Other EasyRPG commands, by code (command_2099, ...): raw parameters as
+        positional numbers, text=..."""
+        ...
+
+
 # `variables` and `switches` come from the game's database/variables.py and
 # database/switches.py (classes of rpgsync.tables), which name them.
 items = Items()
@@ -1726,6 +1937,7 @@ timer2 = Timer()
 game = GameState()
 dyn = DynRPG()
 maniac = ManiacPatch()
+easyrpg = EasyRPG()
 V = VV = VVV = v = vv = vvv = N = NV = NVV = n = nv = nvv = _DynTokenPrefix()
 word = _Words()
 """Unquoted text in a DynRPG call: ``word.end``, ``word("Simu-Com Faceset 00")`` (see Word)."""
@@ -2619,13 +2831,30 @@ def continue_loop(levels: int = 1) -> None:
     """Maniac Patch: go on with the next turn of the loop (inside one, write ``continue``)."""
 
 
-SystemFunction = Literal["save", "load", "party", "screen_mode", "options", "debug", "license", "reset"]
+SystemFunction = Literal[
+    "save",
+    "load",
+    "party",
+    "screen_mode",
+    "options",
+    "debug",
+    "license",
+    "reset",
+    "main_menu",
+    "items",
+    "order",
+    "settings",
+    "language",
+]
 
 
 def call_system_function(function: SystemFunction, option: int | Literal["toggle", "window", "fullscreen"] = 0) -> None:
     """Maniac Patch: open the save / load / party menu, change the screen mode
     (``call_system_function("screen_mode", "fullscreen")``), open the options, debug or
-    license window, or reset the game.  ``open_save_menu()`` is the plain save menu."""
+    license window, or reset the game.  ``open_save_menu()`` is the plain save menu.
+    EasyRPG Player (with "easyrpg" in ``patches``) also opens the scenes of its menu,
+    without option: "main_menu", "items", "order", "settings", "language" (its
+    language menu, for a game with translations)."""
 
 
 def disable_system_functions(
@@ -2785,7 +3014,8 @@ def cmd(
     """Any event command by code or name with its raw parameters, e.g.
     ``cmd("TintScreen", 100, 100, 100, 100, 20, 1)``.  ``with cmd(...):``
     opens a block for commands that have one.  rpgsync uses it only for
-    patch commands (Maniac, EasyRPG) and unusual data."""
+    unusual data and the commands of unknown patches (Maniac and EasyRPG
+    commands are ``maniac.name(...)`` and ``easyrpg.name(...)``)."""
     return nullcontext()
 
 
@@ -2815,6 +3045,8 @@ __all__ = [
     "DynRPG",
     "DynString",
     "DynToken",
+    "EasyRPG",
+    "EasyValue",
     "Enemies",
     "Enemy",
     "EquipSlot",
@@ -2825,8 +3057,11 @@ __all__ = [
     "FlashMode",
     "Frequency",
     "GameState",
+    "InterpreterFlag",
+    "InterpreterFlagNumber",
     "Item",
     "Items",
+    "JsonOperation",
     "Layer",
     "ManiacPatch",
     "ManiacValue",
@@ -2878,6 +3113,7 @@ __all__ = [
     "Vehicle",
     "VehicleCharacter",
     "WeatherKind",
+    "WhileMoving",
     "Word",
     "actors",
     "add_battle_command",
@@ -2911,6 +3147,7 @@ __all__ = [
     "db_name",
     "disable_system_functions",
     "dyn",
+    "easyrpg",
     "enable_combo",
     "end_battle",
     "enemies",

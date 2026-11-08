@@ -253,12 +253,60 @@ variables, and new database fields.
 
 ## EasyRPG commands
 
-EasyRPG Player's own event commands (codes 2000-2999: JSON processing, clone
-or destroy map events, pathfinding, ...).
+EasyRPG Player's own event commands (codes 2000-2999: pathfinding, JSON, clone or
+destroy map events, ...). EasyRPG Player runs them with `EasyRPG=1` in the `[Patch]`
+section of `EasyRPG.ini`; RPG_RT doesn't know them.
 
-- **In scripts:** raw lines, `cmd(2055, 0, 0, 1, ..., text="/array")`.
-- **`check`:** needs `"easyrpg"` in `patches`, or the codes in `allow_commands`.
-- These commands only run in EasyRPG Player.
+- **EasyRPG commands** are `easyrpg.name(...)`, with named arguments, typed in
+  `rpgsync/dsl.py` (class `EasyRPG`):
+
+  ```python
+  easyrpg.trigger_event_at(x=variables.x, y=variables.y, face_player=False)
+  easyrpg.pathfinder(event=player, x=19, y=20, diagonal=True, ignore=[haru], frequency=8)
+  easyrpg.wait_for_single_movement(event=player, max_failures=10, result=variables.arrived)
+  easyrpg.set_interpreter_flag(patch="maniac", on=True)
+  easyrpg.process_json(op="get", json=strings.save, path="/gold", target=variables.gold)
+  easyrpg.clone_map_event(map=maps.lab, event=3, x=7, y=2, name="Copy")
+  easyrpg.destroy_map_event(event=events[variables.target])
+  call_system_function("language")  # Maniac's Call System Functions: EasyRPG Player's scenes
+  ```
+
+  | Command | Arguments |
+  |---|---|
+  | `trigger_event_at` (2002) | `x`, `y`; `face_player` (left out: the command's first version, which turns the event to the hero) |
+  | `pathfinder` (2003) | `event`, `x`, `y`, `search_limit` (500), `max_steps` (-1: all), `while_moving` (`"replace"`, `"wait"`, `"skip"`), `diagonal`, `skippable`, `debug`, `ignore` (a list of events, or `variables[variables[id]]`: how many, then their ids), `frequency` (left out: not stored, EasyRPG Player uses 3) |
+  | `wait_for_single_movement` (2051) | `event`, `max_failures` (0: until the route ends), `result` (a variable: 1 when the route ends, 0 when given up) |
+  | `set_interpreter_flag` (2053) | `patch` (`"destiny"`, `"dynrpg"`, `"maniac"`, `"common-this"`, `"pic-unlock"`, `"key-patch"`, `"rpg2k3-cmds"` or `"rpg2k3-commands"`, `"rpg2k-battle"`, or its number 1-8), `on` |
+  | `process_json` (2055) | `op` (`"get"`, `"set"`, `"get_length"`, `"get_keys"`, `"get_type"`, `"remove"`, `"push"`, `"pop"`, `"contains"`), `json`, `path` (a JSON pointer), `target` (a switch, variable or string variable), `expand` / `hex` (the path's `\V[n]` codes replaced), `pretty`, `keys_object` |
+  | `clone_map_event` (2056) | `map` (0: this one), `event` (its id), `x`, `y`, `new_id` (0: the next free one), `name` ("": the source's) |
+  | `destroy_map_event` (2057) | `event` (left out: the event running it) |
+
+- **Values** are `EasyValue`: a number, `variables[n]` or `variables[variables[n]]`
+  (EasyRPG Player reads the pointer with the Maniac Patch only). An event is `this`,
+  `player`, a vehicle, `events[id]`, an event of the map by name, or
+  `events[variables[n]]`. A switch, variable or string variable the command reads or
+  writes is named by id, `variables[n]` or `variables[variables[n]]`:
+  `target=strings[variables.slot]`. Texts (the JSON, its path, a name) are a text
+  the command holds, `strings[n]` or `strings[variables[n]]`. When Process JSON holds
+  both, its text is the path, then the JSON (EasyRPG Player reads the path first; the
+  EasyRPG wiki says the reverse); their lengths count characters, not bytes.
+- **Raw parameters** (positional numbers) where a value doesn't fit the named form:
+  a patch name in another case (`"Maniac"`; EasyRPG Player reads any case), a value
+  read from a switch, Process JSON's target kind from a variable, Pathfinder waiting
+  and skipping at once, a command shorter than EasyRPG Player reads. Also for the
+  commands liblcf knows that EasyRPG Player doesn't run: `easyrpg.call_movement_action(...)`
+  (2050), `easyrpg.animate_variable(...)` (2052), `easyrpg.string_picture_menu(...)`
+  (2058). Other codes are `easyrpg.command_NNNN(...)`, and `cmd(2055, ...)` lines of
+  older scripts still sync.
+- **Call System Functions** (the Maniac Patch's Open Save Menu) opens the scenes of
+  EasyRPG Player's menu: `call_system_function("main_menu")`, `"items"`, `"order"`,
+  `"settings"`, `"language"` (its language menu, for a game with translations).
+  Skills, equipment and status take a hero: raw parameters.
+- **`check`:** an EasyRPG command needs `"easyrpg"` in `patches` (or its code in
+  `allow_commands`). Warnings: an EasyRPG command using what EasyRPG Player reads with
+  the Maniac Patch only (`variables[variables[n]]`, a string variable as Process JSON's
+  target, a clone's name from a string variable) without `"maniac"`; one of EasyRPG
+  Player's scenes in Call System Functions without `"easyrpg"`.
 
 ## Power Mode 2003
 

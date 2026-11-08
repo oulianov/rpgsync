@@ -14,6 +14,7 @@ writes the forms the other modules don't::
     events[variables.target].erase()         # Erase Event of another event
     events[3].restore()                      # ... bring an erased event back
     call_system_function("load")             # Call System Functions (Open Save Menu)
+    call_system_function("language")         # ... EasyRPG Player's scenes
     disable_system_functions(save=True)      # Control System Functions (Change Save Access)
 
 wait(), play_bgm(), face(), message_options() take their Maniac options as
@@ -26,6 +27,7 @@ import ast
 from collections.abc import Iterator
 
 from . import commands as K
+from . import easyrpg
 from .commands import Call, CompileError, Ctx, pystr
 from .lcf import Command
 
@@ -255,6 +257,8 @@ def decode(c: Command, ctx: Ctx, in_loop: bool = False) -> Iterator[str]:
         if in_loop and p[1] == 0:
             yield word
         yield "%s_loop(%s)" % (word, "levels=%d" % (p[1] + 1) if p[1] else "")
+    elif c.code == 11910 and len(p) == 1 and p[0] in easyrpg.SYSTEM_FUNCTIONS:
+        yield "call_system_function(%s)" % pystr(easyrpg.SYSTEM_FUNCTIONS[p[0]])  # EasyRPG Player's scenes
     elif c.code == 11910 and len(p) == 2 and 0 <= p[0] < len(SYSTEM_FUNCTIONS):
         name = SYSTEM_FUNCTIONS[p[0]]
         if name == "screen_mode" and 0 <= p[1] < len(SCREEN_MODES):
@@ -290,6 +294,18 @@ def encode_call(call: Call, ctx: Ctx) -> Command | None:
         return C(12220, [1, 0])
     if t is None and call.name == "call_system_function":
         a = K.Args(call, ["function", "option"])
+        function = a.req("function")
+        scenes = {n: code for code, n in easyrpg.SYSTEM_FUNCTIONS.items()}  # EasyRPG Player's: no option
+        if isinstance(function, str) and function in scenes:
+            if "option" in a.values:
+                raise CompileError("call_system_function(%s) takes no option" % pystr(function), call.node)
+            return C(11910, [scenes[function]])
+        if not (P.is_int(function) or isinstance(function, str) and function in SYSTEM_FUNCTIONS):
+            raise CompileError(
+                "call_system_function(): function is one of %s"
+                % ", ".join(pystr(n) for n in SYSTEM_FUNCTIONS + list(scenes)),
+                call.node,
+            )
         f = a.enum("function", SYSTEM_FUNCTIONS)
         opt = a.get("option", 0)
         if f == SYSTEM_FUNCTIONS.index("screen_mode") and isinstance(opt, str):
