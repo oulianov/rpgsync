@@ -19,9 +19,9 @@ rpgsync push, then open the editor and keep editing there. Keep the editor
 closed while you edit the Python files: it keeps its own copy of the game in
 memory and ignores them.
 
-With the EasyRPG Editor (https://github.com/oulianov/Editor): turn on its
-rpgsync mode (Settings). It reloads what changes on disk and shows it as well
-as it can, so both can stay open while rpgsync runs.
+With the EasyRPG Editor (https://github.com/oulianov/Editor): its rpgsync
+mode (Settings, on by default in recent versions) reloads what changes on disk
+and shows it as well as it can, so both can stay open while rpgsync runs.
 """
 
 from __future__ import annotations
@@ -69,9 +69,10 @@ EDITORS_HELP = (
     "[bold]rpgsync push[/bold], then open the editor and keep editing there. "
     "Keep the editor closed while you edit the Python files: it keeps its own copy "
     "of the game in memory and ignores your Python edits.\n\n"
-    "With the EasyRPG Editor (https://github.com/oulianov/Editor): make sure its "
-    "[bold]rpgsync mode[/bold] is on (Settings). It reloads the changes made on disk "
-    "and shows them as well as it can, so it can stay open while rpgsync runs."
+    "With the EasyRPG Editor (https://github.com/oulianov/Editor): its "
+    "[bold]rpgsync mode[/bold] (Settings, on by default in recent versions) reloads "
+    "the changes made on disk and shows them as well as it can, so it can stay open "
+    "while rpgsync runs."
 )
 
 app = typer.Typer(
@@ -641,7 +642,7 @@ def watch(
     """Keep the game and its scripts in sync until Ctrl+C (also: `rpgsync [FOLDER]`).
     The first time, the scripts are written and their folder is set up.
 
-    For the EasyRPG Editor with its rpgsync mode on, which reloads what changes on disk.
+    For the EasyRPG Editor, whose rpgsync mode (on by default) reloads what changes on disk.
     With the RPG Maker 2000/2003 editor, keep it closed while you edit the scripts."""
     syncer = _open(project)
     ui = syncer.ui
@@ -661,9 +662,9 @@ def watch(
         )
         ui.bullet(
             ("EasyRPG Editor: ", "bold"),
-            "turn on its ",
+            "its ",
             ("rpgsync mode", "bold"),
-            " (Settings): it reloads what changes on disk, so it can stay open",
+            " (Settings, on by default) reloads what changes on disk, so it can stay open",
         )
         ui.bullet(
             ("rpgsync status", "bold cyan"),

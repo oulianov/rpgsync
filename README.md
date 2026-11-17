@@ -140,9 +140,9 @@ rpgsync clean     # delete the backups of overwritten files
 > **The EasyRPG Editor is the recommended editor to use with rpgsync.** It stays open
 > while rpgsync runs, and merges your Python edits with the changes you make in it.
 
-In the [EasyRPG Editor](https://github.com/oulianov/Editor), turn on **rpgsync mode**
-(Settings). The Editor reloads the changes made on disk and shows them as well as it
-can, so it can stay open while `rpgsync` runs. When both sides change the same game,
+The [EasyRPG Editor](https://github.com/oulianov/Editor) reloads the changes made on
+disk and shows them as well as it can, so it can stay open while `rpgsync` runs (its
+**rpgsync mode**, in Settings, on by default in recent versions). When both sides change the same game,
 it merges what each changed and only asks when the same entry changed on both sides.
 
 ### With the RPG Maker 2000/2003 editor
