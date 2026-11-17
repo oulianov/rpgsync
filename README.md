@@ -119,10 +119,11 @@ own files (`.rpgsync/`).
 
 ```bash
 rpgsync           # keep the game and the scripts in sync, until Ctrl+C
-rpgsync status    # what is pending, on which side
+rpgsync status    # what is pending, on which side, write nothing
 rpgsync pull      # game -> scripts
 rpgsync push      # scripts -> game
 rpgsync check     # compile and check the scripts (types too), write nothing
+rpgsync upgrade   # bring the scripts folder to a newer rpgsync (see Upgrading rpgsync)
 rpgsync clean     # delete the backups of overwritten files
 ```
 
@@ -133,7 +134,7 @@ rpgsync clean     # delete the backups of overwritten files
 - `pull --force` overwrites scripts that have unsynced edits; `push --force` writes
   every script, not only those changed since the last sync.
 - `rpgsync locate --map 4 --event 12` prints where the scripts write an event
-  (`FILE:LINE`).
+  (`FILE:LINE`), and writes nothing.
 - `rpgsync COMMAND --help` lists a command's options.
 
 ### With the EasyRPG Editor
@@ -209,17 +210,22 @@ The `rpgsync` command:
 uv tool upgrade rpgsync
 ```
 
-A game, in its `Scripts/` folder:
+A game, from its folder:
 
 - **A fix release** (0.1.0 → 0.1.3) writes the same scripts:
 
   ```bash
-  uv sync --upgrade-package rpgsync
+  rpgsync upgrade
   ```
 
-  then commit `uv.lock`.
+  It moves the game's `Scripts/uv.lock` to the latest fix release of its version and
+  installs it in the scripts' Python environment, and writes the files a newer rpgsync
+  adds to the scripts folder (`database/game_types.py`, the tests' settings...). Then
+  `rpgsync pull` writes the scripts this version adds, if any, and you commit
+  `uv.lock`. A scripts folder linked to this computer's rpgsync folder (a developer's)
+  only gets its files and its environment updated.
 - **A new minor version** (0.1.x → 0.2.0) writes the scripts differently. With
-  nothing pending (`rpgsync status`):
+  nothing pending (`rpgsync status`), in its `Scripts/` folder:
 
   ```bash
   uv add "rpgsync~=0.2.0"

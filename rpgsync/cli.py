@@ -283,12 +283,15 @@ def _locate(project: str | None) -> Located:
     return found
 
 
-def _open(project: str | None) -> CliSyncer:
+def _open(project: str | None, read_only: bool = False) -> CliSyncer:
+    """The syncer of a game; read_only: the scripts folder is left as it is (status, locate)."""
     try:
         loc = _locate(project)
     except ProjectNotFound as e:
         raise _fail(str(e)) from None
-    project = Project(loc.game, loc.scripts)
+    project = Project(loc.game, loc.scripts, read_only=read_only)
+    if read_only:
+        return CliSyncer(project)
     # a game folder copied or renamed: its scripts' commands still run the old one's
     old = repair_venv(project.script_dir)
     if old:
@@ -735,7 +738,7 @@ def locate(
     """Print FILE:LINE where a script writes an event, its page or one of its commands, a
     map (--map alone) or a map's entry in the map tree (for editors: open the script
     there). Writes nothing."""
-    syncer = _open(project)
+    syncer = _open(project, read_only=True)
     proj = syncer.project
     ctx = proj.context()
     if map_tree is not None:
@@ -828,7 +831,7 @@ def _locate_tree_entry(proj: Project, map_id: int) -> tuple[str, int]:
 
 def status(project: ProjectArg = None, map: MapOpt = None, no_common: NoCommonOpt = False):
     """Show what is pending on each side, without writing anything."""
-    syncer = _open(project)
+    syncer = _open(project, read_only=True)
     ui = syncer.ui
     engine = ENGINES.get(syncer.project.context().engine, syncer.project.context().engine)
     ui.print("On ", (os.path.basename(syncer.project.game_dir), "bold"), " (%s)" % engine)
@@ -1260,11 +1263,32 @@ def clean(
     ui.print(("deleted", "green"), kind="ok")
 
 
+def upgrade(project: ProjectArg = None):
+    """Bring the game's scripts folder to the rpgsync running: its files, and the rpgsync
+    of its Python environment (the latest release, or this computer's rpgsync folder)."""
+    syncer = _open(project)  # writes the files an older rpgsync did not, and the link
+    ui, script_dir = syncer.ui, syncer.project.script_dir
+    pyproject = Path(script_dir) / "pyproject.toml"
+    if not pyproject.exists():
+        raise _fail("%s is not set up yet: run `rpgsync pull` first" % script_dir)
+    if not shutil.which("uv"):
+        raise _fail("uv is needed to upgrade the scripts' Python environment")
+    from . import __version__ as rpgsync_version
+    from .scaffold import _uses_link
+
+    if not _uses_link(pyproject.read_text(encoding="utf-8")):  # a release pinned in uv.lock
+        with ui.console.status("Upgrading rpgsync in uv.lock..."):
+            subprocess.run(["uv", "lock", "--quiet", "--upgrade-package", "rpgsync"], cwd=script_dir, check=True)
+    _uv_sync(script_dir, ui)
+    ui.print(("scripts folder up to date with rpgsync %s" % rpgsync_version, "green"), kind="ok")
+    ui.print("run `rpgsync pull` to write the scripts this version adds", kind="info")
+
+
 # registered here so that `rpgsync --help` lists them in this order
-for _command in (watch, status, check, pull, push, clean, locate):
+for _command in (watch, status, check, pull, push, upgrade, clean, locate):
     app.command()(_command)
 
-COMMANDS = {"watch", "status", "check", "pull", "push", "clean", "locate"}
+COMMANDS = {"watch", "status", "check", "pull", "push", "upgrade", "clean", "locate"}
 
 
 def main() -> None:

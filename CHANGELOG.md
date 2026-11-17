@@ -16,6 +16,21 @@ A game's `Scripts/pyproject.toml` depends on the version that set it up,
 pins the exact one. [Upgrading rpgsync](README.md#upgrading-rpgsync) moves a game to a
 newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
+## 0.3.1
+
+- `rpgsync upgrade` brings a game's scripts folder to a newer rpgsync: its `uv.lock`
+  moves to the latest fix release of its version, installed in the scripts' Python
+  environment, and the files a newer rpgsync adds to the folder are written
+  (`database/game_types.py`...). `rpgsync pull` then writes the scripts it adds. A
+  folder linked to this computer's rpgsync folder only gets its files and environment
+  updated. See [Upgrading rpgsync](README.md#upgrading-rpgsync).
+- `rpgsync status` and `rpgsync locate` write nothing: they no longer bring the scripts
+  folder up to date with the installed rpgsync (`database/game_types.py`, `pyproject.toml`,
+  the scripts' Python environment) nor save the settings they detect in
+  `.rpgsync/config.json`; the next sync does.
+- The messages about the EasyRPG Editor say that its rpgsync mode is on by default in
+  its recent versions.
+
 ## 0.3.0
 
 The scripts of games using EasyRPG Player's commands change: `rpgsync pull` writes them
