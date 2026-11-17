@@ -1,5 +1,7 @@
 # rpgsync
 
+[![PyPI](https://img.shields.io/pypi/v/rpgsync)](https://pypi.org/project/rpgsync/)
+
 A Python twin of your RPG Maker 2000/2003 game.
 
 **rpgsync** turns the events of your game into readable Python scripts, and keeps both sides in sync while you work.
