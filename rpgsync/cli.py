@@ -299,7 +299,27 @@ def _open(project: str | None, read_only: bool = False) -> CliSyncer:
     # files that an older rpgsync did not write; uv.lock and .venv follow pyproject.toml
     if str(Path(project.script_dir) / "pyproject.toml") in update_scripts_project(project):
         _uv_sync(project.script_dir, UI(err=True))
+    _restart_if_uninstalled()
     return CliSyncer(project)
+
+
+def _restart_if_uninstalled() -> None:
+    """Run the command again when the rpgsync running was just uninstalled: `uv run rpgsync`
+    starts the release uv.lock pins in the scripts' .venv, a developer's rpgsync folder linked
+    as .rpgsync/rpgsync replaces it there (update_scripts_project), and the modules this one
+    has not imported yet are gone.  The command starts again, from the linked folder."""
+    if Path(__file__).is_file() or os.environ.get("RPGSYNC_RESTARTED"):
+        return
+    os.environ["RPGSYNC_RESTARTED"] = "1"  # once: the next one runs from where it is installed now
+    argv = [sys.executable, "-m", "rpgsync", *sys.argv[1:]]
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.name == "nt":  # os.execv starts another process there: the console would not wait for it
+        try:
+            sys.exit(subprocess.call(argv))
+        except KeyboardInterrupt:
+            sys.exit(130)
+    os.execv(sys.executable, argv)
 
 
 def _uv_sync(script_dir: str, ui: UI) -> None:

@@ -16,6 +16,14 @@ A game's `Scripts/pyproject.toml` depends on the version that set it up,
 pins the exact one. [Upgrading rpgsync](README.md#upgrading-rpgsync) moves a game to a
 newer one; [Releasing](docs/development.md#releasing) makes a new one.
 
+## 0.3.2
+
+- `uv run rpgsync` in a scripts folder where a developer's rpgsync folder is linked as
+  `.rpgsync/rpgsync` no longer stops on an `ImportError` (`cannot import name 'dsl'`):
+  installing that folder in the scripts' `.venv` uninstalled the release `uv run` had
+  started, modules not imported yet included. The command now starts again, once, from
+  the linked folder.
+
 ## 0.3.1
 
 - `rpgsync upgrade` brings a game's scripts folder to a newer rpgsync: its `uv.lock`

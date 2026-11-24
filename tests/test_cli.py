@@ -172,6 +172,24 @@ def test_removed_commands_are_gone():
         assert command not in cli.COMMANDS
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="os.execv starts another process on Windows")
+def test_restarts_once_when_its_release_was_uninstalled(project, monkeypatch, tmp_path):
+    """`uv run rpgsync` runs the release in the scripts' .venv, which a developer's linked
+    rpgsync folder replaces there when it starts, modules not imported yet included: the
+    command starts again, once, from where rpgsync is installed now."""
+    execs = []
+    monkeypatch.setattr(cli.os, "execv", lambda path, argv: execs.append(argv))
+    monkeypatch.setattr(cli.sys, "argv", ["rpgsync", "push", str(project)])
+    monkeypatch.setenv("RPGSYNC_RESTARTED", "")
+    _cli("push", project)
+    assert execs == []  # still installed
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "uninstalled" / "cli.py"))
+    _cli("push", project)
+    assert execs == [[sys.executable, "-m", "rpgsync", "push", str(project)]]
+    _cli("push", project)  # the restarted command: never again
+    assert len(execs) == 1
+
+
 def test_push_logs_timing(project):
     _edit(project / "Scripts" / "Map0001.py", "variables.variable_0001 = 9999999", "variables[1] = 1234567")
     out = _cli("push", project, "--map", "1")

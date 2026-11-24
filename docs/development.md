@@ -35,8 +35,9 @@ ln -s /path/to/rpgsync /path/to/MyGame/Scripts/.rpgsync/rpgsync
 Each rpgsync command then installs that folder, editable, in the scripts'
 environment: your editor, the tests and `rpgsync check` use your rpgsync, while
 `pyproject.toml` and `uv.lock` stay as they are for the others. `uv sync` and `uv run`
-put the locked release back until the next rpgsync command: run the tests with
-`uv run --no-sync pytest`. To go back to the release, delete the link and run `uv sync`.
+put the locked release back until the next rpgsync command (`uv run rpgsync` starts that
+release, which installs your folder in its place and runs the command again from it): run
+the tests with `uv run --no-sync pytest`. To go back to the release, delete the link and run `uv sync`.
 
 uv can't override a locked package on one computer only (`[tool.uv.sources]` is only
 read from `pyproject.toml`, and `uv.lock` records it), hence this link.

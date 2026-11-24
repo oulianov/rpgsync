@@ -513,10 +513,6 @@ def update_scripts_project(project: Project) -> list[str]:
     if text != original:
         pyproject.write_text(text, encoding="utf-8")
         written.append(str(pyproject))
-    if _uses_link(text):
-        link_rpgsync(root)
-    else:
-        install_linked_rpgsync(root)
     path = root / "database" / "game_types.py"
     content = game_types(project)
     if not path.exists() or path.read_text(encoding="utf-8") != content:
@@ -525,6 +521,12 @@ def update_scripts_project(project: Project) -> list[str]:
         written.append(str(path))
     if update_test_scripts(root):
         written.append(str(root / "tests" / "test_scripts.py"))
+    # last: installing a developer's rpgsync folder in .venv uninstalls the release there,
+    # which may be the rpgsync running (`uv run rpgsync`), and its modules not imported yet
+    if _uses_link(text):
+        link_rpgsync(root)
+    else:
+        install_linked_rpgsync(root)
     return written
 
 
